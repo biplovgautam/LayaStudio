@@ -2,7 +2,9 @@
 
 # LayaStudio
 
-**Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on your own data, on your own Mac — and prove the result is better before you ship it.**
+**Build your own decision engine on your Mac, in minutes.**
+
+Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on your own data, locally — and prove the result is better before you ship it. For the decisions *your* product makes, a small model you tuned yourself can beat a general hosted API: more accurate on your labels, ~10× faster because there is no network, and free to run.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
@@ -29,7 +31,21 @@ Laya answers typed questions — `choice`, `score`, `noul` — in a single forwa
 
 The only published way to fine-tune Laya is a PyTorch notebook for two cloud GPUs, which means copying your data to someone else's machine. LayaStudio came out of needing the opposite: adapt Laya to a real product's decisions **on the laptop**, without the data ever leaving it, and with honest before/after measurement so "fine-tuned" is a number rather than a feeling.
 
+The goal is simple: **any Mac owner should be able to turn a general model into a specialist for their own decisions, in minutes, and see exactly how much better it got.**
+
 It is built on top of [`laya-mlx`](https://pypi.org/project/laya-mlx/), the native MLX runtime for Laya, and it is a separate project: an app around that runtime, not a fork of it.
+
+### Local specialist vs hosted decision API
+
+| | Hosted decision API | Fine-tuned Laya, here |
+|---|---|---|
+| Latency | ~300–700 ms per call, network-bound (community reports) | **44 ms** on an M4, measured below |
+| Cost | per call, forever | **$0** after the download |
+| Accuracy on *your* labels | general-purpose | trained on your data — see the table below |
+| Data | leaves your machine | never leaves it |
+| Offline | no | yes |
+
+Latency and price for hosted APIs are as reported by the community catalog at [madewithlaya.com](https://www.madewithlaya.com/); we did not run a paid API ourselves, so treat those as their numbers, not ours. Everything in the tables below was measured on the machine described.
 
 ## What you get
 
@@ -42,6 +58,7 @@ It is built on top of [`laya-mlx`](https://pypi.org/project/laya-mlx/), the nati
 | 🚦 **Production view** | Coverage/accuracy table for confidence gating, confusion matrices, and the most confident remaining mistakes |
 | 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint that loads in `laya-mlx` and in upstream PyTorch `laya` on Linux/NVIDIA |
 | 🔒 **Local by construction** | Binds to 127.0.0.1, no external scripts in the page, jobs run with `HF_HUB_OFFLINE=1` |
+| 🐍 **Proof, not vibes** | A built-in Snake task where the fine-tuned model plays *unassisted* — the base model dies on move one |
 
 ## Install and run
 
@@ -73,7 +90,7 @@ Every step reports on the page, and nothing blocks you from looking around while
 
 ## Five-minute tour
 
-1. **Datasets** → the examples are already there (Emotion, prompt injection, Banking77), or upload your own JSONL/CSV.
+1. **Datasets** → the examples are already there (Emotion, prompt injection, Banking77, Snake), or upload your own JSONL/CSV.
 2. **Fine-tune** → pick a dataset, keep the *Balanced* recipe, press start. Watch loss and validation accuracy live.
 3. **Runs & results** → read accuracy before/after, calibration, significance, gating and the remaining mistakes.
 4. **Playground** → *Try in playground* compares the base and fine-tuned models side by side on any text.
@@ -89,6 +106,7 @@ Real runs on a **MacBook with an Apple M4 and 16 GB**, default *Balanced* recipe
 | Emotion, 6 labels | English 421M | 1,079 | 600 | **47.5% → 88.2%** | 0.45 → 0.88 | 0.342 → 0.022 | 255 / 11 | <1e-60 | 11.8 min |
 | Prompt injection, yes/no | English 421M | 492 | 116 | **70.7% → 95.7%** | 0.69 → 0.96 | 0.280 → 0.027 | 29 / 0 | 4e-9 | 5.7 min |
 | Banking77, 77 intents | Multilingual 322M | 900 | 770 | **34.2% → 64.2%** | 0.32 → 0.63 | 0.462 → 0.024 | 246 / 15 | 5e-55 | 18.4 min |
+| Snake moves, 4 directions | Multilingual 322M | 2,339 | 600 | **15.8% → 98.8%** | 0.11 → 0.99 | 0.246 → 0.002 | 500 / 2 | <1e-140 | 18.3 min |
 
 Notes, because numbers without caveats are marketing: Banking77 squeezes 77 labels into one option budget, so its labels are clipped to about four tokens each — that is the architecture's known weak spot, and its validation accuracy was still climbing at the last epoch (more epochs or the 421M English model would go further). The public community fine-tune reached ~79% with the English model and more data.
 
@@ -102,6 +120,46 @@ Notes, because numbers without caveats are marketing: Banking77 squeezes 77 labe
 | Fine-tuned | **76%** | **95.6%** |
 
 Your numbers will differ — these are public benchmarks, not your traffic.
+
+## Does it really learn? The Snake test
+
+Classification accuracy is easy to believe. Playing a game is not: the model has to act, and a wrong move ends the run. So LayaStudio ships a Snake task as a built-in example, and it is deliberately harder than the well-known Laya Snake demo — in that demo a classical planner labels each option ("Safe. Best route to food."), so the model only reads labels.
+
+Here the model gets the **board** and the facts a game engine already has — which neighbouring cells are free, and where the food is — and four plain directions. No advice, no safety layer, no retries:
+
+```text
+Snake 12x8. Head (6, 2). Food (6, 4) (2 down). Length 8.
+Next to the head: UP reverse, DOWN free, LEFT free, RIGHT body.
+Board, top row first: . empty, H head, o body, F food.
+............
+......oo....
+......Ho....
+.......o....
+......Fo....
+.......o....
+.......o....
+............
+```
+
+Training rows come from a planner that keeps room to survive and then heads for the food, with 20% exploration so the data covers the messy boards a fumbling player creates. Then the model plays **unassisted**: its top-1 answer is executed, and an illegal move is a death.
+
+| Playing 10 unassisted games | Move accuracy (600 held-out boards) | Moves survived (mean / best) | Apples eaten (mean / best) | Legal moves | Agreement with the planner | Speed |
+|---|---|---|---|---|---|---|
+| Base multilingual 322M | 15.8% | **1.0** / 1 — dead on the first move of every game | 0.0 / 0 | 0% | 0% | 43 decisions/s |
+| **Fine-tuned, 18 min on an M4** | **98.8%** | **169** / 304 | **19.8** / 33 | **99.3%** | **97.9%** | 31 decisions/s |
+| The planner it learned from (ceiling) | 100% | 418 / 500 (cap) | 34.4 / 38 | 100% | 100% | — |
+
+The base model is not "a bit worse" at Snake, it is guessing: its average confidence is 0.05 (four options, so near-uniform), it answers the same direction most of the time, and two thirds of its moves are illegal — which is why every game ends immediately. After 18 minutes of fine-tuning on 2,339 boards generated on the same laptop, the same 322M model picks a legal move 99.3% of the time and eats ~20 apples a game, at 31 decisions a second with no network and no safety net.
+
+Raw per-game results: [`docs/snake-benchmark.json`](docs/snake-benchmark.json).
+
+![Snake run results](docs/snake.png)
+
+```bash
+python -m layastudio.snake dataset                    # generate the boards locally
+python -m layastudio.snake bench --model run:<id>     # play unassisted
+python -m layastudio.snake teacher                    # the planner's own ceiling
+```
 
 ## Screenshots
 
@@ -238,6 +296,7 @@ Because the layout and tensor names match the original checkpoints, the same fol
 | [`layastudio/engine.py`](layastudio/engine.py) | MLX engine: data parsing, token analysis, LoRA training, calibration, evaluation, export |
 | [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup described above |
 | [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
+| [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
 | [`docs/screenshots.py`](docs/screenshots.py) | Regenerates the screenshots in this README from a running studio |
 | `tests/` | Unit and end-to-end tests against a tiny random model |
 
@@ -268,4 +327,14 @@ uv run ruff check .
 - **laya-mlx**: the native MLX runtime this studio builds on ([PyPI](https://pypi.org/project/laya-mlx/), [GitHub](https://github.com/mizorewww/laya-mlx)).
 - **MLX**: [Apple's array framework](https://github.com/ml-explore/mlx) for Apple silicon.
 
-LayaStudio is an independent project and is not affiliated with Convai Innovations. Licensed under [Apache-2.0](LICENSE); see [NOTICE](NOTICE).
+LayaStudio is an independent project and is not affiliated with Convai Innovations.
+
+## License
+
+**Apache-2.0 — free to use, including commercially.** Clone it, run it, fine-tune Laya on your own Mac with your own data, ship the result in your product, or fork it. No fee, no key, no account, no telemetry.
+
+- **Your data stays yours.** LayaStudio never uploads it; it has nowhere to upload it to.
+- **Your fine-tuned checkpoints are yours.** They are written into your workspace; nothing in this project claims any right to them. The base weights they build on are Apache-2.0 from Convai Innovations, so the usual attribution applies when you redistribute a model.
+- **No warranty.** Apache-2.0 means as-is: measure before you ship, and the studio is built to help you do exactly that.
+
+See [LICENSE](LICENSE) for the full text and [NOTICE](NOTICE) for attribution.

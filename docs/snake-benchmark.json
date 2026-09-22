@@ -1,0 +1,380 @@
+{
+  "teacher": {
+    "model": "planner (teacher)",
+    "games": 10,
+    "moves_mean": 418.3,
+    "moves_median": 489,
+    "moves_best": 500,
+    "score_mean": 34.4,
+    "score_best": 38,
+    "legal_rate": 1.0,
+    "teacher_agreement": 1.0,
+    "deaths": 6,
+    "ms_per_decision": null,
+    "decisions_per_s": null,
+    "games_detail": [
+      {
+        "game": 0,
+        "moves": 500,
+        "score": 38,
+        "length": 42,
+        "won": false,
+        "death_reason": null,
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 1,
+        "moves": 489,
+        "score": 37,
+        "length": 41,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 2,
+        "moves": 500,
+        "score": 34,
+        "length": 38,
+        "won": false,
+        "death_reason": null,
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 3,
+        "moves": 292,
+        "score": 33,
+        "length": 37,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 4,
+        "moves": 500,
+        "score": 38,
+        "length": 42,
+        "won": false,
+        "death_reason": null,
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 5,
+        "moves": 218,
+        "score": 30,
+        "length": 34,
+        "won": false,
+        "death_reason": "wall",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 6,
+        "moves": 500,
+        "score": 35,
+        "length": 39,
+        "won": false,
+        "death_reason": null,
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 7,
+        "moves": 309,
+        "score": 33,
+        "length": 37,
+        "won": false,
+        "death_reason": "wall",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 8,
+        "moves": 436,
+        "score": 31,
+        "length": 35,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      },
+      {
+        "game": 9,
+        "moves": 439,
+        "score": 35,
+        "length": 39,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 1.0,
+        "teacher_agreement": 1.0,
+        "ms_per_decision": null
+      }
+    ]
+  },
+  "base": {
+    "model": "hub:aac6fef/laya-multilingual-mlx",
+    "games": 10,
+    "moves_mean": 1.0,
+    "moves_median": 1,
+    "moves_best": 1,
+    "score_mean": 0.0,
+    "score_best": 0,
+    "legal_rate": 0.0,
+    "teacher_agreement": 0.0,
+    "deaths": 10,
+    "ms_per_decision": 23.13937500002794,
+    "decisions_per_s": 43.2,
+    "games_detail": [
+      {
+        "game": 0,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 22.933166997972876
+      },
+      {
+        "game": 1,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 22.740291999070905
+      },
+      {
+        "game": 2,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 22.6915840030415
+      },
+      {
+        "game": 3,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 22.6120839943178
+      },
+      {
+        "game": 4,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 22.517292003612965
+      },
+      {
+        "game": 5,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 23.364458000287414
+      },
+      {
+        "game": 6,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 23.395166994305328
+      },
+      {
+        "game": 7,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 23.45062499807682
+      },
+      {
+        "game": 8,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 23.13937500002794
+      },
+      {
+        "game": 9,
+        "moves": 1,
+        "score": 0,
+        "length": 4,
+        "won": false,
+        "death_reason": "reverse",
+        "legal_rate": 0.0,
+        "teacher_agreement": 0.0,
+        "ms_per_decision": 23.173624998889863
+      }
+    ]
+  },
+  "finetuned": {
+    "model": "run:snake-balanced-multilingual-0923-005225",
+    "games": 10,
+    "moves_mean": 169.2,
+    "moves_median": 163,
+    "moves_best": 304,
+    "score_mean": 19.8,
+    "score_best": 33,
+    "legal_rate": 0.9926364945001118,
+    "teacher_agreement": 0.9794662726410825,
+    "deaths": 10,
+    "ms_per_decision": 32.638292002957314,
+    "decisions_per_s": 30.6,
+    "games_detail": [
+      {
+        "game": 0,
+        "moves": 236,
+        "score": 24,
+        "length": 28,
+        "won": false,
+        "death_reason": "wall",
+        "legal_rate": 0.9957627118644068,
+        "teacher_agreement": 0.9872881355932204,
+        "ms_per_decision": 33.051499995053746
+      },
+      {
+        "game": 1,
+        "moves": 127,
+        "score": 15,
+        "length": 19,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9921259842519685,
+        "teacher_agreement": 0.984251968503937,
+        "ms_per_decision": 31.607708006049506
+      },
+      {
+        "game": 2,
+        "moves": 131,
+        "score": 14,
+        "length": 18,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9923664122137404,
+        "teacher_agreement": 0.9770992366412213,
+        "ms_per_decision": 32.324582993169315
+      },
+      {
+        "game": 3,
+        "moves": 304,
+        "score": 33,
+        "length": 37,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9967105263157895,
+        "teacher_agreement": 0.9901315789473685,
+        "ms_per_decision": 32.69195799657609
+      },
+      {
+        "game": 4,
+        "moves": 163,
+        "score": 21,
+        "length": 25,
+        "won": false,
+        "death_reason": "wall",
+        "legal_rate": 0.9938650306748467,
+        "teacher_agreement": 0.9815950920245399,
+        "ms_per_decision": 32.630625006277114
+      },
+      {
+        "game": 5,
+        "moves": 209,
+        "score": 30,
+        "length": 34,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9952153110047847,
+        "teacher_agreement": 0.9904306220095693,
+        "ms_per_decision": 33.2282919989666
+      },
+      {
+        "game": 6,
+        "moves": 160,
+        "score": 20,
+        "length": 24,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.99375,
+        "teacher_agreement": 0.975,
+        "ms_per_decision": 31.9772499933606
+      },
+      {
+        "game": 7,
+        "moves": 103,
+        "score": 15,
+        "length": 19,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9902912621359223,
+        "teacher_agreement": 0.9805825242718447,
+        "ms_per_decision": 32.638292002957314
+      },
+      {
+        "game": 8,
+        "moves": 53,
+        "score": 6,
+        "length": 10,
+        "won": false,
+        "death_reason": "wall",
+        "legal_rate": 0.9811320754716981,
+        "teacher_agreement": 0.9622641509433962,
+        "ms_per_decision": 30.851500006974675
+      },
+      {
+        "game": 9,
+        "moves": 206,
+        "score": 20,
+        "length": 24,
+        "won": false,
+        "death_reason": "body",
+        "legal_rate": 0.9951456310679612,
+        "teacher_agreement": 0.9660194174757282,
+        "ms_per_decision": 32.901625003432855
+      }
+    ]
+  }
+}

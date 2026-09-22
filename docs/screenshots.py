@@ -111,6 +111,7 @@ SHOTS = {
     "playground": ("#/playground?run={run}&go=1&state={state}", 1400, 1400),
     "datasets": ("#/datasets", 1400, 1100),
     "guide": ("#/guide", 1400, 1000),
+    "snake": ("#/runs/{snake_run}", 1400, 1500),
 }
 STATE = "I was charged twice this month and support never replied. I want the money back today."
 
@@ -120,6 +121,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:8765")
     parser.add_argument("--run", required=True, help="Run id to screenshot")
     parser.add_argument("--dataset", required=True, help="Dataset id to screenshot")
+    parser.add_argument("--snake-run", default="", help="Run id for the Snake shot")
     parser.add_argument("--only", nargs="*", help="Subset of shots", choices=list(SHOTS))
     parser.add_argument(
         "--profile",
@@ -147,7 +149,12 @@ def main():
         url = (
             args.url
             + "/?static=1"
-            + path.format(run=args.run, dataset=args.dataset, state=quote(STATE))
+            + path.format(
+                run=args.run,
+                dataset=args.dataset,
+                snake_run=args.snake_run or args.run,
+                state=quote(STATE),
+            )
         )
         out = HERE / f"{name}.png"
         capture(
