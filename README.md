@@ -100,6 +100,10 @@ Snake model from the table below — so the **Snake arena** has something to pla
 the page opens: the base checkpoint on the left, the fine-tune on the right, same rules,
 no safety layer.
 
+A cold start on an M4 takes **40 seconds** end to end: machine check, runtime check, base
+model, that fine-tune and the four example datasets. Playing straight from the published
+copy: **196 moves, 25.7 apples, 99.4% legal moves, 40.7 decisions per second**.
+
 ```bash
 LAYASTUDIO_DEMO_MODELS="" uv run layastudio     # skip it, if you would rather not
 ```
@@ -110,9 +114,15 @@ Your fine-tuned checkpoints are yours. To put one on the Hub with a model card b
 that run's measured numbers:
 
 ```bash
-hf auth login                                                  # your own token, once
-python -m layastudio.publish run:<run-id> --repo <you>/<name>   # --dry-run writes the card only
+hf auth login                              # your own token, once; "Manage repositories" is enough
 ```
+
+```bash
+uv run python -m layastudio.publish run:<run-id> --repo <you>/<name>   # --dry-run writes the card only
+```
+
+The namespace has to be yours: publishing to someone else's returns a 403 before anything
+uploads.
 
 The card carries the before/after table, the significance test, the calibration
 temperatures, the hyperparameters and the dataset hash from that run, so what the Hub
