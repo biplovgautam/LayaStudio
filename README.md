@@ -24,7 +24,7 @@ That is the whole setup. The browser opens, and the studio finishes preparing it
 
 </div>
 
-![LayaStudio home: your decisions deserve your own model](docs/home.png)
+![LayaStudio: your decisions deserve your own model](docs/hero.png)
 
 ---
 
@@ -59,7 +59,7 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 | 🎛 **Calibration refit** | Temperatures refit per question type and option count, so the probabilities you gate on stay meaningful |
 | 🔍 **Token-budget check** | Shows which rows get silently cut and which option labels get clipped *before* you spend an hour training |
 | 🚦 **Production view** | Coverage/accuracy table for confidence gating, confusion matrices, and the most confident remaining mistakes |
-| 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint that loads in `laya-mlx` and in upstream PyTorch `laya` on Linux/NVIDIA |
+| 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint, plus verified ONNX and Core ML exports — the Core ML one runs at 17.8 ms on this Mac |
 | 🔒 **Local by construction** | Binds to 127.0.0.1, no external scripts in the page, jobs run with `HF_HUB_OFFLINE=1` |
 | 🐍 **Proof, not vibes** | A built-in Snake task where the fine-tuned model plays *unassisted* — the base model dies on move one |
 | 🎛 **A studio, not a script** | A landing page, live training charts, a side-by-side playground and a Snake arena — all served from one local file |
@@ -128,7 +128,7 @@ above.
 3. **Runs & results** → read accuracy before/after, calibration, significance, gating and the remaining mistakes.
 4. **Playground** → *Try in playground* compares the base and fine-tuned models side by side on any text.
 
-![Live training](docs/training.png)
+![A run training live: loss, validation accuracy, throughput and memory](docs/five-min-tour.png)
 
 ## Measured results
 
@@ -345,9 +345,25 @@ The export writes `model.onnx` (opset 17, dynamic batch, tokens and options) nex
 
 Exports are verified rather than assumed. The studio runs the exported graph and this machine's MLX runtime on the same real prompts and records the result: on the Snake checkpoint, **10/10 identical answers with a maximum probability difference of 2.7e-07**, at 33.6 ms per decision on this Mac's CPU.
 
-Core ML is implemented but blocked upstream: on coremltools 9, converting ModernBERT stops at an untranslated `new_ones` in its mask builder, so `--target coreml` fails with that message instead of writing something broken.
+**Core ML**, for the Apple Neural Engine:
 
-**Roadmap:** training on NVIDIA GPUs and Linux; Core ML for the Apple Neural Engine (once the converter catches up, or the mask moves outside the graph) and LiteRT for Android and NPUs; quantized variants; a batch scoring CLI; and an experiment on retraining the escalation head.
+```bash
+uv run --python 3.12 --with 'coremltools>=8' --with torch --with laya --with laya-mlx \
+  python -m layastudio.export run:<id> --target coreml
+```
+
+Three rewrites make the graph convertible, each checked against the original before
+conversion: ModernBERT's mask builder is lifted out of the graph, the masks become
+additive floats instead of booleans, and the marker lookup becomes a one-hot matmul
+instead of a gather. The export then goes through `torch.export` rather than TorchScript.
+
+On the Snake checkpoint that produces a 614 MB `.mlpackage` that answers **10/10** prompts
+the same way as MLX (max probability difference 0.028, FP16 rounding) at **17.8 ms per
+decision — about twice as fast as the same model in MLX on this Mac**. It needs a Python
+version coremltools ships binaries for (3.12 works, 3.14 does not); the studio says so
+plainly if you run it on the wrong one.
+
+**Roadmap:** training on NVIDIA GPUs and Linux; LiteRT for Android and NPUs; quantized variants; a batch scoring CLI; and an experiment on retraining the escalation head.
 
 ## Privacy and security
 
@@ -366,9 +382,7 @@ Core ML is implemented but blocked upstream: on coremltools 9, converting Modern
 | [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
 | [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
 | [`layastudio/publish.py`](layastudio/publish.py) | Publishes a run to Hugging Face with a card built from its own numbers |
-| [`docs/logo.py`](docs/logo.py) | Regenerates the wordmark |
 | [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup |
-| [`docs/screenshots.py`](docs/screenshots.py) | Regenerates the screenshots in this README from a running studio |
 | `tests/` | Unit and end-to-end tests against a tiny random model |
 
 Jobs run as child processes of `layastudio.engine`, so a crash, a cancel or an out-of-memory error never takes the UI down, and GPU memory returns to the system when a job ends.

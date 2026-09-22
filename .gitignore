@@ -10,3 +10,6 @@ dist/
 .DS_Store
 .env
 *.safetensors
+
+# Tools that generated the docs assets are kept out of the public repo
+docs/*.py

@@ -36,6 +36,18 @@ SAMPLE_STATES = [  # a spread of lengths and topics, to check the export on real
 ]
 
 
+def copy_tree(src, dst):
+    """Copy a folder, replacing what is there. Files that came from the Hugging Face cache
+    are read-only, so an in-place overwrite fails; remove first and make the copies ours."""
+    dst = Path(dst)
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(src, dst)
+    for path in dst.rglob("*"):
+        if path.is_file():
+            path.chmod(0o644)
+
+
 def _missing(package, extra="export"):
     return RuntimeError(
         f"{package} is needed for this export. Install the optional extra:\n"
@@ -243,7 +255,7 @@ def export(model_ref, target, workspace=WORKSPACE, emit=None, out_dir=None):
     }
     for extra in ("tokenizer", "encoder"):
         if (model_dir / extra).is_dir():
-            shutil.copytree(model_dir / extra, out_dir / extra, dirs_exist_ok=True)
+            copy_tree(model_dir / extra, out_dir / extra)
     shutil.copy(model_dir / "rl_agent_config.json", out_dir / "rl_agent_config.json")
     write_json(out_dir / "questions.json", questions)
     write_json(out_dir / "export.json", report)
@@ -309,7 +321,14 @@ def coreml_graph(model, torch, window, length, hidden_size):
 
 
 def export_coreml(model_dir, out_dir, emit, model_ref):
-    """Core ML for the Apple Neural Engine. Best effort: conversion support varies."""
+    """Core ML for Apple's Neural Engine, through torch.export rather than TorchScript.
+
+    Three things make this convertible: the attention masks are built outside the encoder
+    (see coreml_graph), they are additive floats rather than booleans, and the marker
+    lookup is a one-hot matmul rather than a gather. The graph is exported with
+    torch.export and decomposed to the ATen dialect, which is the dialect coremltools
+    reads.
+    """
     try:
         import coremltools
     except ImportError as error:  # pragma: no cover - optional extra
@@ -317,82 +336,94 @@ def export_coreml(model_dir, out_dir, emit, model_ref):
 
     model, cfg, torch = torch_model(model_dir)
     batch, questions, items = sample_batch(model_dir, torch)
-    window = read_json(model_dir / "encoder/config.json").get("local_attention", 128)
     encoder_cfg = read_json(model_dir / "encoder/config.json")
+    tokens, options = batch["input_ids"].shape[1], batch["marker_pos"].shape[1]
     graph = coreml_graph(
-        model, torch, window, batch["input_ids"].shape[1], encoder_cfg["hidden_size"]
+        model, torch, encoder_cfg.get("local_attention", 128), tokens, encoder_cfg["hidden_size"]
     )
-    emit("phase", phase="export", message="Tracing for Core ML")
-    with torch.no_grad():  # the lifted masks must not change a single answer
-        reference = DecisionGraph(model, torch)(*[batch[k] for k in INPUTS])
-        lifted = graph(*[batch[k] for k in INPUTS])
-        drift = float((reference - lifted).abs().max())
-        if drift > 1e-3:
-            raise RuntimeError(f"Mask rewrite changed the logits by {drift:.4g}")
-    emit("log", message=f"Mask rewrite verified: logits differ by at most {drift:.2g}")
+    args = tuple(batch[key][:1] for key in INPUTS)  # Core ML graphs are fixed-shape
+
+    emit("phase", phase="verify", message="Checking the rewritten graph against the original")
     with torch.no_grad():
-        traced = torch.jit.trace(
-            graph,
-            (
-                batch["input_ids"],
-                batch["attention_mask"],
-                batch["marker_pos"],
-                batch["marker_mask"],
-                batch["qtype"],
-            ),
-            strict=False,
-        )
-    tokens = batch["input_ids"].shape[1]
-    options = batch["marker_pos"].shape[1]
-    shapes = {
-        "input_ids": (1, tokens),
-        "attention_mask": (1, tokens),
-        "marker_pos": (1, options),
-        "marker_mask": (1, options),
-        "qtype": (1,),
-    }
-    inputs = [
-        coremltools.TensorType(name=name, shape=shape, dtype=int) for name, shape in shapes.items()
-    ]
-    out_dir.mkdir(parents=True, exist_ok=True)
-    package = out_dir / "model.mlpackage"
+        reference = DecisionGraph(model, torch)(*args)
+        drift = float((reference - graph(*args)).abs().max())
+    if drift > 1e-3:
+        raise RuntimeError(f"The Core ML rewrite changed the logits by {drift:.4g}")
+    emit("log", message=f"Rewrite verified: logits differ by at most {drift:.2g}")
+
+    emit("phase", phase="export", message="Exporting the graph (torch.export)")
+    with torch.no_grad():
+        program = torch.export.export(graph, args).run_decompositions({})
+
     emit("phase", phase="convert", message="Converting to Core ML (this takes a few minutes)")
     try:
-        converted = _convert_coreml(coremltools, traced, inputs)
+        converted = coremltools.convert(
+            program,
+            minimum_deployment_target=coremltools.target.macOS15,
+            compute_precision=coremltools.precision.FLOAT16,
+        )
     except NotImplementedError as error:
-        # Measured on coremltools 9 with ModernBERT: the mask builder uses ops the
-        # converter has no translation for. ONNX is the working path today.
         raise RuntimeError(
-            f"Core ML conversion is not supported for this encoder yet: {error} "
-            "Export to ONNX instead (--target onnx); the checkpoint also runs as-is in "
-            "the upstream PyTorch runtime."
+            f"coremltools cannot convert this graph yet: {error} Export to ONNX instead "
+            "(--target onnx); the checkpoint also runs as-is in the upstream PyTorch runtime."
         ) from None
+    except RuntimeError as error:
+        if "BlobWriter" in str(error):
+            raise RuntimeError(
+                "coremltools has no compiled writer for Python "
+                f"{sys.version_info.major}.{sys.version_info.minor}. Run the export on a "
+                "supported interpreter, for example:\n"
+                "    uv run --python 3.12 --with 'coremltools>=8' --with torch --with laya "
+                "--with laya-mlx python -m layastudio.export <model> --target coreml"
+            ) from None
+        raise
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    package = out_dir / "model.mlpackage"
+    if package.exists():
+        shutil.rmtree(package)
     converted.save(str(package))
-    return _coreml_report(model_ref, out_dir, package, questions, tokens, options, emit)
 
+    emit("phase", phase="verify", message="Running the Core ML model on real prompts")
+    verification, latency = {}, None
+    try:
+        import numpy as np
 
-def _convert_coreml(coremltools, traced, inputs):
-    return coremltools.convert(
-        traced,
-        inputs=inputs,
-        minimum_deployment_target=coremltools.target.macOS14,
-        compute_precision=coremltools.precision.FLOAT16,
-    )
+        rows = min(10, batch["input_ids"].shape[0])
+        exported, expected, times = [], [], []
+        for row in range(rows):
+            feeds = {name: batch[name][row : row + 1].numpy().astype("int32") for name in INPUTS}
+            started = time.perf_counter()
+            predicted = converted.predict(feeds)
+            times.append((time.perf_counter() - started) * 1000)
+            exported.append(np.asarray(next(iter(predicted.values())))[0])
+            with torch.no_grad():
+                expected.append(graph(*[batch[name][row : row + 1] for name in INPUTS]).numpy()[0])
+        latency = round(sorted(times)[len(times) // 2], 2)
+        verification = verify(
+            np.stack(exported), np.stack(expected), batch["marker_mask"][:rows].numpy()
+        )
+    except Exception as error:  # noqa: BLE001 - the package is written either way
+        verification = {"note": f"Saved, but could not run it here: {type(error).__name__}"}
 
-
-def _coreml_report(model_ref, out_dir, package, questions, tokens, options, emit):
     report = {
         "model": model_ref,
         "target": "coreml",
         "path": str(out_dir),
         "created": now(),
         "size_mb": round(sum(f.stat().st_size for f in package.rglob("*")) / 2**20, 1),
-        "runs_on": "macOS and iOS, Neural Engine when the ops allow it",
-        "note": f"Fixed shapes: one decision per call, {tokens} tokens and {options} options.",
+        "ms_per_decision": latency,
+        "verification": verification,
+        "runs_on": "macOS and iOS; the Neural Engine where the ops allow it",
+        "note": f"Fixed shapes: one decision per call, {tokens} tokens, {options} options.",
     }
+    for extra in ("tokenizer", "encoder"):
+        if (model_dir / extra).is_dir():
+            copy_tree(model_dir / extra, out_dir / extra)
+    shutil.copy(model_dir / "rl_agent_config.json", out_dir / "rl_agent_config.json")
     write_json(out_dir / "questions.json", questions)
     write_json(out_dir / "export.json", report)
-    emit("result", **report)
+    emit("result", **{k: v for k, v in report.items() if k != "verification"}, **verification)
     return report
 
 
