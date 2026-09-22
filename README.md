@@ -95,7 +95,7 @@ Every step reports on the page, and nothing blocks you from looking around while
 ## Try it without training anything
 
 The studio ships with a ready-made fine-tune. At startup it downloads
-[`biplovgautam/laya-snake-mlx`](https://huggingface.co/biplovgautam/laya-snake-mlx) — the
+[`madhavbiplov/laya-snake-mlx`](https://huggingface.co/madhavbiplov/laya-snake-mlx) — the
 Snake model from the table below — so the **Snake arena** has something to play the moment
 the page opens: the base checkpoint on the left, the fine-tune on the right, same rules,
 no safety layer.

@@ -63,7 +63,7 @@ BASE_MODELS = {
 # works before anyone has trained anything. Override with $LAYASTUDIO_DEMO_MODELS
 # ("" disables them, or a comma-separated list of repositories).
 DEMO_MODELS = {
-    "biplovgautam/laya-snake-mlx": "Snake · fine-tuned in LayaStudio (322M, multilingual base)",
+    "madhavbiplov/laya-snake-mlx": "Snake · fine-tuned in LayaStudio (322M, multilingual base)",
 }
 if os.environ.get("LAYASTUDIO_DEMO_MODELS") is not None:
     DEMO_MODELS = {
