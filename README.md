@@ -1,6 +1,9 @@
 <div align="center">
 
-# LayaStudio
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo.png">
+  <img src="docs/logo-light.png" alt="LayaStudio — tune your own decisions" width="420">
+</picture>
 
 **Build your own decision engine on your Mac, in minutes.**
 
@@ -21,7 +24,7 @@ That is the whole setup. The browser opens, and the studio finishes preparing it
 
 </div>
 
-![Run results: accuracy before and after, calibration, significance](docs/results.png)
+![LayaStudio home: your decisions deserve your own model](docs/home.png)
 
 ---
 
@@ -59,6 +62,7 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 | 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint that loads in `laya-mlx` and in upstream PyTorch `laya` on Linux/NVIDIA |
 | 🔒 **Local by construction** | Binds to 127.0.0.1, no external scripts in the page, jobs run with `HF_HUB_OFFLINE=1` |
 | 🐍 **Proof, not vibes** | A built-in Snake task where the fine-tuned model plays *unassisted* — the base model dies on move one |
+| 🎛 **A studio, not a script** | A landing page, live training charts, a side-by-side playground and a Snake arena — all served from one local file |
 
 ## Install and run
 
@@ -112,7 +116,18 @@ Notes, because numbers without caveats are marketing: Banking77 squeezes 77 labe
 
 **Fine-tuning does not change latency.** Timed interleaved on the same rows: 44.4 ms (base) vs 44.2 ms (fine-tuned) per row, English model, 6-label questions.
 
-**It does make confidence gating usable.** Emotion, answering only decisions the model is ≥90% sure about:
+### Which objective?
+
+`proper` is the default because it was measured, not assumed — same dataset, same base model, same hyperparameters, only the objective changed:
+
+| Objective | Accuracy | Macro F1 | ECE | Log loss | Time |
+|---|---|---|---|---|---|
+| **`proper`** — maximize the RLCD reward directly | **88.2%** | 0.882 | **0.022** | **0.369** | 11.8 min |
+| `rlcd` — the upstream policy-gradient recipe | 79.2% | 0.796 | 0.035 | 0.614 | 13.0 min |
+
+The deterministic version of the same reward wins by nine points here and calibrates better; the noisy policy gradient is still available for fidelity to the published recipe.
+
+**Fine-tuning makes confidence gating usable.** Emotion, answering only decisions the model is ≥90% sure about:
 
 | | Answered automatically | Accuracy of those |
 |---|---:|---:|
@@ -152,6 +167,10 @@ Training rows come from a planner that keeps room to survive and then heads for 
 The base model is not "a bit worse" at Snake, it is guessing: its average confidence is 0.05 (four options, so near-uniform), it answers the same direction most of the time, and two thirds of its moves are illegal — which is why every game ends immediately. After 18 minutes of fine-tuning on 2,339 boards generated on the same laptop, the same 322M model picks a legal move 99.3% of the time and eats ~20 apples a game, at 31 decisions a second with no network and no safety net.
 
 Raw per-game results: [`docs/snake-benchmark.json`](docs/snake-benchmark.json).
+
+You can watch this happen: the **Snake arena** in the studio plays both models side by side, live, on the same rules. Below, the base model has just died on the first move of its 509th round while the fine-tuned one is mid-game with 100% legal moves.
+
+![The Snake arena: base versus fine-tuned, playing live](docs/arena.png)
 
 ![Snake run results](docs/snake.png)
 
@@ -279,7 +298,20 @@ agent.predict("your text", questions)
 
 Because the layout and tensor names match the original checkpoints, the same folder loads in the upstream PyTorch `laya` package on Linux CPUs and NVIDIA GPUs. Verified rather than assumed: a fine-tuned checkpoint loaded with upstream `laya` on CPU gave **40/40 identical answers** and a maximum probability difference of **0.0000** against this MLX runtime.
 
-**Roadmap:** training on NVIDIA GPUs and Linux; one-click exports from the same checkpoint (ONNX for CPU/CUDA servers, Core ML for the Apple Neural Engine, LiteRT for Android and NPUs, quantized variants); a batch scoring CLI; and an experiment on retraining the escalation head.
+### Exporting to other runtimes
+
+```bash
+uv sync --extra export
+python -m layastudio.export run:<id> --target onnx      # or press "Export to ONNX" on the run page
+```
+
+The export writes `model.onnx` (opset 17, dynamic batch, tokens and options) next to the tokenizer, the calibration temperatures and the questions the model was trained for — everything a server needs, with no Laya code required to run it. It goes wherever onnxruntime goes: Linux and Windows CPUs, NVIDIA CUDA, DirectML.
+
+Exports are verified rather than assumed. The studio runs the exported graph and this machine's MLX runtime on the same real prompts and records the result: on the Snake checkpoint, **10/10 identical answers with a maximum probability difference of 2.7e-07**, at 33.6 ms per decision on this Mac's CPU.
+
+Core ML is implemented but blocked upstream: on coremltools 9, converting ModernBERT stops at an untranslated `new_ones` in its mask builder, so `--target coreml` fails with that message instead of writing something broken.
+
+**Roadmap:** training on NVIDIA GPUs and Linux; Core ML for the Apple Neural Engine (once the converter catches up, or the mask moves outside the graph) and LiteRT for Android and NPUs; quantized variants; a batch scoring CLI; and an experiment on retraining the escalation head.
 
 ## Privacy and security
 
@@ -294,9 +326,11 @@ Because the layout and tensor names match the original checkpoints, the same fol
 |---|---|
 | [`layastudio/server.py`](layastudio/server.py) | The app in one file: JSON API + web UI, standard library only, no build step |
 | [`layastudio/engine.py`](layastudio/engine.py) | MLX engine: data parsing, token analysis, LoRA training, calibration, evaluation, export |
-| [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup described above |
 | [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
 | [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
+| [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
+| [`docs/logo.py`](docs/logo.py) | Regenerates the wordmark |
+| [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup |
 | [`docs/screenshots.py`](docs/screenshots.py) | Regenerates the screenshots in this README from a running studio |
 | `tests/` | Unit and end-to-end tests against a tiny random model |
 

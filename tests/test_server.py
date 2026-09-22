@@ -47,10 +47,11 @@ def test_page_and_state(studio):
         page = response.read().decode()
         assert "LayaStudio" in page
         assert "default-src 'self'" in response.headers["Content-Security-Policy"]
-    # No external requests: the only URL in the page is the SVG namespace of the favicon.
-    assert all(
-        u.startswith("http://www.w3.org/") for u in re.findall(r"https?://[^\s'\"<>]+", page)
-    )
+    # Links out are fine; loading anything from outside this machine is not.
+    loads = re.findall(r'(?:src|srcset)=["\']([^"\']+)|<link[^>]+href=["\']([^"\']+)', page)
+    external = [u for pair in loads for u in pair if u.startswith(("http://", "https://", "//"))]
+    assert external == [], external
+    assert "@import" not in page and "fonts.googleapis" not in page
     status, state = call(base, "/api/state")
     assert status == 200 and state["datasets"] == [] and len(state["models"]) == 3
     assert state["system"]["setup"]["state"] in ("ready", "failed")

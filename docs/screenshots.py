@@ -105,6 +105,8 @@ def trim(path, scale, margin=24):
 
 
 SHOTS = {
+    "home": ("#/home", 1400, 1250),
+    "arena": ("#/arena", 1400, 1150),
     "results": ("#/runs/{run}", 1400, 1500),
     "gating": ("#/runs/{run}", 1400, 1000),
     "dataset": ("#/datasets/{dataset}", 1400, 1200),

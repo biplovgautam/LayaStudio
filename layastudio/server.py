@@ -21,6 +21,7 @@ import argparse
 import gc
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -234,6 +235,154 @@ class Playground:
         self.pool.submit(run).result()
 
 
+# ----------------------------------------------------------------------------- arena
+
+
+class Arena:
+    """Two models playing Snake side by side, live, for anyone watching the page.
+
+    Moves run on the playground's single MLX thread, so the arena and the playground never
+    touch the GPU at the same time, and a training job stops the arena first.
+    """
+
+    BOARD_CAP = 600
+
+    def __init__(self, workspace, playground):
+        self.workspace = workspace
+        self.playground = playground
+        self.lock = threading.Lock()
+        self.sides = []
+        self.running = False
+        self.thread = None
+        self.speed = 8
+        self.error = None
+
+    def _new_game(self, seed):
+        from laya_mlx.snake.game import SnakeGame
+
+        from .snake import HEIGHT, INITIAL_LENGTH, WIDTH
+
+        return SnakeGame(WIDTH, HEIGHT, seed=seed, initial_length=INITIAL_LENGTH)
+
+    def _new_side(self, ref, seed):
+        return {
+            "ref": ref,
+            "game": self._new_game(seed),
+            "seed": seed,
+            "games": 0,
+            "moves": 0,
+            "apples": 0,
+            "legal": 0,
+            "decisions": 0,
+            "best_apples": 0,
+            "best_moves": 0,
+            "latency": [],
+            "last_death": None,
+        }
+
+    def start(self, refs, speed=8):
+        self.stop()
+        seed = int(time.time()) % 10000
+        with self.lock:
+            self.sides = [self._new_side(ref, seed + i * 977) for i, ref in enumerate(refs)]
+            self.running, self.error = True, None
+        self.thread = threading.Thread(target=self._loop, name="arena", daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        thread, self.thread = self.thread, None
+        if thread:
+            thread.join(timeout=5)
+
+    def _loop(self):
+        interval = 1 / max(1, self.speed)
+        while self.running:
+            started = time.perf_counter()
+            try:
+                self.playground.pool.submit(self._step).result()
+            except Exception as error:  # noqa: BLE001 - surfaced on the page
+                with self.lock:
+                    self.error, self.running = f"{type(error).__name__}: {error}", False
+                return
+            time.sleep(max(0, interval - (time.perf_counter() - started)))
+
+    def _step(self):
+        from laya_mlx.snake.game import DIRECTIONS
+
+        from .snake import QUESTIONS, render
+
+        for side in self.sides:
+            game = side["game"]
+            if not game.alive or game.won or game.ticks >= self.BOARD_CAP:
+                side["games"] += 1
+                side["best_apples"] = max(side["best_apples"], game.score)
+                side["best_moves"] = max(side["best_moves"], game.ticks)
+                side["last_death"] = game.death_reason or ("finished" if game.won else "stalled")
+                side["seed"] += 1
+                side["game"] = game = self._new_game(side["seed"])
+            agent = self.playground._agent(side["ref"])
+            started = time.perf_counter()
+            answer = agent.predict(render(game), QUESTIONS)["answers"]["move"]
+            side["latency"].append((time.perf_counter() - started) * 1000)
+            del side["latency"][:-200]
+            choice = answer["choice"] if answer["choice"] in DIRECTIONS else "UP"
+            legal = {m.direction: m for m in game.moves()}.get(choice)
+            side["legal"] += bool(legal and legal.legal)
+            side["decisions"] += 1
+            side["moves"] += 1
+            side["apples"] = side["apples"] + 1 if game.step(choice) else side["apples"]
+
+    def snapshot(self):
+        from .snake import HEIGHT, WIDTH
+
+        with self.lock:
+            sides = []
+            for side in self.sides:
+                game = side["game"]
+                body = set(game.body)
+                rows = [
+                    "".join(
+                        "H"
+                        if (x, y) == game.head
+                        else "F"
+                        if (x, y) == game.food
+                        else "o"
+                        if (x, y) in body
+                        else "."
+                        for x in range(WIDTH)
+                    )
+                    for y in range(HEIGHT)
+                ]
+                latency = sorted(side["latency"])
+                sides.append(
+                    {
+                        "ref": side["ref"],
+                        "board": rows,
+                        "alive": game.alive,
+                        "ticks": game.ticks,
+                        "score": game.score,
+                        "length": len(game.body),
+                        "games": side["games"],
+                        "total_moves": side["moves"],
+                        "total_apples": side["apples"],
+                        "best_apples": side["best_apples"],
+                        "best_moves": side["best_moves"],
+                        "legal_rate": side["legal"] / max(1, side["decisions"]),
+                        "ms": latency[len(latency) // 2] if latency else None,
+                        "last_death": side["last_death"],
+                    }
+                )
+            return {
+                "running": self.running,
+                "speed": self.speed,
+                "sides": sides,
+                "width": WIDTH,
+                "height": HEIGHT,
+                "error": self.error,
+            }
+
+
 # ----------------------------------------------------------------------------- state
 
 
@@ -243,8 +392,23 @@ class Studio:
         for name in ("datasets", "runs", "evals", "jobs"):
             (workspace / name).mkdir(parents=True, exist_ok=True)
         self.playground = Playground(workspace)
-        self.jobs = Jobs(workspace, self.playground.unload)
+        self.arena = Arena(workspace, self.playground)
+        self.jobs = Jobs(workspace, self.pause_gpu)
         self.bootstrap = bootstrap or Bootstrap(workspace, download=False, fetch_examples=False)
+
+    def exports(self):
+        out = []
+        for path in sorted((self.workspace / "exports").glob("*/export.json")):
+            report = engine.read_json(path)
+            if report:
+                report["path"] = shown_path(path.parent, self.workspace.parent)
+                out.append(report)
+        return out
+
+    def pause_gpu(self):
+        """Give a starting job the whole GPU: stop the arena, drop warm models."""
+        self.arena.stop()
+        self.playground.unload()
 
     # --- summaries
 
@@ -328,6 +492,7 @@ class Studio:
             "models": base,
             "finetuned": tuned,
             "jobs": self.jobs.list(12),
+            "exports": self.exports(),
             "examples": [
                 {
                     "name": k,
@@ -470,6 +635,17 @@ class Studio:
                 f"evaluate-{stamp}",
                 f"Evaluate {body['model']}",
             )
+        if kind == "export":
+            engine.resolve_model_ref(body["model"], self.workspace)
+            target = body.get("target", "onnx")
+            if target not in ("onnx", "coreml"):
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown export target {target!r}")
+            return self.jobs.start(
+                "export",
+                {"model": body["model"], "target": target},
+                f"export-{stamp}",
+                f"Export {modelname(body['model'])} to {target.upper()}",
+            )
         if kind == "download":
             repo = body.get("repo_id")
             if repo not in engine.BASE_MODELS:
@@ -570,6 +746,18 @@ class Studio:
             shutil.rmtree(self.workspace / "jobs" / item_id, ignore_errors=True)
         return {"deleted": item_id}
 
+    def arena_start(self, body):
+        if self.jobs.active():
+            raise ApiError(HTTPStatus.CONFLICT, "A job is running; the arena pauses for it.")
+        refs = body.get("models") or []
+        if not 1 <= len(refs) <= 2:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "Pick one or two models")
+        for ref in refs:
+            resolve = engine.resolve_model_ref(ref, self.workspace)  # fails loudly if missing
+            del resolve
+        self.arena.start(refs, speed=max(1, min(20, int(body.get("speed", 8)))))
+        return self.arena.snapshot()
+
     def predict(self, body):
         if self.jobs.active():
             raise ApiError(
@@ -591,6 +779,10 @@ class Studio:
             return {"results": self.playground.predict(refs, state, questions)}
         except FileNotFoundError as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
+
+
+def modelname(ref):
+    return ref.split(":", 1)[-1].split("/")[-1]
 
 
 def label_text(qdef, target):
@@ -644,6 +836,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_doc(self, name):
+        """Screenshots and the logo, when the studio runs from a checkout."""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,60}\.(png|svg)", name):
+            raise ApiError(HTTPStatus.NOT_FOUND, "Not found")
+        path = PACKAGE.parent / "docs" / name
+        if not path.is_file():
+            raise ApiError(HTTPStatus.NOT_FOUND, "Not found")
+        kind = "image/svg+xml" if name.endswith(".svg") else "image/png"
+        self._send(HTTPStatus.OK, path.read_bytes(), kind)
+
     def _body(self):
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
             raise ApiError(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Send application/json")
@@ -665,12 +867,16 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if method == "GET" and not parts:
                 return self._send(HTTPStatus.OK, PAGE.encode(), "text/html; charset=utf-8")
+            if method == "GET" and len(parts) == 2 and parts[0] == "docs":
+                return self._send_doc(parts[1])
             if not parts or parts[0] != "api":
                 raise ApiError(HTTPStatus.NOT_FOUND, "Not found")
             route = parts[1:]
             if method == "GET":
                 if route == ["state"]:
                     return self._send(HTTPStatus.OK, studio.overview())
+                if route == ["arena"]:
+                    return self._send(HTTPStatus.OK, studio.arena.snapshot())
                 if len(route) == 2 and route[0] == "datasets":
                     return self._send(HTTPStatus.OK, studio.dataset(engine.check_id(route[1])))
                 if len(route) == 2 and route[0] == "jobs":
@@ -702,6 +908,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, {"cancelled": route[1]})
                 if route == ["predict"]:
                     return self._send(HTTPStatus.OK, studio.predict(body))
+                if route == ["arena", "start"]:
+                    return self._send(HTTPStatus.OK, studio.arena_start(body))
+                if route == ["arena", "stop"]:
+                    studio.arena.stop()
+                    return self._send(HTTPStatus.OK, studio.arena.snapshot())
             elif method == "DELETE" and len(route) == 2 and route[0] in ("datasets", "runs"):
                 self._body()
                 return self._send(HTTPStatus.OK, studio.delete(route[0], route[1]))
@@ -793,6 +1004,7 @@ def main(argv=None):
     except KeyboardInterrupt:
         pass
     finally:
+        Handler.studio.arena.stop()
         Handler.studio.jobs.shutdown()
         server.server_close()
 
@@ -805,10 +1017,10 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LayaStudio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233b5bdb'/%3E%3Cpath d='M9 22V10h3v9.5h7V22z' fill='white'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231b1b19'/%3E%3Ctext x='32' y='44' text-anchor='middle' font-family='Helvetica,Arial' font-size='34' font-weight='700' fill='%23ffffff'%3El%3Ctspan fill='%232a78d6'%3Es%3C/tspan%3E%3C/text%3E%3C/svg%3E">
 <style>
-:root{--bg:#f6f6f3;--panel:#fff;--ink:#1b1b19;--muted:#686862;--faint:#9a9a93;--line:#e3e3dd;--accent:#3b5bdb;--accent-soft:#e8ecfb;--on-accent:#fff;--good:#2b8a3e;--good-soft:#e6f4ea;--bad:#c92a2a;--bad-soft:#fbeaea;--warn:#a86a00;--warn-soft:#fdf3e1;--code:#f0f0ec;--base:#9a9a93;--ft:#3b5bdb;--shadow:0 1px 2px rgba(0,0,0,.05)}
-@media (prefers-color-scheme:dark){:root{--bg:#121211;--panel:#1b1b19;--ink:#ececea;--muted:#a3a39c;--faint:#77776f;--line:#2d2d2a;--accent:#8198f7;--accent-soft:#232a45;--on-accent:#0d1024;--good:#5bd27a;--good-soft:#16301f;--bad:#ff7a7a;--bad-soft:#3a1d1d;--warn:#f2b84b;--warn-soft:#352a14;--code:#232321;--base:#7d7d76;--ft:#8198f7;--shadow:none}}
+:root{--bg:#f6f6f3;--panel:#fff;--ink:#1b1b19;--muted:#686862;--faint:#9a9a93;--line:#e3e3dd;--accent:#2a78d6;--accent-soft:#e4eefb;--on-accent:#fff;--good:#2b8a3e;--good-soft:#e6f4ea;--bad:#c92a2a;--bad-soft:#fbeaea;--warn:#a86a00;--warn-soft:#fdf3e1;--code:#f0f0ec;--base:#9a9a93;--ft:#2a78d6;--shadow:0 1px 2px rgba(0,0,0,.05)}
+@media (prefers-color-scheme:dark){:root{--bg:#121211;--panel:#1b1b19;--ink:#ececea;--muted:#a3a39c;--faint:#77776f;--line:#2d2d2a;--accent:#5fa3ee;--accent-soft:#16263c;--on-accent:#06101f;--good:#5bd27a;--good-soft:#16301f;--bad:#ff7a7a;--bad-soft:#3a1d1d;--warn:#f2b84b;--warn-soft:#352a14;--code:#232321;--base:#7d7d76;--ft:#5fa3ee;--shadow:none}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif}
@@ -817,7 +1029,10 @@ code,pre,.mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5
 pre{background:var(--code);padding:12px;border-radius:8px;overflow:auto;margin:8px 0;max-width:100%}
 header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
 .brand{display:flex;align-items:center;gap:10px;font-weight:650;font-size:15px}
-.brand .mark{width:26px;height:26px;border-radius:7px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;font-weight:750}
+.brand{gap:12px}
+.brand .word{font-size:19px;font-weight:650;letter-spacing:-.03em}
+.brand .word b{color:var(--accent);font-weight:650}
+.brand small{color:var(--faint);font-weight:500;letter-spacing:.14em;text-transform:uppercase;font-size:9.5px;border-left:1px solid var(--line);padding-left:12px}
 .brand small{color:var(--muted);font-weight:450}
 .spacer{flex:1}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;background:var(--code);color:var(--muted);font-size:12px;white-space:nowrap}
@@ -889,21 +1104,107 @@ details{margin-top:8px}summary{cursor:pointer;color:var(--muted);font-size:13px}
 .cm th.rowh{text-align:right}
 svg text{fill:var(--muted);font-size:11px}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
-@media (max-width:820px){.layout{grid-template-columns:minmax(0,1fr)}nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:8px 12px}nav .sep,nav .note{display:none}main{padding:16px}.two,.three{grid-template-columns:1fr}header .chip.sys{display:none}}
+/* landing page */
+.home{--edge:clamp(16px,4vw,54px)}
+.display{font-family:"Avenir Next Condensed","HelveticaNeue-CondensedBold","Arial Narrow",system-ui,sans-serif;
+  text-transform:uppercase;font-weight:800;letter-spacing:-.01em;line-height:.88}
+.guide{position:fixed;top:51px;bottom:0;left:calc(190px + (100vw - 190px) * .62);width:1px;background:var(--line);opacity:.55;pointer-events:none;z-index:0}
+.hero{position:relative;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:46px;align-items:center;padding:42px 0 26px;min-height:min(78vh,720px)}
+.hero h1{font-size:clamp(44px,7.4vw,104px);margin:0}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.hero .sub{color:var(--muted);font-size:15.5px;max-width:42ch;margin:0 0 20px}
+.cta{display:flex;gap:10px;flex-wrap:wrap}
+.btn.wide{border-radius:2px;padding:13px 22px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:12.5px}
+.btn.wide .arrow{transition:transform .25s}
+.btn.wide:hover .arrow{transform:translate(4px,-4px)}
+.hero-stats{display:flex;gap:30px;margin-top:30px;flex-wrap:wrap}
+.hero-stats b{display:block;font-size:26px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.hero-stats span{font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+.hero .shot{margin:0;position:relative}
+.hero .shot img{width:100%;border:1px solid var(--line);border-radius:12px;display:block;box-shadow:0 18px 50px rgba(0,0,0,.22)}
+.hero .shot figcaption{margin-top:12px;font-size:12.5px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+.hero .shot .cluster{position:absolute;right:-14px;bottom:44px;width:120px;opacity:.9}
+.hero .shot.fallback img{display:none}
+.hero .shot.fallback .cluster{position:static;width:auto;max-width:280px;margin-left:auto}
+.cluster{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;max-width:300px;margin-left:auto}
+.cluster i{aspect-ratio:1;border-radius:3px;background:var(--code);display:block}
+.cluster i.on{background:var(--accent);box-shadow:0 0 16px color-mix(in srgb,var(--accent) 60%,transparent);animation:flicker 5s ease-in-out infinite}
+@keyframes flicker{0%,100%{opacity:.25}12%,32%{opacity:1}52%{opacity:.45}}
+.ticker{overflow:hidden;border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:11px 0;margin:8px 0 46px;position:relative;z-index:1;background:var(--bg)}
+.ticker div{display:flex;gap:42px;width:max-content;animation:slide 34s linear infinite}
+.ticker span{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.ticker b{color:var(--accent)}
+@keyframes slide{to{transform:translateX(-50%)}}
+.band{position:relative;z-index:1;padding:64px 0;border-top:1px solid var(--line)}
+.band h2.big{font-size:clamp(30px,4.6vw,62px);text-align:center;margin:0 0 8px}
+.band h2.big em{font-style:normal;color:var(--accent)}
+.band .kicker{text-align:center;color:var(--faint);font-size:12px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:38px}
+.radial{position:relative;display:grid;place-items:center;min-height:430px}
+.radial .ring{position:absolute;inset:0;display:grid;place-items:center}
+.radial .ring svg{width:min(430px,86vw);height:auto;overflow:visible}
+.dashes{animation:spin 42s linear infinite;transform-origin:center}
+@keyframes spin{to{transform:rotate(360deg)}}
+.radial .node{position:absolute;text-align:center;max-width:190px}
+.radial .node b{display:block;font-size:13px;letter-spacing:.14em;text-transform:uppercase}
+.radial .node span{font-size:12.5px;color:var(--muted)}
+.radial .node .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);margin:0 auto 8px}
+.radial .n-top{top:0;left:50%;transform:translateX(-50%)}
+.radial .n-bottom{bottom:0;left:50%;transform:translateX(-50%)}
+.radial .n-left{left:0;top:50%;transform:translateY(-50%);text-align:right}
+.radial .n-right{right:0;top:50%;transform:translateY(-50%);text-align:left}
+.loop{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;position:relative}
+.loop .card{margin:0;background:var(--panel)}
+.loop .card h3{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink);margin:0 0 6px}
+.loop .hub{grid-column:1 / -1;background:var(--accent);color:var(--on-accent);border-color:var(--accent);text-align:center}
+.loop .hub h3,.loop .hub p{color:var(--on-accent)}
+.loop .hub p{opacity:.92}
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .7s cubic-bezier(.22,1,.36,1)}
+.reveal.in{opacity:1;transform:none}
+nav.dock{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:8;display:flex;flex-direction:row;
+  align-items:center;gap:4px;width:max-content;background:var(--ink);color:var(--bg);border:0;border-radius:999px;
+  padding:7px 8px 7px 18px;box-shadow:0 10px 30px rgba(0,0,0,.28)}
+nav.dock a{display:inline-block;color:inherit;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
+  padding:7px 13px;border-radius:999px;white-space:nowrap}
+nav.dock a:hover{background:color-mix(in srgb,var(--bg) 18%,transparent);text-decoration:none}
+nav.dock a.go{background:var(--accent);color:var(--on-accent);font-weight:700}
+nav.dock a.go:hover{filter:brightness(1.1)}
+nav.dock .name{font-weight:700;letter-spacing:-.02em;font-size:14px;padding-right:8px;white-space:nowrap}
+nav.dock .name b{color:var(--accent)}
+@media (prefers-reduced-motion:reduce){.cluster i.on,.ticker div,.dashes{animation:none}.reveal{opacity:1;transform:none}}
+.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;position:relative;z-index:1}
+.shots figure{margin:0}
+.shots img{width:100%;border:1px solid var(--line);border-radius:10px;display:block}
+.shots figcaption{font-size:12px;color:var(--muted);margin-top:7px}
+footer.site{border-top:1px solid var(--line);margin-top:10px;padding:26px 0 90px;display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between;color:var(--muted);font-size:13px;position:relative;z-index:1}
+/* snake arena */
+.arena{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.board{display:grid;gap:2px;background:var(--code);padding:8px;border-radius:10px}
+.board i{aspect-ratio:1;border-radius:2px;background:var(--line);display:block}
+.board i.o{background:var(--accent);opacity:.55}
+.board i.H{background:var(--accent)}
+.board i.F{background:var(--good)}
+.board i.dead{background:var(--bad);opacity:.5}
+.arena .num{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-variant-numeric:tabular-nums}
+.arena .num b{display:block;font-size:19px}
+.arena .num span{font-size:11.5px;color:var(--muted)}
+@media (max-width:820px){.hero{grid-template-columns:minmax(0,1fr);min-height:0}.guide{display:none}.dock{left:12px;right:12px;transform:none;justify-content:center}
+.layout{grid-template-columns:minmax(0,1fr)}nav{flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:8px 12px}nav .sep,nav .note{display:none}main{padding:16px}.two,.three{grid-template-columns:1fr}header .chip.sys{display:none}}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand"><div class="mark">L</div>LayaStudio <small>fine-tune Laya on your Mac</small></div>
+  <a class="brand" href="#/home" style="color:inherit"><span class="word">laya<b>studio</b></span><small>tune your own decisions</small></a>
   <div class="spacer"></div>
   <span id="jobchip"></span>
   <span class="chip sys" id="syschip">…</span>
 </header>
 <div class="layout">
   <nav id="nav">
+    <a href="#/home" data-v="home">Home</a>
     <a href="#/datasets" data-v="datasets">Datasets</a>
     <a href="#/train" data-v="train">Fine-tune</a>
     <a href="#/runs" data-v="runs">Runs &amp; results</a>
+    <a href="#/arena" data-v="arena">Snake arena</a>
     <a href="#/playground" data-v="playground">Playground</a>
     <a href="#/models" data-v="models">Models</a>
     <div class="sep"></div>
@@ -1018,23 +1319,235 @@ async function refresh() {
   } else chip.innerHTML = "";
   return OV;
 }
-const routes = {datasets: viewDatasets, dataset: viewDataset, train: viewTrain, runs: viewRuns, run: viewRun, playground: viewPlayground, models: viewModels, guide: viewGuide, jobs: viewJob};
+const routes = {home: viewHome, arena: viewArena, datasets: viewDatasets, dataset: viewDataset, train: viewTrain, runs: viewRuns, run: viewRun, playground: viewPlayground, models: viewModels, guide: viewGuide, jobs: viewJob};
 async function route() {
   clearTimers();
   const token = ++ROUTE;
   const [path, qs] = location.hash.replace(/^#\/?/, "").split("?");
   const [a, b] = path.split("/");
-  let view = a || "datasets", arg = b ? decodeURIComponent(b) : null;
+  let view = a || "home", arg = b ? decodeURIComponent(b) : null;
   if (view === "datasets" && arg) view = "dataset";
   if (view === "runs" && arg) view = "run";
-  $$("#nav a").forEach(n => n.classList.toggle("on", n.dataset.v === (a || "datasets")));
+  $$("#nav a").forEach(n => n.classList.toggle("on", n.dataset.v === (a || "home")));
   await refresh();
   if (!current(token)) return;
-  try { await (routes[view] || viewDatasets)(arg, new URLSearchParams(qs || ""), token); }
+  try { await (routes[view] || viewHome)(arg, new URLSearchParams(qs || ""), token); }
   catch (e) { main.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
   every(refresh, 3000);
 }
 window.addEventListener("hashchange", route);
+
+
+// ------------------------------------------------------------------ landing page
+const SHIPPED = [
+  ["Snake moves", "4 directions", "15.8%", "98.8%", "18 min"],
+  ["Emotion", "6 labels", "47.5%", "88.2%", "12 min"],
+  ["Prompt injection", "yes / no", "70.7%", "95.7%", "6 min"],
+  ["Banking77", "77 intents", "34.2%", "64.2%", "18 min"],
+];
+const SHOTS = [
+  ["results.png", "Every run scores the base model and the fine-tuned one on the same held-out rows"],
+  ["gating.png", "Confidence gating: how much you can answer automatically, and how accurately"],
+  ["dataset.png", "The token budget check, before you spend an hour training"],
+  ["snake.png", "The Snake run: 15.8% to 98.8% move accuracy"],
+];
+function heroArt() {
+  const options = [["billing", 0.92], ["technical", 0.05], ["sales", 0.02], ["other", 0.01]];
+  const bars = options.map((o, i) => `
+    <g class="optbar" transform="translate(0 ${18 + i * 30})">
+      <text x="0" y="-4">${esc(o[0])}</text>
+      <rect x="0" y="0" width="200" height="10" rx="5" fill="var(--code)"/>
+      <rect class="fill" x="0" y="0" width="${(200 * o[1]).toFixed(0)}" height="10" rx="5"
+            fill="${i ? "var(--base)" : "var(--accent)"}" style="animation-delay:${i * 90}ms"/>
+    </g>`).join("");
+  return `<svg viewBox="0 0 380 210" role="img" aria-label="A decision resolving into probabilities">
+    <g transform="translate(8 26)">
+      <text x="0" y="0" style="font-size:12px;fill:var(--faint);letter-spacing:.12em">STATE</text>
+      <rect x="0" y="10" width="112" height="7" rx="3.5" fill="var(--code)"/>
+      <rect x="0" y="24" width="86" height="7" rx="3.5" fill="var(--code)"/>
+      <rect x="0" y="38" width="98" height="7" rx="3.5" fill="var(--code)"/>
+      <path d="M 122 28 h 18" stroke="var(--line)" stroke-width="2"/>
+      <path d="M 134 22 l 7 6 -7 6" fill="none" stroke="var(--accent)" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <g transform="translate(150 20)">${bars}
+      <g class="winner" transform="translate(150 -6)"><text x="0" y="0" fill="var(--accent)" style="font-weight:700">0 tokens · 44 ms</text></g>
+    </g>
+  </svg>`;
+}
+async function viewHome() {
+  const runs = OV.runs.filter(r => r.state === "done" && r.accuracy != null);
+  const best = runs.slice().sort((a, b) => (b.accuracy - b.baseline_accuracy) - (a.accuracy - a.baseline_accuracy))[0];
+  const cluster = Array.from({length: 64}, (_, i) => {
+    const on = [9, 10, 17, 18, 19, 26, 27, 35, 36, 37, 44, 45, 52].includes(i);
+    return `<i class="${on ? "on" : ""}" style="animation-delay:${(i % 7) * 320}ms"></i>`;
+  }).join("");
+  const ticker = [...SHIPPED, ...SHIPPED].map(r =>
+    `<span>${esc(r[0])} <b>${esc(r[2])} → ${esc(r[3])}</b></span>`).join("");
+  const step = (pos, n, title, text) => `<div class="node n-${pos}"><div class="dot"></div>
+    <b>${esc(n)} · ${esc(title)}</b><span>${esc(text)}</span></div>`;
+  main.innerHTML = `
+  <div class="home">
+  <div class="guide"></div>
+
+  <section class="hero">
+    <div>
+      <h1 class="display">Your decisions<br>deserve <em>your own<br>model</em>.</h1>
+      <p class="sub">LayaStudio fine-tunes open Laya decision models on your own labeled data, entirely on your Mac. No cloud, no per-call bill, nothing leaving the machine — and every run proves whether it actually got better.</p>
+      <div class="cta">
+        <a class="btn primary wide" href="#/datasets">Start fine-tuning <span class="arrow">↗</span></a>
+        <a class="btn wide" href="#/arena">Watch it play</a>
+      </div>
+      <div class="hero-stats">
+        <div><b>0</b><span>tokens generated</span></div>
+        <div><b>44 ms</b><span>per decision</span></div>
+        <div><b>$0</b><span>per call</span></div>
+        <div><b>${runs.length || 0}</b><span>runs here</span></div>
+      </div>
+    </div>
+    <figure class="shot">
+      <img src="/docs/arena.png" alt="Base and fine-tuned models playing Snake side by side"
+           onerror="this.closest('figure').classList.add('fallback')">
+      <div class="cluster">${cluster}</div>
+      <figcaption>base <b>vs</b> fine-tuned, playing Snake unassisted on this Mac ·
+        <a href="#/arena">open the arena ↗</a></figcaption>
+    </figure>
+  </section>
+
+  <div class="ticker"><div>${ticker}</div></div>
+
+  <section class="band reveal">
+    <h2 class="big display">What it <em>does</em></h2>
+    <div class="kicker">four steps · one command</div>
+    <div class="radial">
+      <div class="ring"><svg viewBox="0 0 400 400" aria-hidden="true">
+        <circle class="dashes" cx="200" cy="200" r="150" fill="none" stroke="var(--accent)"
+                stroke-opacity=".45" stroke-width="1" stroke-dasharray="3 13"/>
+        <circle cx="200" cy="200" r="150" fill="none" stroke="var(--line)" stroke-width="1"/>
+        ${Array.from({length: 12}, (_, i) => {
+          const a = (i / 12) * Math.PI * 2;
+          return `<line x1="${200 + 143 * Math.cos(a)}" y1="${200 + 143 * Math.sin(a)}"
+            x2="${200 + 158 * Math.cos(a)}" y2="${200 + 158 * Math.sin(a)}"
+            stroke="var(--accent)" stroke-opacity=".5" stroke-width="1.5"/>`;
+        }).join("")}
+        <g transform="translate(140 176)">
+          ${[["billing", 1, "var(--accent)"], ["technical", .36, "var(--base)"], ["other", .14, "var(--base)"]]
+            .map((o, i) => `<g class="optbar" transform="translate(0 ${i * 20})" style="animation-delay:${i * 90}ms">
+              <rect x="0" y="0" width="120" height="9" rx="4.5" fill="var(--code)"/>
+              <rect class="fill" x="0" y="0" width="${120 * o[1]}" height="9" rx="4.5" fill="${o[2]}"/>
+            </g>`).join("")}
+        </g>
+      </svg></div>
+      ${step("top", "01", "Bring your decisions", "JSONL or CSV, the same questions you already ask. The token check shows what would be cut.")}
+      ${step("right", "02", "Fine-tune locally", "LoRA on the encoder plus the decision head, in MLX. Minutes, under 3 GB.")}
+      ${step("bottom", "03", "Prove it", "Base and tuned scored on the same untouched rows, with intervals and a significance test.")}
+      ${step("left", "04", "Ship it", "A standard Laya checkpoint, or an ONNX export for Linux and NVIDIA.")}
+    </div>
+  </section>
+
+  <section class="band reveal">
+    <h2 class="big display">Measured, <em>not promised</em></h2>
+    <div class="kicker">apple m4 · 16 gb · balanced recipe · held-out rows</div>
+    <div class="card"><div class="tablewrap"><table>
+      <tr><th>Task</th><th>Answers</th><th>Before</th><th>After</th><th>Time</th></tr>
+      ${SHIPPED.map(r => `<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td><td>${esc(r[2])}</td><td><b class="up">${esc(r[3])}</b></td><td class="muted">${esc(r[4])}</td></tr>`).join("")}
+    </table></div>
+    <p class="muted" style="margin:10px 0 0">Fine-tuning does not change inference speed: the adapters are merged into the weights.${best ? ` Your best run: <a href="#/runs/${esc(best.id)}">${esc(best.name)}</a>, ${pct(best.baseline_accuracy)} → <b>${pct(best.accuracy)}</b>.` : ""}</p>
+    </div>
+  </section>
+
+  <section class="band reveal">
+    <h2 class="big display">Does it <em>really learn</em>?</h2>
+    <div class="kicker">snake, played unassisted — no hints, no safety layer</div>
+    <div class="grid two">
+      <div class="card" style="margin:0">
+        <p style="margin-top:0">The model sees the board and four directions. Its top answer is executed, and an illegal move ends the round.</p>
+        <div class="tablewrap"><table>
+          <tr><th></th><th>Moves survived</th><th>Apples</th><th>Legal moves</th></tr>
+          <tr><td>Base 322M</td><td>1.0</td><td>0.0</td><td>0%</td></tr>
+          <tr><td><b>Fine-tuned</b></td><td><b>169</b></td><td><b>19.8</b></td><td><b>99.3%</b></td></tr>
+          <tr><td class="muted">Planner (ceiling)</td><td class="muted">418</td><td class="muted">34.4</td><td class="muted">100%</td></tr>
+        </table></div>
+        <a class="btn wide" href="#/arena" style="margin-top:14px">Open the arena <span class="arrow">↗</span></a>
+      </div>
+      <figure style="margin:0"><img src="/docs/arena.png" alt="The Snake arena" style="width:100%;border:1px solid var(--line);border-radius:10px" onerror="this.closest('figure').style.display='none'"></figure>
+    </div>
+  </section>
+
+  <section class="band reveal">
+    <h2 class="big display">Inside the <em>studio</em></h2>
+    <div class="kicker">screenshots from real runs on this machine</div>
+    <div class="shots">${SHOTS.map(x => `<figure><img src="/docs/${x[0]}" alt="${esc(x[1])}" onerror="this.closest('figure').style.display='none'"><figcaption>${esc(x[1])}</figcaption></figure>`).join("")}</div>
+  </section>
+
+  <footer class="site">
+    <div>Built by <a href="https://github.com/biplovgautam" target="_blank" rel="noreferrer">Biplov Gautam</a> ·
+      <a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">LayaStudio on GitHub</a> · Apache-2.0, free to use</div>
+    <div>Runs on <a href="https://pypi.org/project/laya-mlx/" target="_blank" rel="noreferrer">laya-mlx</a> ·
+      models by <a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">Convai Innovations</a> ·
+      <a href="https://github.com/ml-explore/mlx" target="_blank" rel="noreferrer">MLX</a></div>
+  </footer>
+
+  <nav class="dock"><span class="name">laya<b>studio</b></span>
+    <a href="#/datasets">Datasets</a><a href="#/arena">Arena</a>
+    <a class="go" href="#/train">Fine-tune ↗</a></nav>
+  </div>`;
+  const reveal = new IntersectionObserver(entries => {
+    entries.forEach(e => e.isIntersecting && e.target.classList.add("in"));
+  }, {rootMargin: "-40px"});
+  $$(".reveal").forEach(el => reveal.observe(el));
+}
+
+// ------------------------------------------------------------------ snake arena
+async function viewArena(_, params, token) {
+  const models = OV.models.filter(m => m.cached).map(m => ({ref: m.ref, name: m.repo}))
+    .concat(OV.finetuned.map(f => ({ref: f.ref, name: f.name})));
+  const snakeRun = OV.finetuned.find(f => /snake/i.test(f.name));
+  const baseGuess = OV.models.find(m => m.cached && (!snakeRun || m.ref.includes("multilingual")));
+  const pick = (id, chosen) => `<select id="${id}" style="max-width:280px">${models.map(m => `<option value="${esc(m.ref)}" ${chosen && chosen.ref === m.ref ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>`;
+  main.innerHTML = `
+  <h1>Snake arena</h1>
+  <p class="lead">Two models play the same game side by side, live and unassisted: each one sees the board and four directions, its top answer is executed, and an illegal move ends the round. This is the difference fine-tuning makes, without a safety layer to hide behind.</p>
+  <section class="card"><div class="row">
+    ${pick("arenaA", baseGuess)} <span class="muted">vs</span> ${pick("arenaB", snakeRun)}
+    <label style="margin:0;color:var(--ink);font-weight:450">speed <input type="number" id="arenaSpeed" value="8" min="1" max="20" style="width:70px"></label>
+    <button class="btn primary" id="arenaGo">Start</button><button class="btn" id="arenaStop">Stop</button>
+    <span class="muted" id="arenaMsg"></span>
+  </div></section>
+  <div class="arena" id="arenaBoards"></div>`;
+  const draw = (state) => {
+    if (state.error) $("#arenaMsg").textContent = state.error;
+    $("#arenaBoards").innerHTML = (state.sides || []).map(side => `
+      <section class="card">
+        <div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(modelName(side.ref))}</h2>
+          <span class="chip">${side.ms ? num(side.ms, 0) + " ms · " + (1000 / side.ms).toFixed(0) + " decisions/s" : "…"}</span></div>
+        <div class="board" style="grid-template-columns:repeat(${state.width}, 1fr)">
+          ${side.board.map(row => [...row].map(c => `<i class="${c === "." ? "" : c + (side.alive ? "" : " dead")}"></i>`).join("")).join("")}
+        </div>
+        <div class="num">
+          <div><b>${side.ticks}</b><span>moves this round</span></div>
+          <div><b>${side.score}</b><span>apples</span></div>
+          <div><b>${pct(side.legal_rate, 0)}</b><span>legal moves</span></div>
+          <div><b>${side.games}</b><span>rounds played</span></div>
+          <div><b>${side.best_apples}</b><span>best apples</span></div>
+        </div>
+        ${side.alive ? "" : `<div class="notice bad" style="margin-bottom:0">Died: ${esc(side.last_death || "illegal move")}</div>`}
+      </section>`).join("") || `<div class="empty">Pick two models and press start.</div>`;
+  };
+  const poll = async () => {
+    try { const state = await api("/api/arena"); if (!current(token)) return; draw(state); } catch (e) { /* transient */ }
+  };
+  $("#arenaGo").onclick = async () => {
+    $("#arenaMsg").textContent = "Loading models…";
+    try {
+      const state = await api("/api/arena/start", {method: "POST", body: {models: [$("#arenaA").value, $("#arenaB").value], speed: Number($("#arenaSpeed").value)}});
+      $("#arenaMsg").textContent = ""; draw(state); every(poll, 300);
+    } catch (e) { $("#arenaMsg").textContent = e.message; }
+  };
+  $("#arenaStop").onclick = async () => { try { draw(await api("/api/arena/stop", {method: "POST", body: {}})); clearTimers(); } catch (e) { toast(e.message); } };
+  await poll();
+  every(poll, 300);
+}
 
 // ------------------------------------------------------------------ datasets
 const TEMPLATE = `{
@@ -1242,11 +1755,17 @@ async function viewRun(id, _, token) {
     const r = data.run;
     main.innerHTML = `
     <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
-    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
+    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><button class="btn" id="rexport" hidden>Export to ONNX</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
     <section class="card" id="live" style="margin-top:16px"><div class="steps" id="rsteps"></div><div id="rprog"></div><div id="rchart" style="margin-top:12px"></div>
     <details><summary>Event log</summary><pre id="rlog" style="max-height:260px"></pre></details></section>
     <div id="results"></div>`;
     $("#rcancel").onclick = async () => { if (!confirm("Stop this run? The partial model is discarded.")) return; try { await api(`/api/jobs/${id}/cancel`, {method: "POST", body: {}}); } catch (e) { toast(e.message); } };
+    $("#rexport").onclick = async () => {
+      try {
+        const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: "run:" + id, target: "onnx"}});
+        location.hash = "#/jobs/" + job.id;
+      } catch (e) { toast(e.message); }
+    };
     $("#rdel").onclick = async () => { if (!confirm("Delete this run and its checkpoint?")) return; try { await api("/api/runs/" + id, {method: "DELETE", body: {}}); location.hash = "#/runs"; } catch (e) { toast(e.message); } };
   };
   const update = () => {
@@ -1254,6 +1773,7 @@ async function viewRun(id, _, token) {
     $("#rstate").innerHTML = pill(job.state);
     $("#rcancel").hidden = job.state !== "running"; $("#rdel").hidden = job.state === "running";
     $("#rplay").hidden = !(job.state === "done" && data.model_path);
+    $("#rexport").hidden = $("#rplay").hidden;
     const phases = events.filter(e => e.type === "phase").map(e => e.phase);
     const cur = phases[phases.length - 1];
     const doneAll = job.state === "done";
@@ -1463,6 +1983,8 @@ async function viewModels() {
   ${OV.models.map(m => `<tr><td class="mono">${esc(m.repo)}</td><td>${esc(m.description)}</td><td>${m.cached ? pill("done").replace(">done<", ">downloaded<") : `<span class="pill">not downloaded</span>`}</td><td>${m.cached ? "" : `<button class="btn small" data-dl="${esc(m.repo)}">Download</button>`}</td></tr>`).join("")}</table></section>
   <section class="card"><h2>Fine-tuned checkpoints</h2>
   ${OV.finetuned.length ? `<div class="tablewrap"><table><tr><th>Run</th><th>Base</th><th>Test accuracy</th><th>Location</th></tr>${OV.finetuned.map(f => `<tr><td><a href="#/runs/${esc(f.ref.slice(4))}">${esc(f.name)}</a></td><td>${esc(modelName(f.base_model))}</td><td>${pct(f.accuracy)}</td><td class="mono faint" style="word-break:break-all">${esc(f.path)}</td></tr>`).join("")}</table></div>` : `<div class="muted">None yet.</div>`}
+  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Verified against MLX</th><th>Location</th></tr>
+  ${OV.exports.map(x => `<tr><td>${esc(modelName(x.model))}</td><td>${esc(x.target.toUpperCase())}</td><td>${x.size_mb} MB</td><td>${x.verification ? `${x.verification.same_answer}/${x.verification.decisions} same answer · max Δp ${x.verification.max_probability_difference.toExponential(1)}` : "–"}</td><td class="mono faint" style="word-break:break-all">${esc(x.path)}</td></tr>`).join("")}</table></div>` : ""}
   <h3>Format and portability</h3><p class="muted">Each checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). It loads unchanged in <code>laya-mlx</code> on Apple silicon and in the upstream PyTorch <code>laya</code> package on Linux CPUs and NVIDIA GPUs. Dedicated exports (ONNX, Core ML, LiteRT, quantized) are the next step of this project.</p></section>`;
   $$("[data-dl]").forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
 }

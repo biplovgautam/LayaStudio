@@ -1556,6 +1556,10 @@ def run_job(job_dir):
             emit("result", accuracy=report["overall"]["accuracy"])
         elif kind == "train":
             train(spec, emit, workspace)
+        elif kind == "export":
+            from .export import export
+
+            export(spec["model"], spec["target"], workspace, emit)
         else:
             raise ValueError(f"Unknown job kind {kind!r}")
         emit("done")
