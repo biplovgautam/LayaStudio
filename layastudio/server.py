@@ -1163,12 +1163,10 @@ svg text{fill:var(--muted);font-size:11px}
 .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:34px;align-items:center;text-align:left}
 .split.flip>*:first-child{order:2}
 .snakeover{position:absolute;inset:0;display:grid;pointer-events:none}
-.snakeover{gap:6px;padding:10px}
-.snakeover i{border-radius:50%;background:transparent}
-.snakeover i.on{background:color-mix(in srgb,var(--accent) 85%,transparent);
-  box-shadow:0 0 14px color-mix(in srgb,var(--accent) 60%,transparent);animation:drift 5s ease-in-out infinite}
-@keyframes drift{0%,100%{opacity:.12;transform:scale(.6)}45%{opacity:.95;transform:scale(1)}}
-@media (prefers-reduced-motion:reduce){.snakeover i.on{animation:none;opacity:.5}}
+.snakeover{gap:3px;padding:8px}
+.snakeover i{border-radius:3px;background:transparent;transition:background .2s linear}
+.snakeover i.s{background:color-mix(in srgb,var(--accent) 62%,transparent)}
+.snakeover i.h{background:var(--accent);box-shadow:0 0 12px color-mix(in srgb,var(--accent) 65%,transparent)}
 .band h2.big{font-size:clamp(30px,4.6vw,62px);text-align:center;margin:0 0 8px}
 .band h2.big em{font-style:normal;color:var(--accent)}
 .band .kicker{text-align:center;color:var(--faint);font-size:12px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:38px}
@@ -1490,16 +1488,43 @@ function heroArt() {
     </g>
   </svg>`;
 }
-function dotsOverlay(host, cols = 22, rows = 12) {
-  // Decoration only - no model runs here. Dots drift and glow over the screenshot;
-  // the real decisions happen in the arena.
+function snakeOverlay(host, cols = 26, rows = 15, length = 9) {
+  // Decoration only: a fixed-length snake wandering at random. No model, no food,
+  // nothing scored - the real games happen in the arena.
   host.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
   const total = cols * rows;
-  const lit = new Set();
-  while (lit.size < Math.round(total * 0.17)) lit.add(Math.floor(Math.random() * total));
-  host.innerHTML = Array.from({length: total}, (_, i) =>
-    `<i class="${lit.has(i) ? "on" : ""}" style="animation-delay:${(Math.random() * 5).toFixed(2)}s;
-      animation-duration:${(3.5 + Math.random() * 3).toFixed(2)}s"></i>`).join("");
+  host.innerHTML = Array.from({length: total}, () => "<i></i>").join("");
+  const cells = [...host.children];
+  const at = (x, y) => cells[y * cols + x];
+  let body = Array.from({length}, (_, i) => [Math.floor(cols / 2) - i, Math.floor(rows / 2)]);
+  let dir = [1, 0];
+  const draw = () => {
+    cells.forEach(c => (c.className = ""));
+    body.forEach(([x, y], i) => {
+      const cell = at(x, y);
+      if (cell) { cell.className = i ? "s" : "h"; cell.style.opacity = 1 - i / (length + 3); }
+    });
+  };
+  const step = () => {
+    const [hx, hy] = body[0];
+    const turns = [dir, [dir[1], -dir[0]], [-dir[1], dir[0]]];  // straight, left, right
+    const weights = [0.68, 0.16, 0.16];
+    for (let attempt = 0; attempt < 6; attempt++) {
+      let roll = Math.random(), pick = turns[0];
+      for (let i = 0; i < turns.length; i++) { if ((roll -= weights[i]) < 0) { pick = turns[i]; break; } }
+      const next = [hx + pick[0], hy + pick[1]];
+      const hits = next[0] < 0 || next[1] < 0 || next[0] >= cols || next[1] >= rows
+        || body.some(c => c[0] === next[0] && c[1] === next[1]);
+      if (hits) continue;
+      dir = pick;
+      body = [next, ...body.slice(0, length - 1)];  // constant length: no growth, no food
+      break;
+    }
+    draw();
+  };
+  draw();
+  if (STATIC || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  timers.push(setInterval(step, 220));
 }
 
 async function viewHome() {
@@ -1646,7 +1671,7 @@ async function viewHome() {
     </div>
   </footer>
   </div>`;
-  dotsOverlay($("#heroSnake"));
+  snakeOverlay($("#heroSnake"));
   const reveal = new IntersectionObserver(entries => {
     entries.forEach(e => e.isIntersecting && e.target.classList.add("in"));
   }, {rootMargin: "-40px"});

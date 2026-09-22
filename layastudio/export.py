@@ -277,20 +277,29 @@ def coreml_graph(model, torch, window, length, hidden_size):
 
         def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype):
             length = self.length
-            keys = attention_mask.bool()[:, None, None, :]
+            # Additive float masks rather than boolean ones: Core ML has no translation
+            # for bitwise operators, and sdpa reads a float mask as "add this to the
+            # scores", so -1e4 on a key is the same instruction as False.
+            blocked = (1.0 - attention_mask.float())[:, None, None, :] * -1e4
             positions = torch.arange(length, device=input_ids.device)
             inside = (positions[None, :] - positions[:, None]).abs() <= self.half_window
+            outside = (1.0 - inside.float())[None, None] * -1e4
             masks = {
-                "full_attention": keys.expand(-1, 1, length, -1),
-                "sliding_attention": keys & inside[None, None],
+                "full_attention": blocked.expand(-1, 1, length, -1),
+                "sliding_attention": blocked + outside,
             }
             hidden = self.model.encoder(input_ids=input_ids, attention_mask=masks)[0]
             hidden = hidden + self.model.type_emb(qtype)[:, None, :]
             padding = ~attention_mask.bool()
             for layer in self.model.head.layers:
                 hidden = layer(hidden, src_key_padding_mask=padding)
-            index = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, self.hidden_size)
-            markers = torch.gather(hidden, 1, index)
+            # One-hot selection instead of gather: Core ML's gather wants integer indices,
+            # and the decomposed graph hands it floats. A [B, K, L] selector times the
+            # [B, L, H] states picks the same rows.
+            selector = (positions[None, None, :] == marker_pos.clamp(min=0)[:, :, None]).to(
+                hidden.dtype
+            )
+            markers = torch.bmm(selector, hidden)
             logits = self.model.scorer(markers).squeeze(-1).float()
             return logits.masked_fill(~marker_mask, -1e4)
 
