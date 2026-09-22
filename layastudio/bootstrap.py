@@ -164,6 +164,7 @@ class Bootstrap:
             Step("runtime", "Loading the MLX runtime"),
             Step("workspace", "Preparing the workspace"),
             Step("model", "Getting a base model"),
+            Step("demos", "Fetching a ready-made fine-tune"),
             Step("examples", "Fetching example datasets"),
         ]
 
@@ -215,6 +216,7 @@ class Bootstrap:
             self._runtime()
             self._workspace()
             self._model()
+            self._demos()
             self._examples()
         except Exception as error:  # noqa: BLE001 - the page shows what went wrong
             self.set("machine", "failed", f"Setup stopped: {type(error).__name__}: {error}")
@@ -312,6 +314,45 @@ class Bootstrap:
             )
             return
         self.set("model", "done", f"{self.model} downloaded ({total / 2**20:.0f} MB)")
+
+    def _demos(self):
+        """A published fine-tune, so the Snake arena has something to show immediately."""
+        if not engine.DEMO_MODELS:
+            self.set("demos", "skipped", "No demo models configured")
+            return
+        self.set("demos", "running")
+        ready, missing = [], []
+        for repo in engine.DEMO_MODELS:
+            if engine.hub_cached(repo):
+                ready.append(repo)
+                continue
+            if not self.download:
+                missing.append(repo)
+                continue
+            try:
+                from huggingface_hub import snapshot_download
+
+                self.set("demos", "running", f"Downloading {repo}")
+                snapshot_download(repo, allow_patterns=list(engine.CHECKPOINT_FILES))
+                ready.append(repo)
+            except Exception as error:  # noqa: BLE001 - not published yet, or offline
+                missing.append(f"{repo} ({type(error).__name__})")
+        if ready and not missing:
+            self.set("demos", "done", f"{', '.join(ready)} ready — try the Snake arena")
+        elif ready:
+            self.set(
+                "demos",
+                "warning",
+                f"{', '.join(ready)} ready · could not fetch " + ", ".join(missing),
+            )
+        else:
+            self.set(
+                "demos",
+                "warning",
+                "Could not fetch "
+                + ", ".join(missing)
+                + ". Fine-tune your own, or publish one with layastudio.publish.",
+            )
 
     def _examples(self):
         if not self.fetch_examples:

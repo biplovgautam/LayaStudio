@@ -59,6 +59,19 @@ BASE_MODELS = {
     "aac6fef/laya-multilingual-mlx": "Multilingual · mmBERT-base · 322M · 1,024 tokens",
     "aac6fef/laya-typed-decisions-mlx": "Typed-decisions · ModernBERT-large · 421M · 1,024 tokens",
 }
+# Fine-tuned checkpoints published from LayaStudio runs, fetched at startup so the arena
+# works before anyone has trained anything. Override with $LAYASTUDIO_DEMO_MODELS
+# ("" disables them, or a comma-separated list of repositories).
+DEMO_MODELS = {
+    "biplovgautam/laya-snake-mlx": "Snake · fine-tuned in LayaStudio (322M, multilingual base)",
+}
+if os.environ.get("LAYASTUDIO_DEMO_MODELS") is not None:
+    DEMO_MODELS = {
+        repo.strip(): "Fine-tuned demo"
+        for repo in os.environ["LAYASTUDIO_DEMO_MODELS"].split(",")
+        if repo.strip()
+    }
+
 CHECKPOINT_FILES = ("model.safetensors", "rl_agent_config.json", "encoder/*", "tokenizer/*")
 STATE_KEYS = ("state", "text", "input", "message", "content")
 SPLITS = {"train": "train", "val": "val", "valid": "val", "validation": "val", "test": "test"}
@@ -110,9 +123,11 @@ def finite(value):
 
 
 def read_json(path, default=None):
+    """Read JSON, or return the default. Missing, unreadable and half-written files all
+    count as absent: the workspace is a folder people (and Finder) poke at."""
     try:
         return json.loads(Path(path).read_text())
-    except FileNotFoundError:
+    except (OSError, ValueError):
         return default
 
 

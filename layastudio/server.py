@@ -51,6 +51,14 @@ class ApiError(Exception):
         self.status = status
 
 
+def folders(path):
+    """Sub-directories only: Finder leaves .DS_Store files in workspace folders."""
+    try:
+        return [p for p in path.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    except OSError:
+        return []
+
+
 def shown_path(path, root=None):
     """Short, home-free paths: readable in the UI and safe in screenshots."""
     path = Path(path).resolve()
@@ -155,7 +163,7 @@ class Jobs:
         return job
 
     def list(self, limit=30):
-        jobs = sorted(self.root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        jobs = sorted(folders(self.root), key=lambda p: p.stat().st_mtime, reverse=True)
         out = []
         for path in jobs[:limit]:
             try:
@@ -422,7 +430,7 @@ class Studio:
 
     def datasets(self):
         out = []
-        for path in sorted((self.workspace / "datasets").iterdir(), reverse=True):
+        for path in sorted(folders(self.workspace / "datasets"), reverse=True):
             meta = engine.read_json(path / "meta.json")
             if meta:
                 questions = engine.read_json(path / "questions.json", {})
@@ -437,7 +445,7 @@ class Studio:
 
     def runs(self):
         out = []
-        for path in (self.workspace / "runs").iterdir():
+        for path in folders(self.workspace / "runs"):
             run = engine.read_json(path / "run.json")
             if not run:
                 continue
@@ -464,6 +472,16 @@ class Studio:
                 "cached": engine.hub_cached(repo),
             }
             for repo, desc in engine.BASE_MODELS.items()
+        ]
+        base += [
+            {
+                "ref": f"hub:{repo}",
+                "repo": repo,
+                "description": desc,
+                "cached": engine.hub_cached(repo),
+                "demo": True,
+            }
+            for repo, desc in engine.DEMO_MODELS.items()
         ]
         tuned = [
             {
@@ -1106,11 +1124,11 @@ svg text{fill:var(--muted);font-size:11px}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted)}.legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
 /* landing page */
 .home{--edge:clamp(16px,4vw,54px)}
-.display{font-family:"Avenir Next Condensed","HelveticaNeue-CondensedBold","Arial Narrow",system-ui,sans-serif;
-  text-transform:uppercase;font-weight:800;letter-spacing:-.01em;line-height:.88}
+.display{font-family:"SF Pro Display","SF Pro Text",-apple-system,BlinkMacSystemFont,"Helvetica Neue",
+  Inter,system-ui,sans-serif;text-transform:none;font-weight:800;letter-spacing:-.045em;line-height:.94}
 .guide{position:fixed;top:51px;bottom:0;left:calc(190px + (100vw - 190px) * .62);width:1px;background:var(--line);opacity:.55;pointer-events:none;z-index:0}
 .hero{position:relative;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:46px;align-items:center;padding:42px 0 26px;min-height:min(78vh,720px)}
-.hero h1{font-size:clamp(44px,7.4vw,104px);margin:0}
+.hero h1{font-size:clamp(40px,6.2vw,86px);margin:0}
 .hero h1 em{font-style:normal;color:var(--accent)}
 .hero .sub{color:var(--muted);font-size:15.5px;max-width:42ch;margin:0 0 20px}
 .cta{display:flex;gap:10px;flex-wrap:wrap}
@@ -1145,10 +1163,12 @@ svg text{fill:var(--muted);font-size:11px}
 .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:34px;align-items:center;text-align:left}
 .split.flip>*:first-child{order:2}
 .snakeover{position:absolute;inset:0;display:grid;pointer-events:none}
-.snakeover i{border-radius:2px;transition:background .18s linear,box-shadow .18s linear}
-.snakeover i.s{background:color-mix(in srgb,var(--accent) 78%,transparent);box-shadow:0 0 12px color-mix(in srgb,var(--accent) 55%,transparent)}
-.snakeover i.h{background:var(--accent);box-shadow:0 0 18px var(--accent)}
-.snakeover i.f{background:var(--good);box-shadow:0 0 14px color-mix(in srgb,var(--good) 60%,transparent)}
+.snakeover{gap:6px;padding:10px}
+.snakeover i{border-radius:50%;background:transparent}
+.snakeover i.on{background:color-mix(in srgb,var(--accent) 85%,transparent);
+  box-shadow:0 0 14px color-mix(in srgb,var(--accent) 60%,transparent);animation:drift 5s ease-in-out infinite}
+@keyframes drift{0%,100%{opacity:.12;transform:scale(.6)}45%{opacity:.95;transform:scale(1)}}
+@media (prefers-reduced-motion:reduce){.snakeover i.on{animation:none;opacity:.5}}
 .band h2.big{font-size:clamp(30px,4.6vw,62px);text-align:center;margin:0 0 8px}
 .band h2.big em{font-style:normal;color:var(--accent)}
 .band .kicker{text-align:center;color:var(--faint);font-size:12px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:38px}
@@ -1195,15 +1215,19 @@ svg text{fill:var(--muted);font-size:11px}
 .menu-btn:hover i:first-of-type{transform:translateY(1px)}
 .menu-btn:hover i:last-of-type{transform:translateY(-1px)}
 nav.dock{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:8;display:flex;flex-direction:row;
-  align-items:center;gap:4px;width:max-content;background:var(--ink);color:var(--bg);border:0;border-radius:999px;
-  padding:7px 8px 7px 18px;box-shadow:0 10px 30px rgba(0,0,0,.28)}
+  align-items:center;gap:2px;width:max-content;max-width:calc(100vw - 24px);overflow-x:auto;
+  background:color-mix(in srgb,var(--panel) 62%,transparent);color:var(--ink);
+  border:1px solid color-mix(in srgb,var(--ink) 12%,transparent);border-radius:999px;
+  padding:6px 7px 6px 16px;box-shadow:0 12px 40px rgba(0,0,0,.30),inset 0 1px 0 rgba(255,255,255,.22);
+  backdrop-filter:blur(22px) saturate(180%);-webkit-backdrop-filter:blur(22px) saturate(180%)}
 nav.dock a{display:inline-block;color:inherit;font-size:12px;letter-spacing:.08em;text-transform:uppercase;
   padding:7px 13px;border-radius:999px;white-space:nowrap}
-nav.dock a:hover{background:color-mix(in srgb,var(--bg) 18%,transparent);text-decoration:none}
+nav.dock a:hover{background:color-mix(in srgb,var(--ink) 10%,transparent);text-decoration:none}
+nav.dock a.on{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
 nav.dock a.go{background:var(--accent);color:var(--on-accent);font-weight:700}
 nav.dock a.go:hover{filter:brightness(1.1)}
-nav.dock a.running{display:inline-flex;align-items:center;gap:7px;background:color-mix(in srgb,var(--bg) 16%,transparent);
-  font-size:11.5px}
+nav.dock a.running{display:inline-flex;align-items:center;gap:7px;
+  background:color-mix(in srgb,var(--accent) 14%,transparent);font-size:11.5px}
 nav.dock a.running .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite}
 nav.dock .name{font-weight:700;letter-spacing:-.02em;font-size:14px;padding-right:8px;white-space:nowrap}
 nav.dock .name b{color:var(--accent)}
@@ -1257,8 +1281,11 @@ footer.site .legal{display:flex;justify-content:space-between;gap:16px;flex-wrap
   </div>
 </div>
 <nav class="dock" id="dock">
-  <button class="menu-btn" id="menubtn" aria-label="Menu"><i></i><i></i><span>Menu</span></button>
   <a class="name" href="#/home">laya<b>studio</b></a>
+  <a href="#/datasets" data-v="datasets">Datasets</a>
+  <a href="#/runs" data-v="runs">Runs</a>
+  <a href="#/arena" data-v="arena">Arena</a>
+  <a href="#/playground" data-v="playground">Playground</a>
   <span id="dockjob"></span>
   <a class="go" href="#/train">Fine-tune ↗</a>
 </nav>
@@ -1352,7 +1379,7 @@ function hbars(counts, color = "var(--accent)") {
 
 // ------------------------------------------------------------------ shell
 async function refresh() {
-  try { OV = await api("/api/state"); } catch (e) { return; }
+  try { OV = await api("/api/state"); } catch (e) { return null; }
   const s = OV.system;
   $("#syschip").textContent = s.ok ? `${s.chip} · ${s.memory_gb} GB · MLX ${s.mlx}` : (s.chip || "Setting up…");
   $("#syschip").title = s.ok ? `${s.cores} cores · ${s.usable_gpu_gb} GB usable by the GPU · laya-mlx ${s.laya_mlx} · ${s.os}` : (s.note || "");
@@ -1393,7 +1420,7 @@ const PAGES = [
 function buildMenu() {
   $("#menulinks").innerHTML = PAGES.map(p =>
     `<a href="#/${p[0]}" data-v="${p[0]}"><b>${esc(p[1])}</b><span>${esc(p[2])}</span></a>`).join("");
-  $("#menubtn").onclick = () => { $("#menu").hidden = false; };
+  $$("[data-menu]").forEach(el => el.onclick = e => { e.preventDefault(); $("#menu").hidden = false; });
   $("#menuclose").onclick = closeMenu;
   $("#menu").onclick = e => { if (e.target.id === "menu") closeMenu(); };
   document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
@@ -1408,10 +1435,17 @@ async function route() {
   let view = a || "home", arg = b ? decodeURIComponent(b) : null;
   if (view === "datasets" && arg) view = "dataset";
   if (view === "runs" && arg) view = "run";
-  $$(".menu-grid a").forEach(n => n.classList.toggle("on", n.dataset.v === (a || "home")));
+  $$("nav.dock a[data-v], .menu-grid a").forEach(n =>
+    n.classList.toggle("on", n.dataset.v === (a || "home")));
   closeMenu();
   await refresh();
   if (!current(token)) return;
+  if (!OV) {  // the server is restarting, or not up yet: keep trying, do not crash a view
+    main.innerHTML = `<div class="empty">Connecting to the studio…<br>
+      <span class="faint">If this persists, restart it with <code>uv run layastudio</code>.</span></div>`;
+    every(async () => { if (await refresh()) route(); }, 1500);
+    return;
+  }
   try { await (routes[view] || viewHome)(arg, new URLSearchParams(qs || ""), token); }
   catch (e) { main.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
   every(refresh, 3000);
@@ -1456,43 +1490,16 @@ function heroArt() {
     </g>
   </svg>`;
 }
-function snakeOverlay(host, cols = 22, rows = 12) {
-  // A snake crawling over the hero shot: the same game, drawn in CSS.
+function dotsOverlay(host, cols = 22, rows = 12) {
+  // Decoration only - no model runs here. Dots drift and glow over the screenshot;
+  // the real decisions happen in the arena.
   host.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-  host.innerHTML = Array.from({length: cols * rows}, () => "<i></i>").join("");
-  const cells = [...host.children];
-  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  let body = [[4, 6], [3, 6], [2, 6]], dir = [1, 0];
-  let food = [12, 4];
-  const key = (x, y) => y * cols + x;
-  const step = () => {
-    const [hx, hy] = body[0];
-    const wants = [food[0] - hx, food[1] - hy];
-    const options = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-      .filter(d => !(d[0] === -dir[0] && d[1] === -dir[1]))
-      .sort((a, b) => (b[0] * Math.sign(wants[0]) + b[1] * Math.sign(wants[1]))
-                    - (a[0] * Math.sign(wants[0]) + a[1] * Math.sign(wants[1])));
-    for (const d of options) {
-      const next = [hx + d[0], hy + d[1]];
-      const blocked = next[0] < 0 || next[1] < 0 || next[0] >= cols || next[1] >= rows
-        || body.some(c => c[0] === next[0] && c[1] === next[1]);
-      if (blocked) continue;
-      dir = d;
-      body.unshift(next);
-      if (next[0] === food[0] && next[1] === food[1]) {
-        food = [1 + Math.floor(Math.random() * (cols - 2)), 1 + Math.floor(Math.random() * (rows - 2))];
-      } else body.pop();
-      break;
-    }
-    cells.forEach(c => (c.className = ""));
-    body.forEach((c, i) => cells[key(c[0], c[1])] && (cells[key(c[0], c[1])].className = i ? "s" : "h"));
-    if (cells[key(food[0], food[1])]) cells[key(food[0], food[1])].className = "f";
-  };
-  for (let i = 0; i < 14; i++) step();  // a body, not a single cell
-  if (STATIC || still) return () => {};  // screenshots and reduced motion: draw once
-  const timer = setInterval(step, 260);
-  timers.push(timer);
-  return () => clearInterval(timer);
+  const total = cols * rows;
+  const lit = new Set();
+  while (lit.size < Math.round(total * 0.17)) lit.add(Math.floor(Math.random() * total));
+  host.innerHTML = Array.from({length: total}, (_, i) =>
+    `<i class="${lit.has(i) ? "on" : ""}" style="animation-delay:${(Math.random() * 5).toFixed(2)}s;
+      animation-duration:${(3.5 + Math.random() * 3).toFixed(2)}s"></i>`).join("");
 }
 
 async function viewHome() {
@@ -1617,7 +1624,8 @@ async function viewHome() {
         <a class="btn wide primary" href="#/datasets">Start fine-tuning <span class="arrow">↗</span></a>
       </div>
       <div><h4>Studio</h4><ul>
-        ${PAGES.slice(1, 6).map(p => `<li><a href="#/${p[0]}">${esc(p[1])}</a></li>`).join("")}
+        ${PAGES.slice(1).map(p => `<li><a href="#/${p[0]}">${esc(p[1])}</a></li>`).join("")}
+        <li><a href="#" data-menu>All pages ↗</a></li>
       </ul></div>
       <div><h4>Project</h4><ul>
         <li><a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub ↗</a></li>
@@ -1638,7 +1646,7 @@ async function viewHome() {
     </div>
   </footer>
   </div>`;
-  snakeOverlay($("#heroSnake"));
+  dotsOverlay($("#heroSnake"));
   const reveal = new IntersectionObserver(entries => {
     entries.forEach(e => e.isIntersecting && e.target.classList.add("in"));
   }, {rootMargin: "-40px"});
@@ -1649,7 +1657,8 @@ async function viewHome() {
 async function viewArena(_, params, token) {
   const models = OV.models.filter(m => m.cached).map(m => ({ref: m.ref, name: m.repo}))
     .concat(OV.finetuned.map(f => ({ref: f.ref, name: f.name})));
-  const snakeRun = OV.finetuned.find(f => /snake/i.test(f.name));
+  const snakeRun = OV.finetuned.find(f => /snake/i.test(f.name))
+    || models.find(m => /snake/i.test(m.name) && m.ref.startsWith("hub:"));
   const baseGuess = OV.models.find(m => m.cached && (!snakeRun || m.ref.includes("multilingual")));
   const pick = (id, chosen) => `<select id="${id}" style="max-width:280px">${models.map(m => `<option value="${esc(m.ref)}" ${chosen && chosen.ref === m.ref ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>`;
   main.innerHTML = `

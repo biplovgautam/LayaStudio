@@ -21,6 +21,7 @@ from pathlib import Path
 from .engine import WORKSPACE, now, read_json, resolve_model_ref, write_json
 
 TARGETS = ("onnx", "coreml")
+INPUTS = ("input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype")
 SAMPLE_STATES = [  # a spread of lengths and topics, to check the export on real prompts
     "I was charged twice this month and support never replied.",
     "The build fails on login with a null pointer after the last deploy.",
@@ -255,6 +256,49 @@ def export(model_ref, target, workspace=WORKSPACE, emit=None, out_dir=None):
     return report
 
 
+def coreml_graph(model, torch, window, length, hidden_size):
+    """The decision model with ModernBERT's mask builder lifted out of the graph.
+
+    Transformers builds its attention masks with a vmap-style helper whose ops Core ML
+    cannot translate. The masks themselves are plain booleans - "this key is real" and
+    "this key is inside the sliding window" - so we build them with ordinary tensor ops and
+    hand the encoder the finished dict, which it accepts and uses as-is.
+    """
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = model
+            self.half_window = window // 2
+            # Core ML graphs are fixed-shape, so sizes are constants rather than
+            # traced tensors: the converter cannot fold a dynamic size into a cast.
+            self.length = length
+            self.hidden_size = hidden_size
+
+        def forward(self, input_ids, attention_mask, marker_pos, marker_mask, qtype):
+            length = self.length
+            keys = attention_mask.bool()[:, None, None, :]
+            positions = torch.arange(length, device=input_ids.device)
+            inside = (positions[None, :] - positions[:, None]).abs() <= self.half_window
+            masks = {
+                "full_attention": keys.expand(-1, 1, length, -1),
+                "sliding_attention": keys & inside[None, None],
+            }
+            hidden = self.model.encoder(input_ids=input_ids, attention_mask=masks)[0]
+            hidden = hidden + self.model.type_emb(qtype)[:, None, :]
+            padding = ~attention_mask.bool()
+            for layer in self.model.head.layers:
+                hidden = layer(hidden, src_key_padding_mask=padding)
+            index = marker_pos.clamp(min=0)[:, :, None].expand(-1, -1, self.hidden_size)
+            markers = torch.gather(hidden, 1, index)
+            logits = self.model.scorer(markers).squeeze(-1).float()
+            return logits.masked_fill(~marker_mask, -1e4)
+
+    wrapper = Wrapper()
+    wrapper.eval()
+    return wrapper
+
+
 def export_coreml(model_dir, out_dir, emit, model_ref):
     """Core ML for the Apple Neural Engine. Best effort: conversion support varies."""
     try:
@@ -264,8 +308,19 @@ def export_coreml(model_dir, out_dir, emit, model_ref):
 
     model, cfg, torch = torch_model(model_dir)
     batch, questions, items = sample_batch(model_dir, torch)
-    graph = DecisionGraph(model, torch)
+    window = read_json(model_dir / "encoder/config.json").get("local_attention", 128)
+    encoder_cfg = read_json(model_dir / "encoder/config.json")
+    graph = coreml_graph(
+        model, torch, window, batch["input_ids"].shape[1], encoder_cfg["hidden_size"]
+    )
     emit("phase", phase="export", message="Tracing for Core ML")
+    with torch.no_grad():  # the lifted masks must not change a single answer
+        reference = DecisionGraph(model, torch)(*[batch[k] for k in INPUTS])
+        lifted = graph(*[batch[k] for k in INPUTS])
+        drift = float((reference - lifted).abs().max())
+        if drift > 1e-3:
+            raise RuntimeError(f"Mask rewrite changed the logits by {drift:.4g}")
+    emit("log", message=f"Mask rewrite verified: logits differ by at most {drift:.2g}")
     with torch.no_grad():
         traced = torch.jit.trace(
             graph,

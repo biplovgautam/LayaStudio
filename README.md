@@ -88,9 +88,38 @@ Useful flags: `--port 8800`, `--workspace ~/laya-work`, `--no-download` (never f
 | **Loading the MLX runtime** | `laya-mlx` and MLX versions, and how much memory the GPU may use |
 | **Preparing the workspace** | Creates `workspace/`, counts what is already there, checks free disk space |
 | **Getting a base model** | Downloads `aac6fef/laya-mlx` (English, 421M) into the Hugging Face cache, with a progress bar |
+| **Fetching a ready-made fine-tune** | Downloads the published Snake model so the arena works immediately |
 | **Fetching example datasets** | Pulls the public examples from their source URLs — nothing is stored in git |
 
 Every step reports on the page, and nothing blocks you from looking around while it runs.
+
+## Try it without training anything
+
+The studio ships with a ready-made fine-tune. At startup it downloads
+[`biplovgautam/laya-snake-mlx`](https://huggingface.co/biplovgautam/laya-snake-mlx) — the
+Snake model from the table below — so the **Snake arena** has something to play the moment
+the page opens: the base checkpoint on the left, the fine-tune on the right, same rules,
+no safety layer.
+
+```bash
+LAYASTUDIO_DEMO_MODELS="" uv run layastudio     # skip it, if you would rather not
+```
+
+### Publishing your own run
+
+Your fine-tuned checkpoints are yours. To put one on the Hub with a model card built from
+that run's measured numbers:
+
+```bash
+hf auth login                                                  # your own token, once
+python -m layastudio.publish run:<run-id> --repo <you>/<name>   # --dry-run writes the card only
+```
+
+The card carries the before/after table, the significance test, the calibration
+temperatures, the hyperparameters and the dataset hash from that run, so what the Hub
+claims is what the studio measured. Add the repository to `LAYASTUDIO_DEMO_MODELS` (or
+`DEMO_MODELS` in `layastudio/engine.py`) and it will be fetched at startup like the one
+above.
 
 ## Five-minute tour
 
@@ -336,6 +365,7 @@ Core ML is implemented but blocked upstream: on coremltools 9, converting Modern
 | [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
 | [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
 | [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
+| [`layastudio/publish.py`](layastudio/publish.py) | Publishes a run to Hugging Face with a card built from its own numbers |
 | [`docs/logo.py`](docs/logo.py) | Regenerates the wordmark |
 | [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup |
 | [`docs/screenshots.py`](docs/screenshots.py) | Regenerates the screenshots in this README from a running studio |
