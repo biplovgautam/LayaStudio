@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "layastudio"
+version = "0.1.0"
+description = "Fine-tune Laya typed-decision models on your own data, on your own Mac"
+keywords = ["laya", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+  "laya-mlx>=0.2,<0.3",
+  "mlx>=0.32.2,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "numpy>=1.26",
+  "huggingface-hub>=0.34,<2",
+  "tokenizers>=0.21,<1",
+  "pyarrow>=18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.12", "build>=1"]
+shots = ["Pillow>=11"]
+
+[project.scripts]
+layastudio = "layastudio.server:main"
+
+[project.urls]
+Repository = "https://github.com/biplovgautam/LayaStudio"
+Issues = "https://github.com/biplovgautam/LayaStudio/issues"
+"Laya (upstream model)" = "https://github.com/NandhaKishorM/laya"
+"laya-mlx (runtime)" = "https://pypi.org/project/laya-mlx/"
+
+[tool.hatch.build.targets.wheel]
+packages = ["layastudio"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

@@ -1,0 +1,15 @@
+LayaStudio
+Copyright 2026 LayaStudio contributors
+
+This product includes software developed as an independent application on top of:
+
+* Laya (https://github.com/NandhaKishorM/laya), Copyright Convai Innovations,
+  licensed under the Apache License 2.0. Laya's model architecture, its RLCD training
+  objective, its prompt construction and its calibration scheme are reproduced here for
+  fine-tuning; its pretrained weights are downloaded from Hugging Face at runtime and are
+  not redistributed in this repository.
+
+* laya-mlx (https://pypi.org/project/laya-mlx/), the native MLX inference runtime for
+  Laya, licensed under the Apache License 2.0 and used as a dependency.
+
+LayaStudio is not affiliated with or endorsed by Convai Innovations.

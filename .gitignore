@@ -1,0 +1,12 @@
+# Your datasets, runs and checkpoints: never committed
+workspace/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.DS_Store
+.env
+*.safetensors
