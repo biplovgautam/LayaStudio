@@ -28,8 +28,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.12", "build>=1"]
-export = ["laya>=0.1.6", "torch>=2.4", "onnx>=1.16", "onnxruntime>=1.18", "safetensors>=0.4"]
-coreml = ["laya>=0.1.6", "torch>=2.4", "coremltools>=8.0"]
+export = ["laya>=0.1.6", "torch>=2.4", "onnx>=1.16", "onnxruntime>=1.18", "onnxscript>=0.2", "safetensors>=0.4"]
+coreml = ["laya>=0.1.6", "torch>=2.4", "coremltools>=8.0", "scikit-learn>=1.4"]
 shots = ["Pillow>=11"]
 
 [project.scripts]

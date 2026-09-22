@@ -1574,7 +1574,10 @@ def run_job(job_dir):
         elif kind == "export":
             from .export import export
 
-            export(spec["model"], spec["target"], workspace, emit)
+            export(
+                spec["model"], spec["target"], workspace, emit,
+                precision=spec.get("precision", "float"),
+            )
         else:
             raise ValueError(f"Unknown job kind {kind!r}")
         emit("done")

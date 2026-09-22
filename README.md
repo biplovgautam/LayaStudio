@@ -60,7 +60,7 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 | 🎛 **Calibration refit** | Temperatures refit per question type and option count, so the probabilities you gate on stay meaningful |
 | 🔍 **Token-budget check** | Shows which rows get silently cut and which option labels get clipped *before* you spend an hour training |
 | 🚦 **Production view** | Coverage/accuracy table for confidence gating, confusion matrices, and the most confident remaining mistakes |
-| 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint, plus verified ONNX and Core ML exports — the Core ML one runs at 17.8 ms on this Mac |
+| 📦 **Portable output** | LoRA merged back: a standard Laya checkpoint, plus verified ONNX and Core ML exports in float, int8 or int4 — int8 Core ML answers identically at 308 MB and 8.8 ms, 4.1× faster than the runtime that trained it |
 | 🔒 **Local by construction** | Binds to 127.0.0.1, no external scripts in the page, jobs run with `HF_HUB_OFFLINE=1` |
 | 🐍 **Proof, not vibes** | A built-in Snake task where the fine-tuned model plays *unassisted* — the base model dies on move one |
 | 🎛 **A studio, not a script** | A landing page, live training charts, a side-by-side playground and a Snake arena — all served from one local file |
@@ -349,32 +349,60 @@ Because the layout and tensor names match the original checkpoints, the same fol
 
 ```bash
 uv sync --extra export
-python -m layastudio.export run:<id> --target onnx      # or press "Export to ONNX" on the run page
+python -m layastudio.export run:<id> --target onnx                     # or pick it on the run page
+python -m layastudio.export run:<id> --target onnx --precision int8    # smaller
 ```
 
-The export writes `model.onnx` (opset 17, dynamic batch, tokens and options) next to the tokenizer, the calibration temperatures and the questions the model was trained for — everything a server needs, with no Laya code required to run it. It goes wherever onnxruntime goes: Linux and Windows CPUs, NVIDIA CUDA, DirectML.
-
-Exports are verified rather than assumed. The studio runs the exported graph and this machine's MLX runtime on the same real prompts and records the result: on the Snake checkpoint, **10/10 identical answers with a maximum probability difference of 2.7e-07**, at 33.6 ms per decision on this Mac's CPU.
+The export writes `model.onnx` (opset 18, dynamic batch, tokens and options) next to the tokenizer, the calibration temperatures and the questions the model was trained for — everything a server needs, with no Laya code required to run it. It goes wherever onnxruntime goes: Linux and Windows CPUs, NVIDIA CUDA, DirectML.
 
 **Core ML**, for the Apple Neural Engine:
 
 ```bash
-uv run --python 3.12 --with 'coremltools>=8' --with torch --with laya --with laya-mlx \
-  python -m layastudio.export run:<id> --target coreml
+uv run --python 3.12 --extra coreml --extra export \
+  python -m layastudio.export run:<id> --target coreml --precision int8
 ```
 
 Three rewrites make the graph convertible, each checked against the original before
 conversion: ModernBERT's mask builder is lifted out of the graph, the masks become
 additive floats instead of booleans, and the marker lookup becomes a one-hot matmul
-instead of a gather. The export then goes through `torch.export` rather than TorchScript.
-
-On the Snake checkpoint that produces a 614 MB `.mlpackage` that answers **10/10** prompts
-the same way as MLX (max probability difference 0.028, FP16 rounding) at **17.8 ms per
-decision — about twice as fast as the same model in MLX on this Mac**. It needs a Python
+instead of a gather. The export then goes through `torch.export` rather than TorchScript,
+and the graph is shaped around the rows it will actually be asked about. It needs a Python
 version coremltools ships binaries for (3.12 works, 3.14 does not); the studio says so
 plainly if you run it on the wrong one.
 
-**Roadmap:** training on NVIDIA GPUs and Linux; LiteRT for Android and NPUs; quantized variants; a batch scoring CLI; and an experiment on retraining the escalation head.
+#### What each export actually costs
+
+Exports are verified, not assumed. Every one of them is run on the **same held-out rows as
+the model it came from**, next to this machine's MLX runtime, and the studio records the
+accuracy, the agreement and the speed. The Snake checkpoint, on an Apple M4 with 16 GB:
+
+| Runtime | Precision | Size | Per decision | Accuracy | Same answer as MLX |
+|---|---|---|---|---|---|
+| MLX (the runtime that trained it) | fp16 | 1.2 GB | 36.2 ms | 98.0% | — |
+| **Core ML** | **int8** | **308 MB** | **8.8 ms** | **98.0%** | **100%** |
+| Core ML | fp16 | 614 MB | 9.0 ms | 98.0% | 100% |
+| Core ML | int4 | 154 MB | 8.9 ms | 70.0% | 72% |
+| ONNX (CPU) | float | 1230 MB | 82.6 ms | 98.0% | 100% |
+| ONNX (CPU) | int8 | 310 MB | 101.3 ms | 98.0% | 100% |
+| ONNX (CPU) | int4 | 820 MB | 290.3 ms | 98.5% | 99.5% |
+
+Three things worth taking from that table, all of them measured rather than assumed:
+
+- **Core ML int8 is free money.** A quarter of the checkpoint's size, **4.1× faster than
+  the MLX runtime that trained the model**, and not one of the 100 held-out decisions
+  changed. That is the export to ship on Apple hardware.
+- **int4 is not.** Core ML palettizes to 154 MB and stays fast, but accuracy falls from
+  98.0% to 70.0% — a 322M model has no spare precision to give. ONNX int4 keeps its
+  accuracy (it only quantizes matmul weights) and pays for it: bigger than int8 and 3.5×
+  slower, because this CPU has no fast kernel for those blocks.
+- **Quantization is not automatically faster.** ONNX int8 is a third of the size and
+  *slower* than float on the same CPU. Size and speed are separate questions, so the
+  studio measures both, per export, on your own rows.
+
+The checkpoint itself stays portable regardless: a fine-tuned checkpoint loaded with
+upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime.
+
+**Roadmap:** training on NVIDIA GPUs and Linux; LiteRT for Android and NPUs; a batch scoring CLI; and an experiment on retraining the escalation head.
 
 ## Privacy and security
 

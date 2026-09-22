@@ -655,14 +655,23 @@ class Studio:
             )
         if kind == "export":
             engine.resolve_model_ref(body["model"], self.workspace)
+            from .export import PRECISIONS
+
             target = body.get("target", "onnx")
-            if target not in ("onnx", "coreml"):
+            if target not in PRECISIONS:
                 raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown export target {target!r}")
+            precision = body.get("precision", "float")
+            if precision not in PRECISIONS[target]:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    f"{target} exports can be {', '.join(PRECISIONS[target])}, not {precision!r}",
+                )
+            label = target.upper() + ("" if precision == "float" else f" ({precision})")
             return self.jobs.start(
                 "export",
-                {"model": body["model"], "target": target},
+                {"model": body["model"], "target": target, "precision": precision},
                 f"export-{stamp}",
-                f"Export {modelname(body['model'])} to {target.upper()}",
+                f"Export {modelname(body['model'])} to {label}",
             )
         if kind == "download":
             repo = body.get("repo_id")
@@ -1936,14 +1945,15 @@ async function viewRun(id, _, token) {
     const r = data.run;
     main.innerHTML = `
     <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
-    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><button class="btn" id="rexport" hidden>Export to ONNX</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
+    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto"><option value="onnx:float">ONNX · float</option><option value="onnx:int8">ONNX · int8</option><option value="onnx:int4">ONNX · int4</option><option value="coreml:float">Core ML · float</option><option value="coreml:int8">Core ML · int8</option><option value="coreml:int4">Core ML · int4</option></select><button class="btn" id="rexport" hidden>Export</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
     <section class="card" id="live" style="margin-top:16px"><div class="steps" id="rsteps"></div><div id="rprog"></div><div id="rchart" style="margin-top:12px"></div>
     <details><summary>Event log</summary><pre id="rlog" style="max-height:260px"></pre></details></section>
     <div id="results"></div>`;
     $("#rcancel").onclick = async () => { if (!confirm("Stop this run? The partial model is discarded.")) return; try { await api(`/api/jobs/${id}/cancel`, {method: "POST", body: {}}); } catch (e) { toast(e.message); } };
     $("#rexport").onclick = async () => {
       try {
-        const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: "run:" + id, target: "onnx"}});
+        const [target, precision] = $("#rfmt").value.split(":");
+        const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: "run:" + id, target, precision}});
         location.hash = "#/jobs/" + job.id;
       } catch (e) { toast(e.message); }
     };
@@ -1954,7 +1964,7 @@ async function viewRun(id, _, token) {
     $("#rstate").innerHTML = pill(job.state);
     $("#rcancel").hidden = job.state !== "running"; $("#rdel").hidden = job.state === "running";
     $("#rplay").hidden = !(job.state === "done" && data.model_path);
-    $("#rexport").hidden = $("#rplay").hidden;
+    $("#rexport").hidden = $("#rfmt").hidden = $("#rplay").hidden;
     const phases = events.filter(e => e.type === "phase").map(e => e.phase);
     const cur = phases[phases.length - 1];
     const doneAll = job.state === "done";
@@ -2164,9 +2174,9 @@ async function viewModels() {
   ${OV.models.map(m => `<tr><td class="mono">${esc(m.repo)}</td><td>${esc(m.description)}</td><td>${m.cached ? pill("done").replace(">done<", ">downloaded<") : `<span class="pill">not downloaded</span>`}</td><td>${m.cached ? "" : `<button class="btn small" data-dl="${esc(m.repo)}">Download</button>`}</td></tr>`).join("")}</table></section>
   <section class="card"><h2>Fine-tuned checkpoints</h2>
   ${OV.finetuned.length ? `<div class="tablewrap"><table><tr><th>Run</th><th>Base</th><th>Test accuracy</th><th>Location</th></tr>${OV.finetuned.map(f => `<tr><td><a href="#/runs/${esc(f.ref.slice(4))}">${esc(f.name)}</a></td><td>${esc(modelName(f.base_model))}</td><td>${pct(f.accuracy)}</td><td class="mono faint" style="word-break:break-all">${esc(f.path)}</td></tr>`).join("")}</table></div>` : `<div class="muted">None yet.</div>`}
-  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Verified against MLX</th><th>Location</th></tr>
-  ${OV.exports.map(x => `<tr><td>${esc(modelName(x.model))}</td><td>${esc(x.target.toUpperCase())}</td><td>${x.size_mb} MB</td><td>${x.verification ? `${x.verification.same_answer}/${x.verification.decisions} same answer · max Δp ${x.verification.max_probability_difference.toExponential(1)}` : "–"}</td><td class="mono faint" style="word-break:break-all">${esc(x.path)}</td></tr>`).join("")}</table></div>` : ""}
-  <h3>Format and portability</h3><p class="muted">Each checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). It loads unchanged in <code>laya-mlx</code> on Apple silicon and in the upstream PyTorch <code>laya</code> package on Linux CPUs and NVIDIA GPUs. Dedicated exports (ONNX, Core ML, LiteRT, quantized) are the next step of this project.</p></section>`;
+  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Per decision</th><th>Verified against MLX</th><th>Location</th></tr>
+  ${OV.exports.map(x => `<tr><td>${esc(modelName(x.model))}</td><td>${esc(x.target.toUpperCase())}${x.precision && x.precision !== "float" ? " · " + esc(x.precision) : ""}</td><td>${x.size_mb} MB</td><td>${x.ms_per_decision || x.ms_per_decision_cpu || "–"} ms${x.test ? ` · ${(100 * x.test.accuracy_exported).toFixed(1)}%` : ""}</td><td>${x.verification ? `${x.verification.same_answer}/${x.verification.decisions} same answer · max Δp ${x.verification.max_probability_difference.toExponential(1)}` : "–"}</td><td class="mono faint" style="word-break:break-all">${esc(x.path)}</td></tr>`).join("")}</table></div>` : ""}
+  <h3>Format and portability</h3><p class="muted">Each checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). It loads unchanged in <code>laya-mlx</code> on Apple silicon and in the upstream PyTorch <code>laya</code> package on Linux CPUs and NVIDIA GPUs. Dedicated exports are on the run page: ONNX and Core ML, each in float, int8 or int4, and each scored on the same held-out rows as the model it came from. LiteRT for Android and NPUs is the next step of this project.</p></section>`;
   $$("[data-dl]").forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
 }
 
