@@ -1039,9 +1039,9 @@ header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;
 .chip.live{background:var(--accent-soft);color:var(--accent);cursor:pointer}
 .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 .live .dot{animation:pulse 1.2s infinite}@keyframes pulse{50%{opacity:.3}}
-.layout{display:grid;grid-template-columns:190px minmax(0,1fr);min-height:calc(100vh - 51px)}
-.mainwrap{min-width:0;display:flex;flex-direction:column}
-#setup{padding:20px 28px 0}
+.layout{display:block;min-height:calc(100vh - 51px)}
+.mainwrap{min-width:0;display:flex;flex-direction:column;align-items:center}
+#setup{padding:20px 28px 0;width:100%;max-width:1180px}
 .card.setup{border-color:var(--accent);margin-bottom:0}
 nav{border-right:1px solid var(--line);padding:16px 10px;display:flex;flex-direction:column;gap:2px}
 nav a{display:block;padding:7px 12px;border-radius:7px;color:var(--ink)}
@@ -1049,7 +1049,7 @@ nav a:hover{background:var(--code);text-decoration:none}
 nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
 nav .sep{height:1px;background:var(--line);margin:10px 4px}
 nav .note{color:var(--faint);font-size:12px;padding:4px 12px}
-main{padding:24px 28px 60px;max-width:1180px;width:100%;min-width:0}
+main{padding:26px 28px 130px;max-width:1180px;width:100%;min-width:0}
 h1{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
 h2{font-size:15px;margin:0 0 12px}
 h3{font-size:13px;margin:16px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -1114,7 +1114,7 @@ svg text{fill:var(--muted);font-size:11px}
 .hero h1 em{font-style:normal;color:var(--accent)}
 .hero .sub{color:var(--muted);font-size:15.5px;max-width:42ch;margin:0 0 20px}
 .cta{display:flex;gap:10px;flex-wrap:wrap}
-.btn.wide{border-radius:2px;padding:13px 22px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:12.5px}
+.btn.wide{border-radius:999px;padding:13px 22px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:12.5px}
 .btn.wide .arrow{transition:transform .25s}
 .btn.wide:hover .arrow{transform:translate(4px,-4px)}
 .hero-stats{display:flex;gap:30px;margin-top:30px;flex-wrap:wrap}
@@ -1123,9 +1123,11 @@ svg text{fill:var(--muted);font-size:11px}
 .hero .shot{margin:0;position:relative}
 .hero .shot img{width:100%;border:1px solid var(--line);border-radius:12px;display:block;box-shadow:0 18px 50px rgba(0,0,0,.22)}
 .hero .shot figcaption{margin-top:12px;font-size:12.5px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
-.hero .shot .cluster{position:absolute;right:-14px;bottom:44px;width:120px;opacity:.9}
+.hero .shot .frame{position:relative;border-radius:12px;overflow:hidden}
+.hero .shot .frame img{border-radius:0;border:0}
+.hero .shot .frame{border:1px solid var(--line);box-shadow:0 18px 50px rgba(0,0,0,.22)}
+.hero .shot.fallback .frame{aspect-ratio:16/10;background:var(--code)}
 .hero .shot.fallback img{display:none}
-.hero .shot.fallback .cluster{position:static;width:auto;max-width:280px;margin-left:auto}
 .cluster{display:grid;grid-template-columns:repeat(8,1fr);gap:5px;max-width:300px;margin-left:auto}
 .cluster i{aspect-ratio:1;border-radius:3px;background:var(--code);display:block}
 .cluster i.on{background:var(--accent);box-shadow:0 0 16px color-mix(in srgb,var(--accent) 60%,transparent);animation:flicker 5s ease-in-out infinite}
@@ -1135,23 +1137,34 @@ svg text{fill:var(--muted);font-size:11px}
 .ticker span{font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
 .ticker b{color:var(--accent)}
 @keyframes slide{to{transform:translateX(-50%)}}
-.band{position:relative;z-index:1;padding:64px 0;border-top:1px solid var(--line)}
+.band{position:relative;z-index:1;padding:66px 0;border-top:1px solid var(--line)}
+.band.left{text-align:left}.band.right{text-align:right}
+.band.left .kicker,.band.right .kicker{text-align:inherit}
+.band .head{max-width:760px}
+.band.right .head{margin-left:auto}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:34px;align-items:center;text-align:left}
+.split.flip>*:first-child{order:2}
+.snakeover{position:absolute;inset:0;display:grid;pointer-events:none}
+.snakeover i{border-radius:2px;transition:background .18s linear,box-shadow .18s linear}
+.snakeover i.s{background:color-mix(in srgb,var(--accent) 78%,transparent);box-shadow:0 0 12px color-mix(in srgb,var(--accent) 55%,transparent)}
+.snakeover i.h{background:var(--accent);box-shadow:0 0 18px var(--accent)}
+.snakeover i.f{background:var(--good);box-shadow:0 0 14px color-mix(in srgb,var(--good) 60%,transparent)}
 .band h2.big{font-size:clamp(30px,4.6vw,62px);text-align:center;margin:0 0 8px}
 .band h2.big em{font-style:normal;color:var(--accent)}
 .band .kicker{text-align:center;color:var(--faint);font-size:12px;letter-spacing:.18em;text-transform:uppercase;margin-bottom:38px}
-.radial{position:relative;display:grid;place-items:center;min-height:430px}
+.radial{position:relative;display:grid;place-items:center;min-height:470px;padding:0 4px}
 .radial .ring{position:absolute;inset:0;display:grid;place-items:center}
-.radial .ring svg{width:min(430px,86vw);height:auto;overflow:visible}
+.radial .ring svg{width:min(320px,62vw);height:auto;overflow:visible}
 .dashes{animation:spin 42s linear infinite;transform-origin:center}
 @keyframes spin{to{transform:rotate(360deg)}}
-.radial .node{position:absolute;text-align:center;max-width:190px}
+.radial .node{position:absolute;text-align:center;max-width:168px}
 .radial .node b{display:block;font-size:13px;letter-spacing:.14em;text-transform:uppercase}
 .radial .node span{font-size:12.5px;color:var(--muted)}
 .radial .node .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);margin:0 auto 8px}
 .radial .n-top{top:0;left:50%;transform:translateX(-50%)}
 .radial .n-bottom{bottom:0;left:50%;transform:translateX(-50%)}
-.radial .n-left{left:0;top:50%;transform:translateY(-50%);text-align:right}
-.radial .n-right{right:0;top:50%;transform:translateY(-50%);text-align:left}
+.radial .n-left{left:-6px;top:50%;transform:translateY(-50%);text-align:right}
+.radial .n-right{right:-6px;top:50%;transform:translateY(-50%);text-align:left}
 .loop{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;position:relative}
 .loop .card{margin:0;background:var(--panel)}
 .loop .card h3{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink);margin:0 0 6px}
@@ -1160,6 +1173,27 @@ svg text{fill:var(--muted);font-size:11px}
 .loop .hub p{opacity:.92}
 .reveal{opacity:0;transform:translateY(22px);transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .7s cubic-bezier(.22,1,.36,1)}
 .reveal.in{opacity:1;transform:none}
+.menu{position:fixed;inset:0;z-index:20;background:color-mix(in srgb,var(--bg) 92%,transparent);
+  backdrop-filter:blur(6px);display:grid;place-items:center;animation:fade .25s ease}
+@keyframes fade{from{opacity:0}}
+.menu-inner{width:min(940px,92vw);max-height:86vh;overflow:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:20px;padding:26px 28px}
+.menu-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px}
+.menu-head .word{font-size:20px;font-weight:650;letter-spacing:-.03em}
+.menu-head .word b{color:var(--accent);font-weight:650}
+.menu-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+.menu-grid a{display:block;padding:14px 16px;border:1px solid var(--line);border-radius:14px;color:var(--ink)}
+.menu-grid a:hover{border-color:var(--accent);background:var(--accent-soft);text-decoration:none}
+.menu-grid b{display:block;font-size:14.5px;letter-spacing:-.01em}
+.menu-grid span{font-size:12.5px;color:var(--muted)}
+.menu-foot{display:flex;justify-content:space-between;gap:12px;margin-top:20px;padding-top:16px;
+  border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+.menu-btn{display:inline-flex;align-items:center;gap:8px;background:none;border:0;color:inherit;cursor:pointer;
+  font:inherit;font-size:12px;letter-spacing:.08em;text-transform:uppercase;padding:7px 12px 7px 6px}
+.menu-btn i{display:block;width:15px;height:1.5px;background:currentColor;transition:transform .25s}
+.menu-btn i:first-of-type{margin-bottom:4px}
+.menu-btn:hover i:first-of-type{transform:translateY(1px)}
+.menu-btn:hover i:last-of-type{transform:translateY(-1px)}
 nav.dock{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);z-index:8;display:flex;flex-direction:row;
   align-items:center;gap:4px;width:max-content;background:var(--ink);color:var(--bg);border:0;border-radius:999px;
   padding:7px 8px 7px 18px;box-shadow:0 10px 30px rgba(0,0,0,.28)}
@@ -1168,6 +1202,9 @@ nav.dock a{display:inline-block;color:inherit;font-size:12px;letter-spacing:.08e
 nav.dock a:hover{background:color-mix(in srgb,var(--bg) 18%,transparent);text-decoration:none}
 nav.dock a.go{background:var(--accent);color:var(--on-accent);font-weight:700}
 nav.dock a.go:hover{filter:brightness(1.1)}
+nav.dock a.running{display:inline-flex;align-items:center;gap:7px;background:color-mix(in srgb,var(--bg) 16%,transparent);
+  font-size:11.5px}
+nav.dock a.running .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite}
 nav.dock .name{font-weight:700;letter-spacing:-.02em;font-size:14px;padding-right:8px;white-space:nowrap}
 nav.dock .name b{color:var(--accent)}
 @media (prefers-reduced-motion:reduce){.cluster i.on,.ticker div,.dashes{animation:none}.reveal{opacity:1;transform:none}}
@@ -1175,7 +1212,16 @@ nav.dock .name b{color:var(--accent)}
 .shots figure{margin:0}
 .shots img{width:100%;border:1px solid var(--line);border-radius:10px;display:block}
 .shots figcaption{font-size:12px;color:var(--muted);margin-top:7px}
-footer.site{border-top:1px solid var(--line);margin-top:10px;padding:26px 0 90px;display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between;color:var(--muted);font-size:13px;position:relative;z-index:1}
+footer.site{border-top:1px solid var(--line);margin-top:20px;padding:54px 0 110px;position:relative;z-index:1}
+footer.site .cols{display:grid;grid-template-columns:minmax(0,1.6fr) repeat(3,minmax(0,1fr));gap:30px}
+footer.site h4{margin:0 0 12px;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);font-weight:600}
+footer.site ul{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+footer.site a{color:var(--muted)}footer.site a:hover{color:var(--accent)}
+footer.site .word{font-size:26px;font-weight:650;letter-spacing:-.035em;display:block;margin-bottom:10px}
+footer.site .word b{color:var(--accent);font-weight:650}
+footer.site .pitch{color:var(--muted);font-size:13.5px;max-width:34ch;margin:0 0 16px}
+footer.site .legal{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-top:40px;
+  padding-top:18px;border-top:1px solid var(--line);color:var(--faint);font-size:12.5px}
 /* snake arena */
 .arena{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
 .board{display:grid;gap:2px;background:var(--code);padding:8px;border-radius:10px}
@@ -1199,19 +1245,23 @@ footer.site{border-top:1px solid var(--line);margin-top:10px;padding:26px 0 90px
   <span class="chip sys" id="syschip">…</span>
 </header>
 <div class="layout">
-  <nav id="nav">
-    <a href="#/home" data-v="home">Home</a>
-    <a href="#/datasets" data-v="datasets">Datasets</a>
-    <a href="#/train" data-v="train">Fine-tune</a>
-    <a href="#/runs" data-v="runs">Runs &amp; results</a>
-    <a href="#/arena" data-v="arena">Snake arena</a>
-    <a href="#/playground" data-v="playground">Playground</a>
-    <a href="#/models" data-v="models">Models</a>
-    <div class="sep"></div>
-    <a href="#/guide" data-v="guide">How it works</a>
-    <div class="note">Everything stays on this Mac.</div>
-  </nav>
   <div class="mainwrap"><div id="setup" hidden></div><main id="main"></main></div>
+</div>
+<div class="menu" id="menu" hidden>
+  <div class="menu-inner">
+    <div class="menu-head"><span class="word">laya<b>studio</b></span>
+      <button class="btn small" id="menuclose">Close ✕</button></div>
+    <div class="menu-grid" id="menulinks"></div>
+    <div class="menu-foot"><span id="menusys"></span>
+      <a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub ↗</a></div>
+  </div>
+</div>
+<nav class="dock" id="dock">
+  <button class="menu-btn" id="menubtn" aria-label="Menu"><i></i><i></i><span>Menu</span></button>
+  <a class="name" href="#/home">laya<b>studio</b></a>
+  <span id="dockjob"></span>
+  <a class="go" href="#/train">Fine-tune ↗</a>
+</nav>
 </div>
 <script>
 "use strict";
@@ -1307,6 +1357,10 @@ async function refresh() {
   $("#syschip").textContent = s.ok ? `${s.chip} · ${s.memory_gb} GB · MLX ${s.mlx}` : (s.chip || "Setting up…");
   $("#syschip").title = s.ok ? `${s.cores} cores · ${s.usable_gpu_gb} GB usable by the GPU · laya-mlx ${s.laya_mlx} · ${s.os}` : (s.note || "");
   renderSetup(s.setup);
+  const menuSys = $("#menusys");
+  if (menuSys) menuSys.textContent = s.ok
+    ? `${s.chip} · ${s.cores} cores · ${s.memory_gb} GB · MLX ${s.mlx} · laya-mlx ${s.laya_mlx} · ${s.workspace}/`
+    : (s.note || "");
   const active = OV.jobs.find(j => j.state === "running");
   const chip = $("#jobchip");
   if (active) {
@@ -1317,8 +1371,34 @@ async function refresh() {
     chip.innerHTML = `<span class="chip live" title="Open job"><span class="dot"></span>${esc(active.title)}${p}</span>`;
     chip.onclick = () => location.hash = active.kind === "train" ? "#/runs/" + active.id : "#/jobs/" + active.id;
   } else chip.innerHTML = "";
+  const dockjob = $("#dockjob");
+  if (dockjob) {
+    dockjob.innerHTML = active
+      ? `<a class="running" href="#/${active.kind === "train" ? "runs/" + active.id : "jobs/" + active.id}">
+           <span class="dot"></span>${active.kind === "train" ? "training" : esc(active.kind)}</a>`
+      : "";
+  }
   return OV;
 }
+const PAGES = [
+  ["home", "Home", "What LayaStudio is, and what it has measured"],
+  ["datasets", "Datasets", "Upload your labeled decisions, or use an example"],
+  ["train", "Fine-tune", "Pick a dataset and a recipe, then watch it train"],
+  ["runs", "Runs & results", "Before and after, with intervals and significance"],
+  ["arena", "Snake arena", "Two models playing live, unassisted"],
+  ["playground", "Playground", "Ask both models the same question"],
+  ["models", "Models", "Base checkpoints, fine-tuned models and exports"],
+  ["guide", "How it works", "Laya, LoRA, calibration and the data you need"],
+];
+function buildMenu() {
+  $("#menulinks").innerHTML = PAGES.map(p =>
+    `<a href="#/${p[0]}" data-v="${p[0]}"><b>${esc(p[1])}</b><span>${esc(p[2])}</span></a>`).join("");
+  $("#menubtn").onclick = () => { $("#menu").hidden = false; };
+  $("#menuclose").onclick = closeMenu;
+  $("#menu").onclick = e => { if (e.target.id === "menu") closeMenu(); };
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenu(); });
+}
+function closeMenu() { const m = $("#menu"); if (m) m.hidden = true; }
 const routes = {home: viewHome, arena: viewArena, datasets: viewDatasets, dataset: viewDataset, train: viewTrain, runs: viewRuns, run: viewRun, playground: viewPlayground, models: viewModels, guide: viewGuide, jobs: viewJob};
 async function route() {
   clearTimers();
@@ -1328,7 +1408,8 @@ async function route() {
   let view = a || "home", arg = b ? decodeURIComponent(b) : null;
   if (view === "datasets" && arg) view = "dataset";
   if (view === "runs" && arg) view = "run";
-  $$("#nav a").forEach(n => n.classList.toggle("on", n.dataset.v === (a || "home")));
+  $$(".menu-grid a").forEach(n => n.classList.toggle("on", n.dataset.v === (a || "home")));
+  closeMenu();
   await refresh();
   if (!current(token)) return;
   try { await (routes[view] || viewHome)(arg, new URLSearchParams(qs || ""), token); }
@@ -1375,13 +1456,48 @@ function heroArt() {
     </g>
   </svg>`;
 }
+function snakeOverlay(host, cols = 22, rows = 12) {
+  // A snake crawling over the hero shot: the same game, drawn in CSS.
+  host.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  host.innerHTML = Array.from({length: cols * rows}, () => "<i></i>").join("");
+  const cells = [...host.children];
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let body = [[4, 6], [3, 6], [2, 6]], dir = [1, 0];
+  let food = [12, 4];
+  const key = (x, y) => y * cols + x;
+  const step = () => {
+    const [hx, hy] = body[0];
+    const wants = [food[0] - hx, food[1] - hy];
+    const options = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+      .filter(d => !(d[0] === -dir[0] && d[1] === -dir[1]))
+      .sort((a, b) => (b[0] * Math.sign(wants[0]) + b[1] * Math.sign(wants[1]))
+                    - (a[0] * Math.sign(wants[0]) + a[1] * Math.sign(wants[1])));
+    for (const d of options) {
+      const next = [hx + d[0], hy + d[1]];
+      const blocked = next[0] < 0 || next[1] < 0 || next[0] >= cols || next[1] >= rows
+        || body.some(c => c[0] === next[0] && c[1] === next[1]);
+      if (blocked) continue;
+      dir = d;
+      body.unshift(next);
+      if (next[0] === food[0] && next[1] === food[1]) {
+        food = [1 + Math.floor(Math.random() * (cols - 2)), 1 + Math.floor(Math.random() * (rows - 2))];
+      } else body.pop();
+      break;
+    }
+    cells.forEach(c => (c.className = ""));
+    body.forEach((c, i) => cells[key(c[0], c[1])] && (cells[key(c[0], c[1])].className = i ? "s" : "h"));
+    if (cells[key(food[0], food[1])]) cells[key(food[0], food[1])].className = "f";
+  };
+  for (let i = 0; i < 14; i++) step();  // a body, not a single cell
+  if (STATIC || still) return () => {};  // screenshots and reduced motion: draw once
+  const timer = setInterval(step, 260);
+  timers.push(timer);
+  return () => clearInterval(timer);
+}
+
 async function viewHome() {
   const runs = OV.runs.filter(r => r.state === "done" && r.accuracy != null);
   const best = runs.slice().sort((a, b) => (b.accuracy - b.baseline_accuracy) - (a.accuracy - a.baseline_accuracy))[0];
-  const cluster = Array.from({length: 64}, (_, i) => {
-    const on = [9, 10, 17, 18, 19, 26, 27, 35, 36, 37, 44, 45, 52].includes(i);
-    return `<i class="${on ? "on" : ""}" style="animation-delay:${(i % 7) * 320}ms"></i>`;
-  }).join("");
   const ticker = [...SHIPPED, ...SHIPPED].map(r =>
     `<span>${esc(r[0])} <b>${esc(r[2])} → ${esc(r[3])}</b></span>`).join("");
   const step = (pos, n, title, text) => `<div class="node n-${pos}"><div class="dot"></div>
@@ -1406,9 +1522,11 @@ async function viewHome() {
       </div>
     </div>
     <figure class="shot">
-      <img src="/docs/arena.png" alt="Base and fine-tuned models playing Snake side by side"
-           onerror="this.closest('figure').classList.add('fallback')">
-      <div class="cluster">${cluster}</div>
+      <div class="frame">
+        <img src="/docs/arena.png" alt="Base and fine-tuned models playing Snake side by side"
+             onerror="this.closest('figure').classList.add('fallback')">
+        <div class="snakeover" id="heroSnake"></div>
+      </div>
       <figcaption>base <b>vs</b> fine-tuned, playing Snake unassisted on this Mac ·
         <a href="#/arena">open the arena ↗</a></figcaption>
     </figure>
@@ -1416,82 +1534,111 @@ async function viewHome() {
 
   <div class="ticker"><div>${ticker}</div></div>
 
-  <section class="band reveal">
-    <h2 class="big display">What it <em>does</em></h2>
-    <div class="kicker">four steps · one command</div>
-    <div class="radial">
-      <div class="ring"><svg viewBox="0 0 400 400" aria-hidden="true">
-        <circle class="dashes" cx="200" cy="200" r="150" fill="none" stroke="var(--accent)"
-                stroke-opacity=".45" stroke-width="1" stroke-dasharray="3 13"/>
-        <circle cx="200" cy="200" r="150" fill="none" stroke="var(--line)" stroke-width="1"/>
-        ${Array.from({length: 12}, (_, i) => {
-          const a = (i / 12) * Math.PI * 2;
-          return `<line x1="${200 + 143 * Math.cos(a)}" y1="${200 + 143 * Math.sin(a)}"
-            x2="${200 + 158 * Math.cos(a)}" y2="${200 + 158 * Math.sin(a)}"
-            stroke="var(--accent)" stroke-opacity=".5" stroke-width="1.5"/>`;
-        }).join("")}
-        <g transform="translate(140 176)">
-          ${[["billing", 1, "var(--accent)"], ["technical", .36, "var(--base)"], ["other", .14, "var(--base)"]]
-            .map((o, i) => `<g class="optbar" transform="translate(0 ${i * 20})" style="animation-delay:${i * 90}ms">
-              <rect x="0" y="0" width="120" height="9" rx="4.5" fill="var(--code)"/>
-              <rect class="fill" x="0" y="0" width="${120 * o[1]}" height="9" rx="4.5" fill="${o[2]}"/>
-            </g>`).join("")}
-        </g>
-      </svg></div>
-      ${step("top", "01", "Bring your decisions", "JSONL or CSV, the same questions you already ask. The token check shows what would be cut.")}
-      ${step("right", "02", "Fine-tune locally", "LoRA on the encoder plus the decision head, in MLX. Minutes, under 3 GB.")}
-      ${step("bottom", "03", "Prove it", "Base and tuned scored on the same untouched rows, with intervals and a significance test.")}
-      ${step("left", "04", "Ship it", "A standard Laya checkpoint, or an ONNX export for Linux and NVIDIA.")}
+  <section class="band left reveal">
+    <div class="split">
+      <div class="head">
+        <h2 class="big display">What it <em>does</em></h2>
+        <div class="kicker" style="margin-bottom:18px">four steps · one command</div>
+        <p class="muted" style="margin:0">You bring labeled decisions, the studio does the rest: check the data, adapt the model, measure it honestly, hand you a checkpoint you can ship. Nothing leaves the machine at any step.</p>
+        <a class="btn wide" href="#/guide" style="margin-top:18px">How it works <span class="arrow">↗</span></a>
+      </div>
+      <div class="radial">
+        <div class="ring"><svg viewBox="0 0 400 400" aria-hidden="true">
+          <circle class="dashes" cx="200" cy="200" r="150" fill="none" stroke="var(--accent)"
+                  stroke-opacity=".45" stroke-width="1" stroke-dasharray="3 13"/>
+          <circle cx="200" cy="200" r="150" fill="none" stroke="var(--line)" stroke-width="1"/>
+          ${Array.from({length: 12}, (_, i) => {
+            const a = (i / 12) * Math.PI * 2;
+            return `<line x1="${200 + 143 * Math.cos(a)}" y1="${200 + 143 * Math.sin(a)}"
+              x2="${200 + 158 * Math.cos(a)}" y2="${200 + 158 * Math.sin(a)}"
+              stroke="var(--accent)" stroke-opacity=".5" stroke-width="1.5"/>`;
+          }).join("")}
+          <g transform="translate(140 176)">
+            ${[["billing", 1, "var(--accent)"], ["technical", .36, "var(--base)"], ["other", .14, "var(--base)"]]
+              .map((o, i) => `<g class="optbar" transform="translate(0 ${i * 20})" style="animation-delay:${i * 90}ms">
+                <rect x="0" y="0" width="120" height="9" rx="4.5" fill="var(--code)"/>
+                <rect class="fill" x="0" y="0" width="${120 * o[1]}" height="9" rx="4.5" fill="${o[2]}"/>
+              </g>`).join("")}
+          </g>
+        </svg></div>
+        ${step("top", "01", "Bring your decisions", "JSONL or CSV, the same questions you already ask.")}
+        ${step("right", "02", "Fine-tune locally", "LoRA plus the decision head, in MLX. Minutes, under 3 GB.")}
+        ${step("bottom", "03", "Prove it", "Both models on the same untouched rows, with a significance test.")}
+        ${step("left", "04", "Ship it", "A standard checkpoint, or an ONNX export for Linux and NVIDIA.")}
+      </div>
     </div>
   </section>
 
-  <section class="band reveal">
-    <h2 class="big display">Measured, <em>not promised</em></h2>
-    <div class="kicker">apple m4 · 16 gb · balanced recipe · held-out rows</div>
-    <div class="card"><div class="tablewrap"><table>
+  <section class="band right reveal">
+    <div class="head">
+      <h2 class="big display">Measured, <em>not promised</em></h2>
+      <div class="kicker">apple m4 · 16 gb · balanced recipe · held-out rows</div>
+    </div>
+    <div class="card" style="text-align:left"><div class="tablewrap"><table>
       <tr><th>Task</th><th>Answers</th><th>Before</th><th>After</th><th>Time</th></tr>
       ${SHIPPED.map(r => `<tr><td>${esc(r[0])}</td><td class="muted">${esc(r[1])}</td><td>${esc(r[2])}</td><td><b class="up">${esc(r[3])}</b></td><td class="muted">${esc(r[4])}</td></tr>`).join("")}
     </table></div>
-    <p class="muted" style="margin:10px 0 0">Fine-tuning does not change inference speed: the adapters are merged into the weights.${best ? ` Your best run: <a href="#/runs/${esc(best.id)}">${esc(best.name)}</a>, ${pct(best.baseline_accuracy)} → <b>${pct(best.accuracy)}</b>.` : ""}</p>
+    <p class="muted" style="margin:12px 0 0">Fine-tuning does not change inference speed: the adapters are merged into the weights.${best ? ` Your best run: <a href="#/runs/${esc(best.id)}">${esc(best.name)}</a>, ${pct(best.baseline_accuracy)} → <b>${pct(best.accuracy)}</b>.` : ""}</p>
     </div>
   </section>
 
-  <section class="band reveal">
-    <h2 class="big display">Does it <em>really learn</em>?</h2>
-    <div class="kicker">snake, played unassisted — no hints, no safety layer</div>
-    <div class="grid two">
-      <div class="card" style="margin:0">
-        <p style="margin-top:0">The model sees the board and four directions. Its top answer is executed, and an illegal move ends the round.</p>
+  <section class="band left reveal">
+    <div class="split" style="grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)">
+      <figure style="margin:0"><img src="/docs/snake.png" alt="The Snake run in the studio"
+        style="width:100%;border:1px solid var(--line);border-radius:12px" onerror="this.closest('figure').style.display='none'"></figure>
+      <div class="head">
+        <h2 class="big display" style="text-align:left">Does it <em>really learn</em>?</h2>
+        <div class="kicker" style="text-align:left;margin-bottom:16px">snake, played unassisted</div>
+        <p class="muted" style="margin:0 0 14px">No hints and no safety layer: the model sees the board and four directions, its top answer is executed, and an illegal move ends the round.</p>
         <div class="tablewrap"><table>
-          <tr><th></th><th>Moves survived</th><th>Apples</th><th>Legal moves</th></tr>
+          <tr><th></th><th>Moves</th><th>Apples</th><th>Legal</th></tr>
           <tr><td>Base 322M</td><td>1.0</td><td>0.0</td><td>0%</td></tr>
           <tr><td><b>Fine-tuned</b></td><td><b>169</b></td><td><b>19.8</b></td><td><b>99.3%</b></td></tr>
           <tr><td class="muted">Planner (ceiling)</td><td class="muted">418</td><td class="muted">34.4</td><td class="muted">100%</td></tr>
         </table></div>
-        <a class="btn wide" href="#/arena" style="margin-top:14px">Open the arena <span class="arrow">↗</span></a>
+        <a class="btn wide" href="#/arena" style="margin-top:16px">Open the arena <span class="arrow">↗</span></a>
       </div>
-      <figure style="margin:0"><img src="/docs/arena.png" alt="The Snake arena" style="width:100%;border:1px solid var(--line);border-radius:10px" onerror="this.closest('figure').style.display='none'"></figure>
     </div>
   </section>
 
   <section class="band reveal">
-    <h2 class="big display">Inside the <em>studio</em></h2>
-    <div class="kicker">screenshots from real runs on this machine</div>
+    <div class="head" style="margin:0 auto">
+      <h2 class="big display">Inside the <em>studio</em></h2>
+      <div class="kicker">screenshots from real runs on this machine</div>
+    </div>
     <div class="shots">${SHOTS.map(x => `<figure><img src="/docs/${x[0]}" alt="${esc(x[1])}" onerror="this.closest('figure').style.display='none'"><figcaption>${esc(x[1])}</figcaption></figure>`).join("")}</div>
   </section>
 
   <footer class="site">
-    <div>Built by <a href="https://github.com/biplovgautam" target="_blank" rel="noreferrer">Biplov Gautam</a> ·
-      <a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">LayaStudio on GitHub</a> · Apache-2.0, free to use</div>
-    <div>Runs on <a href="https://pypi.org/project/laya-mlx/" target="_blank" rel="noreferrer">laya-mlx</a> ·
-      models by <a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">Convai Innovations</a> ·
-      <a href="https://github.com/ml-explore/mlx" target="_blank" rel="noreferrer">MLX</a></div>
+    <div class="cols">
+      <div>
+        <span class="word">laya<b>studio</b></span>
+        <p class="pitch">Fine-tune open Laya decision models on your own data, on your own Mac — and prove the result before you ship it.</p>
+        <a class="btn wide primary" href="#/datasets">Start fine-tuning <span class="arrow">↗</span></a>
+      </div>
+      <div><h4>Studio</h4><ul>
+        ${PAGES.slice(1, 6).map(p => `<li><a href="#/${p[0]}">${esc(p[1])}</a></li>`).join("")}
+      </ul></div>
+      <div><h4>Project</h4><ul>
+        <li><a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub ↗</a></li>
+        <li><a href="https://github.com/biplovgautam/LayaStudio#readme" target="_blank" rel="noreferrer">Documentation ↗</a></li>
+        <li><a href="https://github.com/biplovgautam/LayaStudio/issues" target="_blank" rel="noreferrer">Issues ↗</a></li>
+        <li><a href="#/guide">How it works</a></li>
+      </ul></div>
+      <div><h4>Built on</h4><ul>
+        <li><a href="https://pypi.org/project/laya-mlx/" target="_blank" rel="noreferrer">laya-mlx ↗</a></li>
+        <li><a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">Laya by Convai ↗</a></li>
+        <li><a href="https://github.com/ml-explore/mlx" target="_blank" rel="noreferrer">Apple MLX ↗</a></li>
+        <li><a href="https://huggingface.co/aac6fef" target="_blank" rel="noreferrer">Checkpoints ↗</a></li>
+      </ul></div>
+    </div>
+    <div class="legal">
+      <span>Built by <a href="https://github.com/biplovgautam" target="_blank" rel="noreferrer">Biplov Gautam</a> · Apache-2.0, free to use, including commercially</span>
+      <span>Your data, runs and checkpoints never leave this machine</span>
+    </div>
   </footer>
-
-  <nav class="dock"><span class="name">laya<b>studio</b></span>
-    <a href="#/datasets">Datasets</a><a href="#/arena">Arena</a>
-    <a class="go" href="#/train">Fine-tune ↗</a></nav>
   </div>`;
+  snakeOverlay($("#heroSnake"));
   const reveal = new IntersectionObserver(entries => {
     entries.forEach(e => e.isIntersecting && e.target.classList.add("in"));
   }, {rootMargin: "-40px"});
@@ -2018,6 +2165,7 @@ async function viewGuide() {
   </div>`;
 }
 
+buildMenu();
 route();
 </script>
 </body>

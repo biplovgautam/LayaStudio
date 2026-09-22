@@ -164,7 +164,14 @@ Training rows come from a planner that keeps room to survive and then heads for 
 | **Fine-tuned, 18 min on an M4** | **98.8%** | **169** / 304 | **19.8** / 33 | **99.3%** | **97.9%** | 31 decisions/s |
 | The planner it learned from (ceiling) | 100% | 418 / 500 (cap) | 34.4 / 38 | 100% | 100% | — |
 
-The base model is not "a bit worse" at Snake, it is guessing: its average confidence is 0.05 (four options, so near-uniform), it answers the same direction most of the time, and two thirds of its moves are illegal — which is why every game ends immediately. After 18 minutes of fine-tuning on 2,339 boards generated on the same laptop, the same 322M model picks a legal move 99.3% of the time and eats ~20 apples a game, at 31 decisions a second with no network and no safety net.
+The base model is not "a bit worse" at Snake, it is guessing. Neither public checkpoint has seen this task, and it shows — measured on 300 held-out boards and six unassisted games each:
+
+| Base checkpoint (no fine-tuning) | Move accuracy | Mean confidence | Directions it picks | Moves survived | Legal moves |
+|---|---|---|---|---|---|
+| English 421M | 33.0% | 0.008 | DOWN 64%, UP 35%, LEFT/RIGHT 2% | 3.2 | 65% |
+| Multilingual 322M | 19.0% | 0.056 | UP 47%, LEFT 41%, DOWN 12%, RIGHT 0% | 1.0 | 0% |
+
+Random guessing would be 25%. Both models are essentially answering from a prior over option positions rather than from the board — confidence near zero, whole directions never chosen — and the multilingual one's prior happens to be worse here: it never plays RIGHT, so the first forced turn is an illegal reversal and the round ends on move one. That is a statement about an untrained model on an unseen task, not about the multilingual checkpoint in general; on non-English text it is the stronger of the two, which is why it is the one worth fine-tuning for a multilingual product. After 18 minutes of fine-tuning on 2,339 boards generated on the same laptop, the same 322M model picks a legal move 99.3% of the time and eats ~20 apples a game, at 31 decisions a second with no network and no safety net.
 
 Raw per-game results: [`docs/snake-benchmark.json`](docs/snake-benchmark.json).
 
