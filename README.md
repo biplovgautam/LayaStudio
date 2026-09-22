@@ -15,6 +15,8 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 [![Runtime](https://img.shields.io/badge/runtime-laya--mlx-6b46c1)](https://pypi.org/project/laya-mlx/)
 [![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20Mac-2b8a3e)](#privacy-and-security)
 
+**[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
+
 ```bash
 git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
 ```
@@ -414,6 +416,12 @@ uv run ruff check .
 **Do I need the internet?** Only for the first model download and the optional example datasets.
 
 **Windows or Linux?** Not for training yet — MLX is Apple silicon only. The checkpoints you produce already run on Linux and NVIDIA through the upstream runtime, and training support there is on the roadmap.
+
+## Links
+
+- **Site:** [layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np) — sources in [biplovgautam/layastudio-web](https://github.com/biplovgautam/layastudio-web)
+- **Published fine-tune:** [madhavbiplov/laya-snake-mlx](https://huggingface.co/madhavbiplov/laya-snake-mlx), downloaded at startup so the arena works before you train anything
+- **Runtime:** [laya-mlx](https://pypi.org/project/laya-mlx/) · **models:** [Laya](https://github.com/NandhaKishorM/laya) · **framework:** [MLX](https://github.com/ml-explore/mlx)
 
 ## Credits
 
