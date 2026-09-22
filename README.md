@@ -16,8 +16,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 [![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20Mac-2b8a3e)](#privacy-and-security)
 
 ```bash
-git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio
-uv run layastudio
+git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
 ```
 
 That is the whole setup. The browser opens, and the studio finishes preparing itself in the background — it detects your Mac, checks the MLX runtime, downloads a base checkpoint and fetches the public example datasets, showing every step on the page.
@@ -69,8 +68,8 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 Requirements: an Apple silicon Mac (M1 or newer), macOS 14+, Python 3.11+.
 
 ```bash
-# with uv (recommended — creates the environment for you)
-uv run layastudio
+# with uv (recommended — it creates the environment for you)
+git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
 
 # or with pip
 python3 -m venv .venv && source .venv/bin/activate
