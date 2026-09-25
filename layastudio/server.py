@@ -673,6 +673,17 @@ class Studio:
                 f"export-{stamp}",
                 f"Export {modelname(body['model'])} to {label}",
             )
+        if kind == "publish":
+            engine.resolve_model_ref(body["model"], self.workspace)
+            repo = (body.get("repo") or "").strip() or None
+            if repo and repo.count("/") != 1:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "The repository is namespace/name")
+            return self.jobs.start(
+                "publish",
+                {"model": body["model"], "repo": repo, "private": bool(body.get("private"))},
+                f"publish-{stamp}",
+                f"Publish {modelname(body['model'])} to System One",
+            )
         if kind == "download":
             repo = body.get("repo_id")
             if repo not in engine.BASE_MODELS:
@@ -1945,7 +1956,7 @@ async function viewRun(id, _, token) {
     const r = data.run;
     main.innerHTML = `
     <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
-    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto"><option value="onnx:float">ONNX · float</option><option value="onnx:int8">ONNX · int8</option><option value="onnx:int4">ONNX · int4</option><option value="coreml:float">Core ML · float</option><option value="coreml:int8">Core ML · int8</option><option value="coreml:int4">Core ML · int4</option></select><button class="btn" id="rexport" hidden>Export</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
+    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto"><option value="onnx:float">ONNX · float</option><option value="onnx:int8">ONNX · int8</option><option value="onnx:int4">ONNX · int4</option><option value="coreml:float">Core ML · float</option><option value="coreml:int8">Core ML · int8</option><option value="coreml:int4">Core ML · int4</option></select><button class="btn" id="rexport" hidden>Export</button><button class="btn" id="rpublish" hidden title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
     <section class="card" id="live" style="margin-top:16px"><div class="steps" id="rsteps"></div><div id="rprog"></div><div id="rchart" style="margin-top:12px"></div>
     <details><summary>Event log</summary><pre id="rlog" style="max-height:260px"></pre></details></section>
     <div id="results"></div>`;
@@ -1957,6 +1968,14 @@ async function viewRun(id, _, token) {
         location.hash = "#/jobs/" + job.id;
       } catch (e) { toast(e.message); }
     };
+    $("#rpublish").onclick = async () => {
+      const repo = prompt("Repository on systemonemodels.tech as namespace/name.\nLeave empty for your username and this run's name.", "");
+      if (repo === null) return;
+      try {
+        const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: "run:" + id, repo: repo.trim() || null}});
+        location.hash = "#/jobs/" + job.id;
+      } catch (e) { toast(e.message); }
+    };
     $("#rdel").onclick = async () => { if (!confirm("Delete this run and its checkpoint?")) return; try { await api("/api/runs/" + id, {method: "DELETE", body: {}}); location.hash = "#/runs"; } catch (e) { toast(e.message); } };
   };
   const update = () => {
@@ -1964,7 +1983,7 @@ async function viewRun(id, _, token) {
     $("#rstate").innerHTML = pill(job.state);
     $("#rcancel").hidden = job.state !== "running"; $("#rdel").hidden = job.state === "running";
     $("#rplay").hidden = !(job.state === "done" && data.model_path);
-    $("#rexport").hidden = $("#rfmt").hidden = $("#rplay").hidden;
+    $("#rexport").hidden = $("#rfmt").hidden = $("#rpublish").hidden = $("#rplay").hidden;
     const phases = events.filter(e => e.type === "phase").map(e => e.phase);
     const cur = phases[phases.length - 1];
     const doneAll = job.state === "done";

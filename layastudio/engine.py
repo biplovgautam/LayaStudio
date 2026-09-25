@@ -1578,6 +1578,13 @@ def run_job(job_dir):
                 spec["model"], spec["target"], workspace, emit,
                 precision=spec.get("precision", "float"),
             )
+        elif kind == "publish":
+            from .publish_systemone import publish
+
+            publish(
+                spec["model"], spec.get("repo"), workspace, emit,
+                private=bool(spec.get("private")),
+            )
         else:
             raise ValueError(f"Unknown job kind {kind!r}")
         emit("done")

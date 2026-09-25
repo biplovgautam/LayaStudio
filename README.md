@@ -126,6 +126,21 @@ uv run python -m layastudio.publish run:<run-id> --repo <you>/<name>   # --dry-r
 The namespace has to be yours: publishing to someone else's returns a 403 before anything
 uploads.
 
+To put the same run on [systemonemodels.tech](https://systemonemodels.tech), the registry
+for System One models, where the page shows the run's accuracy, calibration and latency as
+fields and links the base model:
+
+```bash
+pip install systemonemodels && systemone login          # once; approves this machine in the browser
+```
+
+```bash
+uv run python -m layastudio.publish_systemone run:<run-id>   # --repo <you>/<name> to choose the name
+```
+
+Or open the run in the studio and press **Publish to System One**. Both write a card from
+the run's measurements, then hand the checkpoint to `systemone push`.
+
 The card carries the before/after table, the significance test, the calibration
 temperatures, the hyperparameters and the dataset hash from that run, so what the Hub
 claims is what the studio measured. Add the repository to `LAYASTUDIO_DEMO_MODELS` (or
