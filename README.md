@@ -67,7 +67,24 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 
 ## Install and run
 
-Requirements: an Apple silicon Mac (M1 or newer), macOS 14+, Python 3.11+.
+The quickest way, on any machine:
+
+```bash
+pip install systemonemodels   # or: uv tool install systemonemodels
+systemone run studio
+```
+
+It reads your hardware, installs the right stack — MLX on Apple silicon; on Windows and
+Linux the PyTorch build for your GPU (NVIDIA CUDA, AMD ROCm, Intel Arc) or the CPU —
+signs you in to [systemonemodels.tech](https://systemonemodels.tech) so Publish works,
+and opens the studio. `systemone system` shows what it found.
+
+Training runs on MLX on a Mac and on PyTorch everywhere else, with the same recipe and
+the same checkpoint format, so a model trained on one loads on the other. The Models page
+lists every System One model family with what your machine can do with each; Laya-style
+models train today, the other families import now and train in coming versions.
+
+By hand, on Apple silicon (M1 or newer), macOS 14+, Python 3.11+:
 
 ```bash
 # with uv (recommended — it creates the environment for you)
