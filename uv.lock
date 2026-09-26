@@ -426,6 +426,15 @@ export = [
 shots = [
     { name = "pillow" },
 ]
+systemone = [
+    { name = "systemonemodels" },
+]
+torch = [
+    { name = "laya" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -434,6 +443,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.34,<2" },
     { name = "laya", marker = "extra == 'coreml'", specifier = ">=0.1.6" },
     { name = "laya", marker = "extra == 'export'", specifier = ">=0.1.6" },
+    { name = "laya", marker = "extra == 'torch'", specifier = ">=0.3.5" },
     { name = "laya-mlx", specifier = ">=0.2,<0.3" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.32.2,<0.33" },
     { name = "numpy", specifier = ">=1.26" },
@@ -445,12 +455,16 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
     { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4" },
+    { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.4" },
     { name = "scikit-learn", marker = "extra == 'coreml'", specifier = ">=1.4" },
+    { name = "systemonemodels", marker = "extra == 'systemone'", specifier = ">=0.2.3" },
     { name = "tokenizers", specifier = ">=0.21,<1" },
     { name = "torch", marker = "extra == 'coreml'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'export'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4" },
+    { name = "transformers", marker = "extra == 'torch'", specifier = ">=4.48" },
 ]
-provides-extras = ["dev", "export", "coreml", "shots"]
+provides-extras = ["dev", "torch", "export", "coreml", "shots", "systemone"]
 
 [[package]]
 name = "markdown-it-py"
@@ -1775,6 +1789,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2bb238361cd4ae6125a569b4db67cd9e79846ba2d68c/sympy-1.14.0.tar.gz", hash = "sha256:d3d3fe8df1e5a0b42f0e7bdf50541697dbe7d23746e894990c030e2b05e72517", size = 7793921, upload-time = "2025-04-27T18:05:01.611Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
+]
+
+[[package]]
+name = "systemonemodels"
+version = "0.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pyyaml" },
+    { name = "rich" },
+    { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/af/5a/a5fb4a0ef9deeb9233ec6a1ffa93c5352f2a106c34042172109501d3399b/systemonemodels-0.2.3.tar.gz", hash = "sha256:315e3fde5df9f1498b264d15c3d1cb4079fcfdbdf96ae62f73d9d86c0e2e4ad6", size = 50929, upload-time = "2026-09-25T09:08:18.662Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/25/ab/a567fd439ac3f1c5888a8fb36f837709f0a3d95d4dfdb8e9d44b5f5cf3e1/systemonemodels-0.2.3-py3-none-any.whl", hash = "sha256:e0d28c2d92714eaa77c71ffdd96bd65bee0dcc8646775084988ed3b7afbd5340", size = 44051, upload-time = "2026-09-25T09:08:17.362Z" },
 ]
 
 [[package]]

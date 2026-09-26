@@ -5,12 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "layastudio"
 version = "0.1.0"
-description = "Fine-tune Laya typed-decision models on your own data, on your own Mac"
+description = "Fine-tune System One decision models on your own data, on your own machine"
 keywords = ["laya", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -28,6 +30,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.12", "build>=1"]
+# Training on NVIDIA, AMD, Intel or the CPU. `systemone run studio` installs the PyTorch build
+# the machine needs (CUDA, ROCm, XPU or CPU) before this extra, so it only adds the rest.
+torch = ["laya>=0.3.5", "torch>=2.4", "transformers>=4.48", "safetensors>=0.4"]
 export = ["laya>=0.1.6", "torch>=2.4", "onnx>=1.16", "onnxruntime>=1.18", "onnxscript>=0.2", "safetensors>=0.4"]
 coreml = ["laya>=0.1.6", "torch>=2.4", "coremltools>=8.0", "scikit-learn>=1.4"]
 shots = ["Pillow>=11"]
