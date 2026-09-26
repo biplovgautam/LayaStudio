@@ -104,7 +104,11 @@ def load_training_model(model_dir, hp, device):
     # The fused TransformerEncoderLayer fast path does not train; the plain path does.
     torch.backends.mha.set_fastpath_enabled(False)
     model = build_model(cfg, encoder_dir=str(model_dir / "encoder"))
-    model.load_state_dict(load_file(str(model_dir / "model.safetensors")), strict=True)
+    # MLX ports (aac6fef/laya-mlx) store MLX parameter names; map them back.
+    state = {
+        upstream_name(k): v for k, v in load_file(str(model_dir / "model.safetensors")).items()
+    }
+    model.load_state_dict(state, strict=True)
     for layer in model.head.layers if model.head is not None else []:
         for module in layer.modules():
             if isinstance(module, torch.nn.Dropout):

@@ -84,6 +84,42 @@ def device_label(device):
     }.get(kind, kind)
 
 
+def torch_checkpoint(model_dir):
+    """The checkpoint as the upstream PyTorch package expects it.
+
+    MLX ports store MLX parameter names (scorer.layers.0.weight, ...in_proj.weight).
+    Those are renamed once into a cached copy beside the workspace; checkpoints already
+    in upstream names — every studio run, convaiinnovations/laya — are used as they are.
+    """
+    import hashlib
+    import shutil
+    from pathlib import Path
+
+    from .engine import WORKSPACE, safetensors_header, upstream_name
+
+    model_dir = Path(model_dir)
+    weights = model_dir / "model.safetensors"
+    names = list(safetensors_header(weights))
+    if all(upstream_name(n) == n for n in names):
+        return model_dir
+    stamp = f"{weights.resolve()}|{weights.stat().st_size}|{weights.stat().st_mtime_ns}"
+    target = WORKSPACE / "converted" / hashlib.sha256(stamp.encode()).hexdigest()[:16]
+    if (target / "model.safetensors").exists():
+        return target
+    from safetensors.numpy import load_file, save_file
+
+    partial = target.with_name(target.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    shutil.copytree(model_dir, partial, ignore=shutil.ignore_patterns("model.safetensors"))
+    tensors = {upstream_name(k): v for k, v in load_file(str(weights)).items()}
+    save_file(tensors, str(partial / "model.safetensors"), metadata={"format": "pt"})
+    if target.exists():
+        shutil.rmtree(target)
+    partial.rename(target)
+    return target
+
+
 def load_agent(model_dir, batch_size=16):
     """An inference agent for a local Laya checkpoint, on this machine's backend."""
     if backend() == "mlx":
@@ -93,7 +129,7 @@ def load_agent(model_dir, batch_size=16):
     import laya
 
     device = torch_device()
-    return laya.load(str(model_dir), device=str(getattr(device, "type", "cpu")))
+    return laya.load(str(torch_checkpoint(model_dir)), device=str(getattr(device, "type", "cpu")))
 
 
 def clear_cache():

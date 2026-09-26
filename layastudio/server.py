@@ -35,6 +35,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import engine
+from .account import Account
 from .bootstrap import DEFAULT_MODEL, Bootstrap
 from .examples import catalog
 
@@ -401,6 +402,7 @@ class Studio:
         self.arena = Arena(workspace, self.playground)
         self.jobs = Jobs(workspace, self.pause_gpu)
         self.bootstrap = bootstrap or Bootstrap(workspace, download=False, fetch_examples=False)
+        self.account = Account()
 
     def exports(self):
         out = []
@@ -605,6 +607,11 @@ class Studio:
             raise ApiError(
                 HTTPStatus.CONFLICT,
                 "Setup is still running. Its progress is on the Datasets page.",
+            )
+        if kind == "publish" and not self.account.status().get("signed_in"):
+            raise ApiError(
+                HTTPStatus.UNAUTHORIZED,
+                "Sign in to System One Models first (the Sign in button, top right).",
             )
         stamp = time.strftime("%m%d-%H%M%S")
         if kind == "train":
@@ -913,6 +920,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, studio.overview())
                 if route == ["arena"]:
                     return self._send(HTTPStatus.OK, studio.arena.snapshot())
+                if route == ["account"]:
+                    return self._send(HTTPStatus.OK, studio.account.status())
                 if len(route) == 2 and route[0] == "datasets":
                     return self._send(HTTPStatus.OK, studio.dataset(engine.check_id(route[1])))
                 if len(route) == 2 and route[0] == "jobs":
@@ -944,6 +953,12 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, {"cancelled": route[1]})
                 if route == ["predict"]:
                     return self._send(HTTPStatus.OK, studio.predict(body))
+                if route == ["account", "login"]:
+                    return self._send(HTTPStatus.OK, studio.account.start())
+                if route == ["account", "cancel"]:
+                    return self._send(HTTPStatus.OK, studio.account.cancel())
+                if route == ["account", "logout"]:
+                    return self._send(HTTPStatus.OK, studio.account.logout())
                 if route == ["arena", "start"]:
                     return self._send(HTTPStatus.OK, studio.arena_start(body))
                 if route == ["arena", "stop"]:
@@ -1257,6 +1272,16 @@ footer.site .cols{display:grid;grid-template-columns:minmax(0,1.6fr) repeat(3,mi
 footer.site h4{margin:0 0 12px;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);font-weight:600}
 footer.site ul{list-style:none;margin:0;padding:0;display:grid;gap:9px}
 footer.site a{color:var(--muted)}footer.site a:hover{color:var(--accent)}
+.chip.acct{cursor:pointer;border:1px solid var(--line);background:var(--panel);font:inherit;font-size:12.5px}
+.chip.acct.in{background:var(--good-soft);color:var(--good);border-color:transparent}
+.modal{position:fixed;inset:0;background:color-mix(in srgb,#000 45%,transparent);display:grid;place-items:center;z-index:1000;padding:16px}
+.modal[hidden]{display:none}
+.modal-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:440px;width:100%;padding:22px 22px 18px;box-shadow:0 20px 60px rgba(0,0,0,.25)}
+.modal-card h2{margin:0 0 8px;font-size:19px}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.signin-code{font-family:ui-monospace,Menlo,monospace;font-size:28px;letter-spacing:.14em;font-weight:700;text-align:center;padding:14px;border-radius:10px;background:var(--accent-soft);color:var(--accent);margin:14px 0 10px;user-select:all}
+.signin-wait{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;margin-top:10px}
+.signin-wait i{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 1.2s infinite}
 footer.site .word{font-size:26px;font-weight:650;letter-spacing:-.035em;display:block;margin-bottom:10px}
 footer.site .word b{color:var(--accent);font-weight:650}
 footer.site .pitch{color:var(--muted);font-size:13.5px;max-width:34ch;margin:0 0 16px}
@@ -1283,7 +1308,20 @@ footer.site .legal{display:flex;justify-content:space-between;gap:16px;flex-wrap
   <div class="spacer"></div>
   <span id="jobchip"></span>
   <span class="chip sys" id="syschip">…</span>
+  <button class="chip acct" id="acctchip" type="button" hidden>Sign in</button>
 </header>
+<div class="modal" id="signin" hidden role="dialog" aria-modal="true" aria-labelledby="signin-title">
+  <div class="modal-card">
+    <h2 id="signin-title">Sign in to System One Models</h2>
+    <p class="muted" id="signin-lede">Publishing puts a model on systemonemodels.tech under your name. Sign in once; the
+      <code>systemone</code> command in your terminal is signed in too.</p>
+    <div id="signin-body"></div>
+    <div class="modal-actions">
+      <button class="btn" id="signin-cancel" type="button">Cancel</button>
+      <button class="btn primary" id="signin-go" type="button">Get a sign-in code</button>
+    </div>
+  </div>
+</div>
 <div class="layout">
   <div class="mainwrap"><div id="setup" hidden></div><main id="main"></main></div>
 </div>
@@ -1316,6 +1354,57 @@ const num = (v, d = 3) => v == null ? "–" : Number(v).toFixed(d);
 const main = $("#main");
 let OV = null, timers = [], ROUTE = 0;
 const current = token => token === ROUTE;  // false once the user has navigated elsewhere
+
+// ---------------------------------------------------------------- System One Models account
+let ACCOUNT = null;
+async function refreshAccount() {
+  try { ACCOUNT = await api("/api/account"); } catch (e) { return null; }
+  const chip = $("#acctchip");
+  chip.hidden = !ACCOUNT.available;
+  chip.classList.toggle("in", !!ACCOUNT.signed_in);
+  chip.textContent = ACCOUNT.signed_in ? "● " + (ACCOUNT.username || "signed in") : "Sign in";
+  chip.title = ACCOUNT.signed_in ? `Signed in to ${ACCOUNT.site}. Click to sign out.` : "Sign in to System One Models to publish";
+  return ACCOUNT;
+}
+function signIn(onDone) {
+  const modal = $("#signin"), body = $("#signin-body"), go = $("#signin-go");
+  let polling = null, done = false;
+  const close = async (cancelled) => {
+    modal.hidden = true; clearInterval(polling);
+    if (cancelled) { try { await api("/api/account/cancel", {method: "POST", body: {}}); } catch (e) { /* already over */ } }
+  };
+  body.innerHTML = ""; go.hidden = false; go.disabled = false; modal.hidden = false; go.focus();
+  $("#signin-cancel").onclick = () => close(true);
+  go.onclick = async () => {
+    go.disabled = true;
+    // Opened now, while the click still counts, so the browser does not block it.
+    const tab = window.open("about:blank", "_blank");
+    let a;
+    try { a = await api("/api/account/login", {method: "POST", body: {}}); }
+    catch (e) { if (tab) tab.close(); body.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; go.disabled = false; return; }
+    if (a.error || !a.pending) { if (tab) tab.close(); body.innerHTML = `<div class="notice bad">${esc(a.error || "The registry did not answer. Try again.")}</div>`; go.disabled = false; return; }
+    const p = a.pending;
+    if (tab) tab.location = p.verification_uri_complete;
+    go.hidden = true;
+    body.innerHTML = `<p>Approve this machine on the page that just opened. It shows this code:</p>
+      <div class="signin-code">${esc(p.user_code)}</div>
+      <p class="muted">No tab? <a href="${esc(p.verification_uri_complete)}" target="_blank" rel="noreferrer">Open the approval page ↗</a></p>
+      <div class="signin-wait"><i></i> Waiting for approval…</div>`;
+    polling = setInterval(async () => {
+      const s = await refreshAccount();
+      if (!s || done) return;
+      if (s.signed_in) { done = true; close(false); toast(`Signed in as ${s.username}`); if (onDone) onDone(); }
+      else if (s.error) { clearInterval(polling); body.innerHTML = `<div class="notice bad">${esc(s.error)}</div>`; go.hidden = false; go.disabled = false; }
+    }, 2000);
+  };
+}
+async function withAccount(action) {
+  const a = await refreshAccount();
+  if (!a) return toast("Could not reach the studio");
+  if (!a.available) return toast(a.detail);
+  if (!a.signed_in) return signIn(action);
+  action();
+}
 
 async function api(path, opts = {}) {
   const init = {method: opts.method || "GET", headers: {}};
@@ -1966,14 +2055,14 @@ async function viewRun(id, _, token) {
         location.hash = "#/jobs/" + job.id;
       } catch (e) { toast(e.message); }
     };
-    $("#rpublish").onclick = async () => {
-      const repo = prompt("Repository on systemonemodels.tech as namespace/name.\nLeave empty for your username and this run's name.", "");
+    $("#rpublish").onclick = () => withAccount(async () => {
+      const repo = prompt(`Publish to systemonemodels.tech as ${ACCOUNT.username}.\nRepository as namespace/name — leave empty for ${ACCOUNT.username}/<this run's name>.`, "");
       if (repo === null) return;
       try {
         const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: "run:" + id, repo: repo.trim() || null}});
         location.hash = "#/jobs/" + job.id;
       } catch (e) { toast(e.message); }
-    };
+    });
     $("#rdel").onclick = async () => { if (!confirm("Delete this run and its checkpoint?")) return; try { await api("/api/runs/" + id, {method: "DELETE", body: {}}); location.hash = "#/runs"; } catch (e) { toast(e.message); } };
   };
   const update = () => {
@@ -2227,6 +2316,16 @@ async function viewGuide() {
 }
 
 buildMenu();
+$("#acctchip").onclick = async () => {
+  const a = await refreshAccount();
+  if (!a) return;
+  if (!a.signed_in) return signIn(null);
+  if (a.from_environment) return toast("Signed in through SYSTEMONE_TOKEN; unset it to sign out.");
+  if (!confirm(`Sign out of ${a.site}? This also signs out the systemone command and revokes its token.`)) return;
+  try { const r = await api("/api/account/logout", {method: "POST", body: {}}); await refreshAccount(); toast(r.message || "Signed out"); }
+  catch (e) { toast(e.message); }
+};
+refreshAccount();
 route();
 </script>
 </body>

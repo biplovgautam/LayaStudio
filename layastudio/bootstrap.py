@@ -3,8 +3,9 @@
 The server answers requests immediately; this module runs beside it and reports progress to
 the page, so `layastudio` is the only command anyone has to type:
 
-  1. machine   - what this Mac is (chip, cores, memory, macOS) and what it can train
-  2. runtime   - MLX and the laya-mlx runtime are importable, with their versions
+  1. machine   - what this machine is (CPU, memory, GPUs, OS) and what it can train
+  2. runtime   - the training stack is importable: MLX and laya-mlx on Apple silicon,
+                 PyTorch and laya everywhere else, with their versions and the device
   3. workspace - the folders for datasets, runs and checkpoints exist, with free space
   4. model     - a base checkpoint is in the Hugging Face cache, downloading it if not
   5. examples  - public example datasets are fetched from their source URLs (nothing
@@ -23,9 +24,13 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import engine, examples
+from . import engine, examples, runtime
 
-DEFAULT_MODEL = "aac6fef/laya-mlx"
+# The base a fresh studio prepares: the native MLX port on a Mac, the original PyTorch
+# release elsewhere. Both are the same weights, and either trains on either backend.
+MLX_DEFAULT = "aac6fef/laya-mlx"
+TORCH_DEFAULT = "convaiinnovations/laya"
+DEFAULT_MODEL = MLX_DEFAULT if runtime.backend() == "mlx" else TORCH_DEFAULT
 
 
 @dataclass
@@ -41,7 +46,7 @@ class Step:
 
 @dataclass
 class Machine:
-    """What this particular Mac is, detected at startup - never hard-coded."""
+    """What this machine is, detected at startup - never hard-coded."""
 
     ok: bool = False
     chip: str = "unknown"
@@ -51,8 +56,14 @@ class Machine:
     usable_gpu_gb: float = 0.0
     os: str = ""
     python: str = ""
+    backend: str = ""
+    accelerator: str = ""
+    gpus: list = field(default_factory=list)
+    device: str | None = None
     mlx: str | None = None
     laya_mlx: str | None = None
+    torch: str | None = None
+    laya: str | None = None
     disk_free_gb: float = 0.0
     note: str = ""
     recommended: dict = field(default_factory=dict)
@@ -66,6 +77,18 @@ def _sysctl(name):
         return ""
 
 
+def _hardware(workspace):
+    """The systemone CLI's detector (OS, CPU, memory, every GPU), when it is installed."""
+    try:
+        from systemone.hardware import detect
+    except ImportError:
+        return None
+    try:
+        return detect(workspace)
+    except Exception:  # noqa: BLE001 - a probe that fails must not stop the studio
+        return None
+
+
 def detect_machine(workspace):
     machine = Machine(
         os=(
@@ -76,45 +99,68 @@ def detect_machine(workspace):
         python=platform.python_version(),
         cores=os.cpu_count() or 0,
         disk_free_gb=round(shutil.disk_usage(workspace).free / 2**30, 1),
+        backend=runtime.backend(),
     )
-    if platform.system() == "Darwin":
+    hw = _hardware(workspace)
+    if hw is not None:
+        machine.chip = hw.cpu
+        machine.memory_gb = round((hw.memory_bytes or 0) / 2**30)
+        machine.accelerator = hw.accelerator
+        machine.gpus = [
+            {
+                "name": g.name,
+                "vendor": g.vendor,
+                "memory_gb": round((g.memory_bytes or 0) / 2**30, 1),
+                "runtime": g.runtime,
+            }
+            for g in hw.gpus
+        ]
+        machine.usable_gpu_gb = round((hw.training_memory_bytes or 0) / 2**30, 1)
+    elif platform.system() == "Darwin":
         machine.chip = _sysctl("machdep.cpu.brand_string").removeprefix("Apple ") or "Mac"
         memory = _sysctl("hw.memsize")
         machine.memory_gb = round(int(memory) / 2**30) if memory.isdigit() else 0
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
-        machine.note = (
-            "LayaStudio trains on Apple silicon (M1 or newer). Checkpoints it produces already "
-            "run elsewhere through the upstream PyTorch runtime; training on NVIDIA and Linux "
-            "is planned."
+
+    info = runtime.describe()
+    machine.mlx, machine.laya_mlx = info["mlx"], info["laya_mlx"]
+    machine.torch, machine.laya, machine.device = info["torch"], info["laya"], info["device"]
+    if machine.backend == "mlx":
+        try:
+            import mlx.core as mx
+
+            details = mx.device_info()
+            machine.chip = details.get("device_name") or machine.chip
+            machine.memory_gb = round(details.get("memory_size", 0) / 2**30) or machine.memory_gb
+            machine.usable_gpu_gb = round(
+                details.get("max_recommended_working_set_size", 0) / 2**30, 1
+            )
+            machine.ok = bool(machine.laya_mlx)
+            if not machine.ok:
+                machine.note = "The laya-mlx runtime is missing. Run: systemone run studio"
+        except Exception as error:  # noqa: BLE001 - reported to the page, never fatal
+            machine.note = f"MLX is not usable here: {error}"
+    else:
+        machine.ok = bool(machine.torch and machine.laya) and not str(machine.torch).startswith(
+            "broken"
         )
-        return machine
-    try:
-        import mlx.core as mx
-
-        info = mx.device_info()
-        machine.mlx = mx.__version__
-        machine.chip = info.get("device_name") or machine.chip
-        machine.memory_gb = round(info.get("memory_size", 0) / 2**30) or machine.memory_gb
-        machine.usable_gpu_gb = round(info.get("max_recommended_working_set_size", 0) / 2**30, 1)
-        machine.ok = True
-    except Exception as error:  # noqa: BLE001 - reported to the page, never fatal
-        machine.note = f"MLX is not usable here: {error}"
-        return machine
-    try:
-        import laya_mlx
-
-        machine.laya_mlx = laya_mlx.__version__
-    except Exception as error:  # noqa: BLE001
-        machine.ok = False
-        machine.note = f"The laya-mlx runtime is missing: {error}. Run: uv sync"
-        return machine
-    memory = machine.memory_gb
+        if not machine.ok:
+            machine.note = (
+                "PyTorch and the laya package are needed to train on this machine. "
+                "Start the studio with `systemone run studio`, which installs the right build "
+                "for your GPU."
+            )
+        elif machine.device == "CPU":
+            machine.note = (
+                "No usable GPU was found, so training runs on the CPU: fine for Laya on a few "
+                "thousand rows, slow beyond that."
+            )
+    memory = machine.usable_gpu_gb or machine.memory_gb
     machine.recommended = {
         "batch_size": 4 if memory <= 8 else 8 if memory < 32 else 16,
         "method": "lora",
         "lora_layers": 8 if memory <= 8 else 0,
         "note": (
-            f"Defaults tuned for {memory} GB: "
+            f"Defaults tuned for {memory:g} GB: "
             + ("small batches and top-layer adapters." if memory <= 8 else "full LoRA adapters.")
         ),
     }
@@ -226,28 +272,36 @@ class Bootstrap:
         (self.workspace).mkdir(parents=True, exist_ok=True)
         self.machine = detect_machine(self.workspace)
         m = self.machine
-        if not m.ok and m.note and "laya-mlx" not in m.note:
-            self.set("machine", "failed", m.note)
-            for key in ("runtime", "workspace", "model", "examples"):
-                self.set(key, "skipped", "Needs an Apple silicon Mac")
-            raise SystemExit
+        gpu = ", ".join(
+            f"{g['name']}"
+            + (f" ({g['memory_gb']:g} GB)" if g["memory_gb"] and m.backend != "mlx" else "")
+            for g in m.gpus
+        )
         self.set(
-            "machine", "done", f"{m.chip} · {m.cores} cores · {m.memory_gb} GB memory · {m.os}"
+            "machine",
+            "done",
+            f"{m.chip} · {m.cores} cores · {m.memory_gb} GB memory"
+            + (f" · {gpu}" if gpu else " · no GPU found")
+            + f" · {m.os}",
         )
 
     def _runtime(self):
         self.set("runtime", "running")
         m = self.machine
-        if not m.laya_mlx:
-            self.set("runtime", "failed", m.note or "laya-mlx is not installed. Run: uv sync")
+        if not m.ok:
+            self.set("runtime", "failed", m.note or "The training stack is not installed.")
             for key in ("model", "examples"):
                 self.set(key, "skipped", "Runtime missing")
             raise SystemExit
+        if m.backend == "mlx":
+            detail = (
+                f"laya-mlx {m.laya_mlx} · MLX {m.mlx} · Python {m.python} · "
+                f"{m.usable_gpu_gb} GB usable by the GPU"
+            )
+        else:
+            detail = f"PyTorch {m.torch} · laya {m.laya} · {m.device} · Python {m.python}"
         self.set(
-            "runtime",
-            "done",
-            f"laya-mlx {m.laya_mlx} · MLX {m.mlx} · Python {m.python} · "
-            f"{m.usable_gpu_gb} GB usable by the GPU",
+            "runtime", "warning" if m.note else "done", detail + (f" · {m.note}" if m.note else "")
         )
 
     def _workspace(self):
