@@ -494,13 +494,19 @@ def registry_search(
     for item in found.get("items", []):
         family = family_of(item)
         params = (item.get("parameters") or 0) / 1e9
+        known = find(item["full_name"]) or (
+            find(item["hub_repo"]) if item.get("hub_repo") else None
+        )
         model = CatalogModel(
             item["full_name"],
             item.get("owner_display_name") or item["namespace"],
             family or "laya",
-            params or 0.421,
-            item.get("license") or "unknown",
-            "open",
+            params or (known.params_b if known else 0.421),
+            item.get("license") or (known.licence if known else "unknown"),
+            # The catalogue knows what a licence permits; the registry only has its name.
+            known.licence_kind
+            if known
+            else ("none" if item.get("license") in (None, "other") else "open"),
         )
         assessed = (
             assess(model, training_memory_gb, accelerator)
