@@ -80,6 +80,48 @@ def lora_linear():
     return LoRALinear
 
 
+def mlx_adamw():
+    """AdamW exactly as MLX does it, which is what the MLX engine trains with.
+
+    MLX's AdamW defaults to no bias correction: the update is lr * m / (sqrt(v) + eps)
+    from the first step, which makes early steps larger than PyTorch's AdamW. With the
+    short runs fine-tuning uses, that difference is the whole gap between the two
+    backends, so the PyTorch trainer uses the same rule. Weight decay is decoupled and
+    applied first, as in mlx.optimizers.AdamW.
+    """
+    import torch
+
+    class AdamW(torch.optim.Optimizer):
+        def __init__(self, params, lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01):
+            super().__init__(
+                params, {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
+            )
+
+        @torch.no_grad()
+        def step(self, closure=None):
+            for group in self.param_groups:
+                lr, (b1, b2), eps, wd = (
+                    group["lr"],
+                    group["betas"],
+                    group["eps"],
+                    group["weight_decay"],
+                )
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+                    state = self.state[p]
+                    if not state:
+                        state["m"] = torch.zeros_like(p)
+                        state["v"] = torch.zeros_like(p)
+                    m, v = state["m"], state["v"]
+                    p.mul_(1 - lr * wd)
+                    m.mul_(b1).add_(p.grad, alpha=1 - b1)
+                    v.mul_(b2).addcmul_(p.grad, p.grad, value=1 - b2)
+                    p.addcdiv_(m, v.sqrt().add_(eps), value=-lr)
+
+    return AdamW
+
+
 def frozen_dtype(torch, device, precision):
     """The dtype frozen encoder weights are held in. bfloat16 halves memory where the
     hardware does it well; the CPU and DirectML stay in float32."""
@@ -113,6 +155,9 @@ def load_training_model(model_dir, hp, device):
         for module in layer.modules():
             if isinstance(module, torch.nn.Dropout):
                 module.p = hp["head_dropout"]
+        # The MLX head has dropout after attention and in the feed-forward block, but
+        # none on the attention weights themselves, which PyTorch's layer adds.
+        layer.self_attn.dropout = 0.0
     for parameter in model.parameters():
         parameter.requires_grad_(False)
 
@@ -404,7 +449,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     groups = [{"params": head_params, "lr": hp["head_lr"]}]
     if encoder_params:
         groups.insert(0, {"params": encoder_params, "lr": hp["lr"]})
-    optimizer = torch.optim.AdamW(groups, weight_decay=hp["weight_decay"])
+    optimizer = mlx_adamw()(groups, lr=hp["head_lr"], weight_decay=hp["weight_decay"])
     warm = max(1, int(hp["warmup"] * updates))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule_factor(warm, updates))
 
