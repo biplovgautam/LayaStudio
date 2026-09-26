@@ -1,4 +1,8 @@
-"""Laya fine-tuning engine on MLX: datasets, training, calibration, evaluation, export.
+"""Laya fine-tuning engine: datasets, training, calibration, evaluation, export.
+
+Training runs on MLX on Apple silicon and on PyTorch everywhere else (torch_engine.py);
+runtime.py picks. Everything else here — datasets, tokenization, calibration, metrics —
+is shared by both.
 
 The web server runs every heavy task as a child process of this module, so a crash, a
 cancel or an out-of-memory error never takes the UI down, and GPU memory is returned to
@@ -1234,16 +1238,18 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
 
 
 def train(spec, emit, workspace=WORKSPACE):
-    import gc
-
-    import mlx.core as mx
+    from . import runtime
 
     hp = {**HYPERPARAMETERS, **spec.get("hyperparameters", {})}
     if spec.get("baseline", True):
         baseline(spec["base_model"], spec["dataset"], emit, workspace)
-    fit(spec, hp, emit, workspace)
-    gc.collect()
-    mx.clear_cache()
+    if runtime.backend() == "mlx":
+        fit(spec, hp, emit, workspace)
+    else:
+        from .torch_engine import fit as torch_fit
+
+        torch_fit(spec, hp, emit, workspace)
+    runtime.clear_cache()
 
     emit("phase", phase="evaluate", message="Evaluating the fine-tuned model on the test split")
     run_dir = workspace / "runs" / spec["run_id"]
@@ -1349,11 +1355,9 @@ def metrics(records, qdef=None):
 
 
 def evaluate(model_ref, dataset_id, emit, workspace=WORKSPACE, split="test"):
-    import gc
     import warnings
 
-    import laya_mlx
-    import mlx.core as mx
+    from . import runtime
 
     questions, rows, meta = load_dataset(dataset_id, workspace)
     rows = [r for r in rows if r["split"] == split]
@@ -1362,7 +1366,7 @@ def evaluate(model_ref, dataset_id, emit, workspace=WORKSPACE, split="test"):
     model_dir = resolve_model_ref(model_ref, workspace)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        agent = laya_mlx.load(str(model_dir), batch_size=16)
+        agent = runtime.load_agent(model_dir, batch_size=16)
     notes = [str(w.message) for w in caught]
     first = rows[0]
     for _ in range(3):
@@ -1392,8 +1396,7 @@ def evaluate(model_ref, dataset_id, emit, workspace=WORKSPACE, split="test"):
                 elapsed_s=round(time.perf_counter() - started, 1),
             )
     del agent
-    gc.collect()
-    mx.clear_cache()
+    runtime.clear_cache()
     per_question = {
         qid: metrics([r for r in records if r["qid"] == qid], qdef)
         for qid, qdef in questions.items()
@@ -1426,25 +1429,21 @@ def paired_latency(refs, dataset_id, workspace=WORKSPACE, rows=60):
     minutes is warmer and slower than one that has not; alternating models row by row makes
     the comparison fair.
     """
-    import gc
-
-    import laya_mlx
-    import mlx.core as mx
+    from . import runtime
 
     questions, data, _ = load_dataset(dataset_id, workspace)
     data = [r for r in data if r["split"] == "test"][:rows]
-    agents = [laya_mlx.load(str(resolve_model_ref(ref, workspace))) for ref in refs]
+    agents = [runtime.load_agent(resolve_model_ref(ref, workspace)) for ref in refs]
     times = [[] for _ in refs]
     for index, row in enumerate(data):
         qs = {q: questions[q] for q in row["targets"]}
         for agent, samples in zip(agents, times):
             started = time.perf_counter()
             agent.predict(row["state"], qs)
-            if index >= 3:  # the first calls compile Metal kernels
+            if index >= 3:  # the first calls compile kernels (Metal, CUDA graphs)
                 samples.append((time.perf_counter() - started) * 1000)
     del agents
-    gc.collect()
-    mx.clear_cache()
+    runtime.clear_cache()
     return {
         ref: {"p50": percentile(t, 0.5), "p95": percentile(t, 0.95), "rows": len(t)}
         for ref, t in zip(refs, times)
@@ -1534,11 +1533,11 @@ def download(spec, emit):
 
 def limit_mlx_cache():
     """Cap MLX's buffer cache. Batches of varying length leave freed buffers behind, and an
-    uncapped cache grew past 10 GB in a few dozen steps on a 16 GB Mac, pushing it into swap."""
-    import mlx.core as mx
+    uncapped cache grew past 10 GB in a few dozen steps on a 16 GB Mac, pushing it into swap.
+    Nothing to do on PyTorch."""
+    from . import runtime
 
-    total = mx.device_info()["memory_size"]
-    mx.set_cache_limit(int(min(2 * 2**30, 0.1 * total)))
+    runtime.limit_cache()
 
 
 def run_job(job_dir):

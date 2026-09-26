@@ -18,7 +18,6 @@ checkpoints stay in the workspace folder, which git ignores.
 """
 
 import argparse
-import gc
 import json
 import os
 import re
@@ -206,13 +205,13 @@ class Playground:
         self.pool.submit(engine.limit_mlx_cache)
 
     def _agent(self, ref):
-        import laya_mlx
+        from . import runtime
 
         if ref not in self.models:
             while len(self.models) >= self.capacity:
                 self.models.pop(next(iter(self.models)))
             path = engine.resolve_model_ref(ref, self.workspace)
-            self.models[ref] = laya_mlx.load(str(path))
+            self.models[ref] = runtime.load_agent(path)
         self.models[ref] = self.models.pop(ref)  # most recently used last
         return self.models[ref]
 
@@ -234,11 +233,10 @@ class Playground:
 
     def unload(self):
         def run():
-            import mlx.core as mx
+            from . import runtime
 
             self.models.clear()
-            gc.collect()
-            mx.clear_cache()
+            runtime.clear_cache()
 
         self.pool.submit(run).result()
 

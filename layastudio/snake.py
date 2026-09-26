@@ -223,10 +223,10 @@ def summarize(results):
 
 
 def benchmark(model_ref, games=10, seed=101, workspace=WORKSPACE, max_ticks=500):
-    import laya_mlx
+    from . import runtime
 
-    agent = laya_mlx.load(str(resolve_model_ref(model_ref, workspace)))
-    for _ in range(3):  # warm the Metal kernels before timing
+    agent = runtime.load_agent(resolve_model_ref(model_ref, workspace))
+    for _ in range(3):  # warm the kernels (Metal, CUDA) before timing
         agent.predict(render(SnakeGame(WIDTH, HEIGHT, seed=1)), QUESTIONS)
     results = play(agent, games=games, seed=seed, max_ticks=max_ticks)
     return {"model": model_ref, **summarize(results), "games_detail": results}
