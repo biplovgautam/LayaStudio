@@ -455,3 +455,110 @@ def find(repo: str) -> CatalogModel | None:
         ):
             return model
     return None
+
+
+# ----------------------------------------------------------------------------- imports
+
+LAYA_ARCHITECTURES = ("laya", "modernbert", "mmbert", "von")
+
+
+def family_of(item: dict) -> str | None:
+    """The family of a model listed on systemonemodels.tech, from the catalogue or its manifest."""
+    for key in (item.get("full_name"), item.get("hub_repo")):
+        if key and (known := find(key)):
+            return known.family
+    architecture = (item.get("architecture") or "").lower()
+    if architecture in LAYA_ARCHITECTURES:
+        return "laya"
+    if "gliner" in architecture:
+        return "gliner"
+    if architecture in ("jev", "qwen", "qwen3", "qwen3.5", "decider", "tev1", "jevk5", "nimble"):
+        return "letter"
+    return None
+
+
+def registry_search(
+    query: str | None, training_memory_gb: float | None, accelerator: str | None, limit: int = 30
+):
+    """Models on systemonemodels.tech, anonymously, each with its family and fit."""
+    try:
+        from systemone.client import Client
+        from systemone.config import load
+    except ImportError as error:
+        raise RuntimeError("The systemone package is not installed") from error
+    settings = load()
+    settings.token = None  # public listing only: nothing private leaks into the page
+    with Client(settings) as registry:
+        found = registry.search(query or None, limit=limit, sort="downloads")
+    items = []
+    for item in found.get("items", []):
+        family = family_of(item)
+        params = (item.get("parameters") or 0) / 1e9
+        model = CatalogModel(
+            item["full_name"],
+            item.get("owner_display_name") or item["namespace"],
+            family or "laya",
+            params or 0.421,
+            item.get("license") or "unknown",
+            "open",
+        )
+        assessed = (
+            assess(model, training_memory_gb, accelerator)
+            if family
+            else {"fit": "unknown", "warnings": []}
+        )
+        if not family:
+            assessed["warnings"] = ["The studio does not recognise this model's family yet."]
+        items.append(
+            {
+                "repo": item["full_name"],
+                "summary": item.get("summary"),
+                "maker": item.get("owner_display_name") or item["namespace"],
+                "family": family,
+                "availability": item.get("availability"),
+                "parameters": item.get("parameters"),
+                "license": item.get("license"),
+                "downloads": item.get("downloads"),
+                **assessed,
+            }
+        )
+    return items
+
+
+def imports(workspace):
+    from .engine import read_json
+
+    return read_json(workspace / "imports.json", []) or []
+
+
+def import_from_registry(repo, emit, workspace, version=None):
+    """Download a model from systemonemodels.tech with the CLI's own client and register it
+    as a base the studio can train from."""
+    from systemone.transfer import snapshot_download
+
+    from .engine import now, write_json
+
+    emit("phase", phase="download", message=f"Downloading {repo} from systemonemodels.tech")
+    root = snapshot_download(repo, version=version)
+    laya_ready = all(
+        (root / name).is_file()
+        for name in (
+            "model.safetensors",
+            "rl_agent_config.json",
+            "encoder/config.json",
+            "tokenizer/tokenizer.json",
+        )
+    )
+    entry = {
+        "ref": f"path:{root}",
+        "repo": repo,
+        "source": "systemonemodels.tech",
+        "family": "laya" if laya_ready else None,
+        "trainable": laya_ready,
+        "path": str(root),
+        "created": now(),
+    }
+    known = [e for e in imports(workspace) if e["repo"] != repo]
+    write_json(workspace / "imports.json", [*known, entry])
+    emit("log", message=f"Imported {repo} into {root}")
+    return entry

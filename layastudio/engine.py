@@ -59,7 +59,8 @@ def default_workspace():
 WORKSPACE = default_workspace()
 
 BASE_MODELS = {
-    "aac6fef/laya-mlx": "English · ModernBERT-large · 421M · 512 tokens",
+    "convaiinnovations/laya": "English · ModernBERT-large · 421M · 512 tokens · original PyTorch release",
+    "aac6fef/laya-mlx": "English · ModernBERT-large · 421M · 512 tokens · MLX port",
     "aac6fef/laya-multilingual-mlx": "Multilingual · mmBERT-base · 322M · 1,024 tokens",
     "aac6fef/laya-typed-decisions-mlx": "Typed-decisions · ModernBERT-large · 421M · 1,024 tokens",
 }
@@ -1577,6 +1578,11 @@ def run_job(job_dir):
                 spec["model"], spec["target"], workspace, emit,
                 precision=spec.get("precision", "float"),
             )
+        elif kind == "import":
+            from .families import import_from_registry
+
+            entry = import_from_registry(spec["repo"], emit, workspace, spec.get("version"))
+            emit("result", ref=entry["ref"], path=entry["path"])
         elif kind == "publish":
             from .publish_systemone import publish
 

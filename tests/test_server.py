@@ -9,7 +9,7 @@ from http.server import ThreadingHTTPServer
 import pytest
 from test_engine import QUESTIONS, checkpoint, make_rows  # noqa: F401 - pytest fixture
 
-from layastudio import server
+from layastudio import engine, server
 from layastudio.bootstrap import Bootstrap
 
 
@@ -54,7 +54,7 @@ def test_page_and_state(studio):
     assert "@import" not in page and "fonts.googleapis" not in page
     status, state = call(base, "/api/state")
     assert status == 200 and state["datasets"] == []
-    assert len([m for m in state["models"] if not m.get("demo")]) == 3
+    assert len([m for m in state["models"] if not m.get("demo")]) == len(engine.BASE_MODELS)
     assert state["system"]["setup"]["state"] in ("ready", "failed")
     assert state["system"]["chip"]
 

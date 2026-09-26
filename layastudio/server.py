@@ -483,6 +483,19 @@ class Studio:
             }
             for repo, desc in engine.DEMO_MODELS.items()
         ]
+        from . import families
+
+        base += [
+            {
+                "ref": entry["ref"],
+                "repo": f"{entry['repo']} (imported)",
+                "description": f"Imported from {entry['source']}"
+                + ("" if entry.get("trainable") else " · this family trains in a later version"),
+                "cached": bool(entry.get("trainable")),
+                "imported": True,
+            }
+            for entry in families.imports(self.workspace)
+        ]
         tuned = [
             {
                 "ref": f"run:{r['id']}",
@@ -499,6 +512,30 @@ class Studio:
             if r["has_model"] and r["state"] == "done"
         ]
         return base, tuned
+
+    def _fit_inputs(self):
+        machine = getattr(self.bootstrap, "machine", None)
+        memory = (machine.usable_gpu_gb or machine.memory_gb) if machine else None
+        return memory, (machine.accelerator or machine.backend) if machine else None
+
+    def families(self):
+        from . import families
+
+        memory, accelerator = self._fit_inputs()
+        data = families.catalogue(memory, accelerator)
+        imported = {e["repo"].lower() for e in families.imports(self.workspace)}
+        for family in data["families"]:
+            for model in family["models"]:
+                model["downloaded"] = engine.hub_cached(model["repo"])
+                model["imported"] = (model.get("registry") or "").lower() in imported
+        data["machine"] = {"memory_gb": memory, "accelerator": accelerator}
+        return data
+
+    def registry(self, query):
+        from . import families
+
+        memory, accelerator = self._fit_inputs()
+        return families.registry_search(query, memory, accelerator)
 
     def overview(self):
         base, tuned = self.models()
@@ -690,11 +727,29 @@ class Studio:
                 f"Publish {modelname(body['model'])} to System One",
             )
         if kind == "download":
+            from . import families
+
             repo = body.get("repo_id")
-            if repo not in engine.BASE_MODELS:
-                raise ApiError(HTTPStatus.BAD_REQUEST, "Unknown base model")
+            known = families.find(repo or "")
+            if repo not in engine.BASE_MODELS and not known:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Unknown model")
+            if known and known.licence_kind == "closed":
+                raise ApiError(HTTPStatus.BAD_REQUEST, f"{repo} publishes no weights")
             return self.jobs.start(
-                "download", {"repo_id": repo}, f"download-{stamp}", f"Download {repo}"
+                "download",
+                {"repo_id": known.repo if known else repo},
+                f"download-{stamp}",
+                f"Download {repo}",
+            )
+        if kind == "import":
+            repo = (body.get("repo") or "").strip().lower()
+            if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*", repo):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "The repository is namespace/name")
+            return self.jobs.start(
+                "import",
+                {"repo": repo},
+                f"import-{stamp}",
+                f"Import {repo} from systemonemodels.tech",
             )
         if kind == "example":
             if body.get("name") not in self.examples:
@@ -922,6 +977,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, studio.arena.snapshot())
                 if route == ["account"]:
                     return self._send(HTTPStatus.OK, studio.account.status())
+                if route == ["families"]:
+                    return self._send(HTTPStatus.OK, studio.families())
+                if route == ["registry"]:
+                    return self._send(HTTPStatus.OK, {"items": studio.registry(query.get("q"))})
                 if len(route) == 2 and route[0] == "datasets":
                     return self._send(HTTPStatus.OK, studio.dataset(engine.check_id(route[1])))
                 if len(route) == 2 and route[0] == "jobs":
@@ -1272,6 +1331,8 @@ footer.site .cols{display:grid;grid-template-columns:minmax(0,1.6fr) repeat(3,mi
 footer.site h4{margin:0 0 12px;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);font-weight:600}
 footer.site ul{list-style:none;margin:0;padding:0;display:grid;gap:9px}
 footer.site a{color:var(--muted)}footer.site a:hover{color:var(--accent)}
+.pill.warn{background:var(--warn-soft);color:var(--warn)}.pill.bad{background:var(--bad-soft);color:var(--bad)}
+.warnlist{margin:6px 0 0;padding-left:16px;font-family:inherit;font-size:12px;color:var(--warn)}
 .chip.acct{cursor:pointer;border:1px solid var(--line);background:var(--panel);font:inherit;font-size:12.5px}
 .chip.acct.in{background:var(--good-soft);color:var(--good);border-color:transparent}
 .modal{position:fixed;inset:0;background:color-mix(in srgb,#000 45%,transparent);display:grid;place-items:center;z-index:1000;padding:16px}
@@ -2275,15 +2336,64 @@ function answerCard(q, a, def) {
 
 // ------------------------------------------------------------------ models
 async function viewModels() {
-  main.innerHTML = `<h1>Models</h1><p class="lead">Base checkpoints come from Hugging Face (MLX conversions of the original Laya weights). Downloading is the only step that needs the internet.</p>
-  <section class="card"><h2>Base models</h2><table><tr><th>Model</th><th>What it is</th><th>Status</th><th></th></tr>
-  ${OV.models.map(m => `<tr><td class="mono">${esc(m.repo)}</td><td>${esc(m.description)}</td><td>${m.cached ? pill("done").replace(">done<", ">downloaded<") : `<span class="pill">not downloaded</span>`}</td><td>${m.cached ? "" : `<button class="btn small" data-dl="${esc(m.repo)}">Download</button>`}</td></tr>`).join("")}</table></section>
+  const token = ROUTE;
+  const fitPill = m => ({
+    "fits": `<span class="pill done">fits</span>`,
+    "qlora": `<span class="pill warn">4-bit QLoRA</span>`,
+    "too-big": `<span class="pill bad">too big here</span>`,
+    "not-trainable": `<span class="pill">no weights</span>`,
+    "unknown": `<span class="pill">unknown</span>`,
+  }[m.fit] || "");
+  const trainerPill = t => t === "ready" ? `<span class="pill done">trains here</span>` : t === "next" ? `<span class="pill running">trainer coming next</span>` : `<span class="pill">trainer planned</span>`;
+  const gb = n => n == null ? "–" : `${n} GB`;
+  const params = b => b >= 1 ? `${b.toFixed(b >= 10 ? 0 : 1)}B` : b >= 0.001 ? `${Math.round(b * 1000)}M` : `${Math.round(b * 1e6)}K`;
+  main.innerHTML = `<h1>Models</h1><p class="lead">Every System One model family, what this machine can do with each, and your own models from systemonemodels.tech. Nothing is hidden: a model that will not fit here says so, and what to do instead.</p>
+  <section class="card"><h2>From systemonemodels.tech</h2>
+    <p class="muted">Import any model published on the registry — yours or anyone's — and train from it here.</p>
+    <div class="row" style="gap:8px"><input id="regq" placeholder="Search models, e.g. laya, jev, snake" style="flex:1"><button class="btn" id="regsearch">Search</button></div>
+    <div id="regout" style="margin-top:12px"></div></section>
+  <div id="families"><div class="muted">Reading the catalogue…</div></div>
   <section class="card"><h2>Fine-tuned checkpoints</h2>
   ${OV.finetuned.length ? `<div class="tablewrap"><table><tr><th>Run</th><th>Base</th><th>Test accuracy</th><th>Location</th></tr>${OV.finetuned.map(f => `<tr><td><a href="#/runs/${esc(f.ref.slice(4))}">${esc(f.name)}</a></td><td>${esc(modelName(f.base_model))}</td><td>${pct(f.accuracy)}</td><td class="mono faint" style="word-break:break-all">${esc(f.path)}</td></tr>`).join("")}</table></div>` : `<div class="muted">None yet.</div>`}
-  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Per decision</th><th>Verified against MLX</th><th>Location</th></tr>
+  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Per decision</th><th>Verified</th><th>Location</th></tr>
   ${OV.exports.map(x => `<tr><td>${esc(modelName(x.model))}</td><td>${esc(x.target.toUpperCase())}${x.precision && x.precision !== "float" ? " · " + esc(x.precision) : ""}</td><td>${x.size_mb} MB</td><td>${x.ms_per_decision || x.ms_per_decision_cpu || "–"} ms${x.test ? ` · ${(100 * x.test.accuracy_exported).toFixed(1)}%` : ""}</td><td>${x.verification ? `${x.verification.same_answer}/${x.verification.decisions} same answer · max Δp ${x.verification.max_probability_difference.toExponential(1)}` : "–"}</td><td class="mono faint" style="word-break:break-all">${esc(x.path)}</td></tr>`).join("")}</table></div>` : ""}
-  <h3>Format and portability</h3><p class="muted">Each checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). It loads unchanged in <code>laya-mlx</code> on Apple silicon and in the upstream PyTorch <code>laya</code> package on Linux CPUs and NVIDIA GPUs. Dedicated exports are on the run page: ONNX and Core ML, each in float, int8 or int4, and each scored on the same held-out rows as the model it came from. LiteRT for Android and NPUs is the next step of this project.</p></section>`;
-  $$("[data-dl]").forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
+  <h3>Format and portability</h3><p class="muted">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. The run page adds ONNX and Core ML exports in float, int8 or int4.</p></section>`;
+
+  const bindDownloads = root => $$("[data-dl]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
+  const bindImports = root => $$("[data-import]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "import", repo: b.dataset.import}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
+  const warnings = ws => ws && ws.length ? `<ul class="warnlist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : "";
+
+  try {
+    const cat = await api("/api/families");
+    if (!current(token)) return;
+    const m = cat.machine || {};
+    $("#families").innerHTML = `<p class="muted">This machine: ${m.memory_gb ? `${m.memory_gb} GB for training` : "memory unknown"} · ${esc(m.accelerator || "")}. Estimates are for LoRA in bf16, and 4-bit QLoRA where that is the only way in.</p>` +
+      cat.families.map(f => `<section class="card"><div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">${esc(f.name)}</h2>${trainerPill(f.trainer)}</div>
+        <p class="muted" style="margin:6px 0 10px">${esc(f.how)} <span class="faint">· ${esc(f.backends)}</span></p>
+        <div class="tablewrap"><table><tr><th>Model</th><th>Maker</th><th>Size</th><th>Licence</th><th>Needs</th><th>Here</th><th></th></tr>
+        ${f.models.map(x => `<tr><td class="mono"><a href="https://huggingface.co/${esc(x.repo)}" target="_blank" rel="noreferrer">${esc(x.repo)}</a>${x.note ? `<div class="faint" style="font-family:inherit;font-size:12px">${esc(x.note)}</div>` : ""}${warnings(x.warnings)}</td>
+          <td>${esc(x.maker)}</td><td>${x.params_b ? params(x.params_b) : "–"}</td><td>${esc(x.licence)}</td>
+          <td>${gb(x.needed_gb && x.needed_gb.lora)}${x.needed_gb && x.needed_gb.qlora ? `<div class="faint" style="font-size:12px">${gb(x.needed_gb.qlora)} QLoRA</div>` : ""}</td>
+          <td>${fitPill(x)}</td>
+          <td>${x.fit === "not-trainable" ? "" : x.downloaded ? `<span class="pill done">downloaded</span>` : `<button class="btn small" data-dl="${esc(x.repo)}">Download</button>`}</td></tr>`).join("")}
+        </table></div></section>`).join("") +
+      `<p class="muted">A model too big for this machine trains on a bigger GPU, or in the cloud studio at <a href="${esc(cat.cloud_studio)}" target="_blank" rel="noreferrer">${esc(cat.cloud_studio.replace("https://", ""))}</a> (coming).</p>`;
+    bindDownloads($("#families"));
+  } catch (e) { $("#families").innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+
+  const search = async () => {
+    const out = $("#regout");
+    out.innerHTML = `<div class="muted">Searching…</div>`;
+    try {
+      const r = await api("/api/registry?q=" + encodeURIComponent($("#regq").value.trim()));
+      if (!current(token)) return;
+      out.innerHTML = r.items.length ? `<div class="tablewrap"><table><tr><th>Model</th><th>Family</th><th>Here</th><th></th></tr>${r.items.map(x => `<tr><td><span class="mono">${esc(x.repo)}</span><div class="faint" style="font-size:12px">${esc(x.maker)}${x.summary ? " · " + esc(x.summary.slice(0, 120)) : ""}</div>${warnings(x.warnings)}</td><td>${esc(x.family || "unknown")}</td><td>${fitPill(x)}</td><td>${x.availability === "hosted-api" ? `<span class="pill">API only</span>` : `<button class="btn small" data-import="${esc(x.repo)}">Import</button>`}</td></tr>`).join("")}</table></div>` : `<div class="muted">Nothing found.</div>`;
+      bindImports(out);
+    } catch (e) { out.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+  };
+  $("#regsearch").onclick = search;
+  $("#regq").onkeydown = e => { if (e.key === "Enter") search(); };
+  search();
 }
 
 // ------------------------------------------------------------------ guide
