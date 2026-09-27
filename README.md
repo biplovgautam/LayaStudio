@@ -293,6 +293,18 @@ I was charged twice this month… [SEP]
 
 1. **Baseline** — the base model answers the test split through the normal `predict` path (cached per model + dataset).
 2. **LoRA** — every encoder attention/MLP matrix gets a trainable `W + (α/r)·A·B`; base weights stay frozen in bfloat16 while the decision head, scorer and type embedding train in float32. For the 421M English model: **33.4M of 428M** parameters. Three variants can be switched on in Advanced settings, alone or together: **DoRA** (a trainable magnitude per output row, the adapted weight renormalised row by row), **rsLoRA** (scale α/√r instead of α/r, so high ranks keep learning) and **LoRA+** (the B matrices train at a multiple of the learning rate). All three merge into the weights like plain LoRA, on MLX and on PyTorch.
+
+   Measured on the emotion example (M4, 16 GB, MLX, 2 epochs, one run each; base model 47.5%):
+
+   | Variant | Test accuracy | Training time | Peak memory |
+   |---|---:|---:|---:|
+   | LoRA (default) | 82.7% | 285 s¹ | 5.4 GB |
+   | DoRA | 83.2% | 430 s | 6.8 GB |
+   | rsLoRA, alpha 32 | 81.8% | 354 s | 5.4 GB |
+   | LoRA+ ratio 4 | **84.2%** | 340 s | 5.4 GB |
+   | LoRA+ ratio 16 | 17.8% (collapsed) | 345 s | 5.4 GB |
+
+   ¹ Measured in an earlier session on a less busy machine; compare the variants' times with each other. A point either way is within run-to-run noise. LoRA+ trains B at `lr × ratio`: 8e-4 worked, 3.2e-3 did not, and the Train page warns above 1e-3. rsLoRA with the same alpha is √r times stronger, so at rank 16 it is only worth turning on with a lower alpha (8 matches plain LoRA); it pays off at higher ranks.
 3. **Objective** — `proper` (default) maximizes the RLCD reward directly; `rlcd` reproduces the upstream notebook (annealed Gaussian logit noise, group-normalized policy gradient, plus cross-entropy); `ce` is plain cross-entropy.
 4. **Regularization** — choice options reshuffled every epoch so the model learns labels, not positions; head dropout 0.1 as upstream; optional class weighting.
 5. **Early stopping** on validation loss, keeping the best epoch.

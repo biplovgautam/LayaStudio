@@ -2075,8 +2075,9 @@ async function viewTrain(_, params) {
     ${select("shuffle_options", "Shuffle choice options", String(H.shuffle_options), [["true", "yes — learn labels, not positions"], ["false", "no"]])}
     <div class="adv-group"><b>LoRA variants</b> <span class="muted">Used by the Balanced and Fast recipes. They combine freely, and all of them merge into the weights, so the exported model is the same size and speed.</span></div>
     ${select("dora", "DoRA", String(H.dora), [["false", "off"], ["true", "on — learn each row's magnitude and direction apart"]])}
-    ${select("rslora", "Scaling", String(H.rslora), [["false", "alpha / rank (LoRA)"], ["true", "alpha / √rank (rsLoRA, steadier at high rank)"]])}
-    ${field("loraplus_ratio", "LoRA+ ratio: B learns this many × faster (1 = off, 16 typical)", H.loraplus_ratio)}
+    ${select("rslora", "Scaling", String(H.rslora), [["false", "alpha / rank (LoRA)"], ["true", "alpha / √rank (rsLoRA, for ranks above 16)"]])}
+    ${field("loraplus_ratio", "LoRA+ ratio: B learns this many × faster (1 = off, 2–4 at the default rate)", H.loraplus_ratio)}
+    <div id="lpwarn" style="grid-column:1/-1"></div>
   </div></details>
   <div class="grid two" style="margin-top:6px"><div><label>Run name (optional)</label><input type="text" id="trname" placeholder="auto"></div>
   <div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:450"><input type="checkbox" id="trbl" checked> Evaluate the base model first (cached after the first run)</label></div></div>
@@ -2085,7 +2086,18 @@ async function viewTrain(_, params) {
   <section class="card"><h2>What to expect on this Mac</h2><p class="muted" style="margin:0">${esc(OV.system.chip || "This Mac")} with ${OV.system.memory_gb || "?"} GB${tuned.note ? " — " + esc(tuned.note) : ""} On a 16 GB M4, the balanced recipe trains the 421M English model at about 7 decisions per second (roughly 10 minutes for 1,000 examples × 4 epochs) with a peak under 3 GB of GPU memory; the 322M multilingual model is lighter. Training pauses the playground so the job has the GPU to itself.</p></section>`;
   let preset = "balanced";
   $$("#presets .choice").forEach(c => c.onclick = () => { $$("#presets .choice").forEach(x => x.classList.remove("on")); c.classList.add("on"); preset = c.dataset.p;
-    const lr = PRESETS[preset].hp.lr; $("#hp-lr").value = lr ?? H.lr; });
+    const lr = PRESETS[preset].hp.lr; $("#hp-lr").value = lr ?? H.lr; loraWarnings(); });
+  // Measured on Laya: LoRA+ with B at 8e-4 trained well; at 3.2e-3 it collapsed to chance.
+  const loraWarnings = () => {
+    const rate = Number($("#hp-lr").value), ratio = Number($("#hp-loraplus_ratio").value || 1);
+    const rank = Number($("#hp-lora_rank").value), alpha = Number($("#hp-lora_alpha").value);
+    const notes = [];
+    if (ratio > 1 && rate * ratio > 1e-3) notes.push(`LoRA+ would train the B matrices at ${(rate * ratio).toExponential(1)}. On Laya, ratio 16 at the default 2e-4 collapsed to chance; ratio 4 (8e-4) trained best. Lower the ratio or the learning rate.`);
+    if ($("#hp-rslora").value === "true" && rank <= 16) notes.push(`rsLoRA makes the update √${rank} = ${Math.sqrt(rank).toFixed(1)}× stronger at rank ${rank}. It is for higher ranks; at rank ${rank}, alpha ${Math.round(alpha / Math.sqrt(rank))} gives the same strength as plain LoRA.`);
+    $("#lpwarn").innerHTML = notes.map(n => `<div class="notice warn">${esc(n)}</div>`).join("");
+  };
+  ["lr", "loraplus_ratio", "rslora", "lora_rank", "lora_alpha"].forEach(k => { const el = $("#hp-" + k); el.oninput = el.onchange = loraWarnings; });
+  loraWarnings();
   const desc = () => { const m = models.find(x => x.ref === $("#trbase").value); $("#trbasedesc").textContent = m ? m.description : ""; };
   $("#trbase").onchange = desc; desc();
   $("#trgo").onclick = async () => {
@@ -2432,7 +2444,7 @@ async function viewGuide() {
   <p>A bidirectional encoder (ModernBERT-large, 421M, or mmBERT-base, 322M) reads it once. A question-type embedding is added, a 2-layer decision transformer mixes the tokens, and a small scorer turns the hidden state at every <code>[MASK]</code> into one logit per option. Softmax with a calibrated temperature gives the probabilities. No tokens are generated.</p></section>
   <section class="card"><h2>2 · What fine-tuning changes</h2><p>The pretrained model knows language, but not your labels, your boundaries between them, or your domain vocabulary. Fine-tuning shows it thousands of your decisions and nudges the weights so the correct option's <code>[MASK]</code> scores higher.</p>
   <p><b>LoRA</b> (default) freezes the encoder and learns a low-rank update <code>W + (α/r)·A·B</code> for each of its attention and MLP matrices, while the decision head trains fully. That is ~33M of 428M parameters, so it fits comfortably in 16 GB. After training the updates are merged back, so the saved model is an ordinary Laya checkpoint with zero extra inference cost.</p>
-  <p><b>LoRA variants</b> (Advanced settings, combinable): <b>DoRA</b> also learns a magnitude for every output row and renormalises the adapted weight, which follows full fine-tuning more closely at a small cost in speed. <b>rsLoRA</b> scales the update by <code>α/√r</code> instead of <code>α/r</code>, so larger ranks keep learning instead of fading out; with the same α the update is √r times stronger, so lower α or the learning rate when you switch it on. <b>LoRA+</b> trains the B matrices faster than A by the ratio you set (16 is the paper's suggestion). All of them merge into the weights, so the saved model is the same size and speed.</p></section>
+  <p><b>LoRA variants</b> (Advanced settings, combinable): <b>DoRA</b> also learns a magnitude for every output row and renormalises the adapted weight, which follows full fine-tuning more closely at a small cost in speed. <b>rsLoRA</b> scales the update by <code>α/√r</code> instead of <code>α/r</code>, so larger ranks keep learning instead of fading out; with the same α the update is √r times stronger, so lower α or the learning rate when you switch it on. <b>LoRA+</b> trains the B matrices faster than A by the ratio you set. The paper suggests 16, but on Laya at the default learning rate 16 collapsed to chance while 4 trained best, so start at 2–4. All of them merge into the weights, so the saved model is the same size and speed.</p></section>
   <section class="card"><h2>3 · The objective</h2><p>Laya was trained with RLCD: rewards from <i>strictly proper scoring rules</i> (log score, spherical score, and the ranked probability score for ordinal questions), which only reach their best value when the reported probabilities are honest.</p>
   <p><b>proper</b> (default) optimizes those same scores directly and deterministically. <b>rlcd</b> reproduces the upstream notebook: noisy Gaussian perturbations of the logits, a group-normalized policy gradient on that reward, plus cross-entropy. <b>ce</b> is plain cross-entropy (the log score alone).</p></section>
   <section class="card"><h2>4 · Calibration and honest measurement</h2><p>After training, temperatures are refitted per question type and option count on the validation split, so a 0.9 means right about nine times in ten. Early stopping keeps the epoch with the lowest validation loss.</p><p>The test split is never used for training or selection. Results show 95% confidence intervals and an exact McNemar test, so you can tell a real improvement from noise.</p></section>
