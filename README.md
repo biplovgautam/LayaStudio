@@ -15,7 +15,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 [![Runtime](https://img.shields.io/badge/runtime-laya--mlx-6b46c1)](https://pypi.org/project/laya-mlx/)
 [![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20Mac-2b8a3e)](#privacy-and-security)
 
-**[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
+**[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · part of [System One Models](https://systemonemodels.tech) ([LinkedIn](https://www.linkedin.com/company/system-one-models/) · [Hugging Face](https://huggingface.co/systemonemodels) · [Instagram](https://www.instagram.com/systemonemodels.tech/) · ceo@systemonemodels.tech) · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
 
 ```bash
 git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio

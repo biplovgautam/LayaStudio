@@ -1392,7 +1392,7 @@ footer.site .legal{display:flex;justify-content:space-between;gap:16px;flex-wrap
       <button class="btn small" id="menuclose">Close ✕</button></div>
     <div class="menu-grid" id="menulinks"></div>
     <div class="menu-foot"><span id="menusys"></span>
-      <a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub ↗</a></div>
+      <span><a href="https://systemonemodels.tech" target="_blank" rel="noreferrer">systemonemodels.tech ↗</a> · <a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub ↗</a></span></div>
   </div>
 </div>
 <nav class="dock" id="dock">
@@ -1813,7 +1813,7 @@ async function viewHome() {
     <div class="cols">
       <div>
         <span class="word">laya<b>studio</b></span>
-        <p class="pitch">Fine-tune open Laya decision models on your own data, on your own Mac — and prove the result before you ship it.</p>
+        <p class="pitch">Fine-tune System One decision models on your own data, on your own machine — and prove the result before you ship it.</p>
         <a class="btn wide primary" href="#/datasets">Start fine-tuning <span class="arrow">↗</span></a>
       </div>
       <div><h4>Studio</h4><ul>
@@ -1826,10 +1826,19 @@ async function viewHome() {
         <li><a href="https://github.com/biplovgautam/LayaStudio/issues" target="_blank" rel="noreferrer">Issues ↗</a></li>
         <li><a href="#/guide">How it works</a></li>
       </ul></div>
+      <div><h4>System One Models</h4><ul>
+        <li><a href="https://systemonemodels.tech" target="_blank" rel="noreferrer">systemonemodels.tech ↗</a></li>
+        <li><a href="https://systemonemodels.tech/system-one-models" target="_blank" rel="noreferrer">Every System One model ↗</a></li>
+        <li><a href="https://www.linkedin.com/company/system-one-models/" target="_blank" rel="noreferrer">LinkedIn ↗</a></li>
+        <li><a href="https://huggingface.co/systemonemodels" target="_blank" rel="noreferrer">Hugging Face ↗</a></li>
+        <li><a href="https://www.instagram.com/systemonemodels.tech/" target="_blank" rel="noreferrer">Instagram ↗</a></li>
+        <li><a href="mailto:ceo@systemonemodels.tech">ceo@systemonemodels.tech</a></li>
+      </ul></div>
       <div><h4>Built on</h4><ul>
         <li><a href="https://pypi.org/project/laya-mlx/" target="_blank" rel="noreferrer">laya-mlx ↗</a></li>
         <li><a href="https://github.com/NandhaKishorM/laya" target="_blank" rel="noreferrer">Laya by Convai ↗</a></li>
         <li><a href="https://github.com/ml-explore/mlx" target="_blank" rel="noreferrer">Apple MLX ↗</a></li>
+        <li><a href="https://pytorch.org" target="_blank" rel="noreferrer">PyTorch ↗</a></li>
         <li><a href="https://huggingface.co/aac6fef" target="_blank" rel="noreferrer">Checkpoints ↗</a></li>
       </ul></div>
     </div>
