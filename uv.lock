@@ -457,7 +457,7 @@ requires-dist = [
     { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4" },
     { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.4" },
     { name = "scikit-learn", marker = "extra == 'coreml'", specifier = ">=1.4" },
-    { name = "systemonemodels", marker = "extra == 'systemone'", specifier = ">=0.2.3" },
+    { name = "systemonemodels", marker = "extra == 'systemone'", specifier = ">=0.2.4" },
     { name = "tokenizers", specifier = ">=0.21,<1" },
     { name = "torch", marker = "extra == 'coreml'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'export'", specifier = ">=2.4" },
@@ -1793,7 +1793,7 @@ wheels = [
 
 [[package]]
 name = "systemonemodels"
-version = "0.2.3"
+version = "0.2.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1801,9 +1801,9 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/5a/a5fb4a0ef9deeb9233ec6a1ffa93c5352f2a106c34042172109501d3399b/systemonemodels-0.2.3.tar.gz", hash = "sha256:315e3fde5df9f1498b264d15c3d1cb4079fcfdbdf96ae62f73d9d86c0e2e4ad6", size = 50929, upload-time = "2026-09-25T09:08:18.662Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/ba/9910855fe81271db0ed59838ec15f30167891f3cfeb6959ccabbbfca520f/systemonemodels-0.2.4.tar.gz", hash = "sha256:135527423ca76840cd958cde4ac708ae92f7b5e8a12490794b79e718de2315d7", size = 67395, upload-time = "2026-09-27T03:46:43.765Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/ab/a567fd439ac3f1c5888a8fb36f837709f0a3d95d4dfdb8e9d44b5f5cf3e1/systemonemodels-0.2.3-py3-none-any.whl", hash = "sha256:e0d28c2d92714eaa77c71ffdd96bd65bee0dcc8646775084988ed3b7afbd5340", size = 44051, upload-time = "2026-09-25T09:08:17.362Z" },
+    { url = "https://files.pythonhosted.org/packages/77/99/2161a3acea3f8f4247e0300ea11b6ffc67a50541cb8c5904608bb50415b2/systemonemodels-0.2.4-py3-none-any.whl", hash = "sha256:270e64c6ab3eebc0c274a802403ccef0b76a9c8a20aa5048a6a36a435875447c", size = 56652, upload-time = "2026-09-27T03:46:42.205Z" },
 ]
 
 [[package]]
