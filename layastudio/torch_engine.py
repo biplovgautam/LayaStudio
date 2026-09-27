@@ -32,6 +32,8 @@ from .engine import (
     class_weights,
     encode_items,
     load_dataset,
+    lora_scale,
+    lora_variants,
     make_batches,
     nll_at,
     now,
@@ -48,9 +50,10 @@ def lora_linear():
     from torch import nn
 
     class LoRALinear(nn.Module):
-        """y = x W^T + (alpha / r) * x A B. Only A and B train; the base layer stays frozen."""
+        """y = x W^T + s * x A B, s = alpha / r (alpha / sqrt(r) with rsLoRA); DoRA adds a
+        trainable magnitude per output row. The same maths as engine.lora_class()."""
 
-        def __init__(self, base, rank, alpha, dropout):
+        def __init__(self, base, rank, alpha, dropout, dora=False, rslora=False):
             super().__init__()
             out_dims, in_dims = base.weight.shape
             bound = 1 / math.sqrt(in_dims)
@@ -60,19 +63,35 @@ def lora_linear():
                 torch.empty(in_dims, rank, device=device).uniform_(-bound, bound)
             )
             self.lora_b = nn.Parameter(torch.zeros(rank, out_dims, device=device))
-            self.scale = alpha / rank
+            self.scale = lora_scale(alpha, rank, rslora)
             self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+            self.dora = dora
+            if dora:
+                self.magnitude = nn.Parameter(base.weight.detach().float().norm(dim=1))
+
+        def _delta(self):
+            return self.scale * (self.lora_a @ self.lora_b).T
 
         def forward(self, x):
             y = self.base(x)
             h = self.dropout(x.float())
-            return y + (self.scale * ((h @ self.lora_a) @ self.lora_b)).to(y.dtype)
+            update = self.scale * ((h @ self.lora_a) @ self.lora_b)
+            if not self.dora:
+                return y + update.to(y.dtype)
+            weight = self.base.weight.float()
+            # The norm is a constant in the backward pass (DoRA section 4.3, as PEFT does).
+            norm = (weight + self._delta()).norm(dim=1).detach()
+            bias = self.base.bias.float() if self.base.bias is not None else 0.0
+            out = (self.magnitude / norm) * (y.float() - bias + update) + bias
+            return out.to(y.dtype)
 
         def fused(self, dtype):
             with torch.no_grad():
-                delta = self.scale * (self.lora_a @ self.lora_b).T
-                layer = nn.Linear(delta.shape[1], delta.shape[0], bias=self.base.bias is not None)
-                layer.weight.copy_((self.base.weight.float() + delta).to(dtype))
+                weight = self.base.weight.float() + self._delta()
+                if self.dora:
+                    weight = (self.magnitude / weight.norm(dim=1))[:, None] * weight
+                layer = nn.Linear(weight.shape[1], weight.shape[0], bias=self.base.bias is not None)
+                layer.weight.copy_(weight.to(dtype))
                 if self.base.bias is not None:
                     layer.bias.copy_(self.base.bias.to(dtype))
             return layer.to(device=self.base.weight.device, dtype=dtype)
@@ -175,7 +194,12 @@ def load_training_model(model_dir, hp, device):
                     owner,
                     name,
                     LoRALinear(
-                        getattr(owner, name), hp["lora_rank"], hp["lora_alpha"], hp["lora_dropout"]
+                        getattr(owner, name),
+                        hp["lora_rank"],
+                        hp["lora_alpha"],
+                        hp["lora_dropout"],
+                        dora=bool(hp.get("dora")),
+                        rslora=bool(hp.get("rslora")),
                     ),
                 )
     elif hp["method"] == "full":
@@ -440,15 +464,21 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         device=runtime.device_label(device),
     )
 
-    encoder_params = [
-        p for n, p in model.named_parameters() if p.requires_grad and n.startswith("encoder.")
-    ]
-    head_params = [
-        p for n, p in model.named_parameters() if p.requires_grad and not n.startswith("encoder.")
-    ]
+    ratio = float(hp.get("loraplus_ratio") or 1.0) if hp["method"] == "lora" else 1.0
+    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+
+    def is_b(name):
+        return ratio != 1.0 and name.startswith("encoder.") and name.endswith("lora_b")
+
+    lora_b = [p for n, p in named if is_b(n)]
+    encoder_params = [p for n, p in named if n.startswith("encoder.") and not is_b(n)]
+    head_params = [p for n, p in named if not n.startswith("encoder.")]
     groups = [{"params": head_params, "lr": hp["head_lr"]}]
     if encoder_params:
         groups.insert(0, {"params": encoder_params, "lr": hp["lr"]})
+    if lora_b:
+        # LoRA+: the B matrices train at `ratio` times the adapter learning rate.
+        groups.insert(0, {"params": lora_b, "lr": hp["lr"] * ratio})
     optimizer = mlx_adamw()(groups, lr=hp["head_lr"], weight_decay=hp["weight_decay"])
     warm = max(1, int(hp["warmup"] * updates))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule_factor(warm, updates))
@@ -569,6 +599,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     new_cfg["fine_tuned"] = {
         key: summary[key] for key in ("base_model", "dataset_sha256", "best_epoch", "created")
     } | {"method": hp["method"], "objective": hp["objective"], "tool": "layastudio (pytorch)"}
+    if lora_variants(hp):
+        new_cfg["fine_tuned"]["lora_variants"] = lora_variants(hp)
     model.eval()
     save_checkpoint(model, base_dir, run_dir / "model", new_cfg, questions, summary)
     write_json(run_dir / "training.json", summary)

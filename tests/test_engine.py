@@ -135,18 +135,38 @@ def test_training_logits_match_inference_model(checkpoint):
     np.testing.assert_allclose(np.asarray(ours), np.asarray(reference), atol=1e-4)
 
 
-def test_lora_fusion_is_exact():
+@pytest.mark.parametrize("dora", [False, True])
+@pytest.mark.parametrize("rslora", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+def test_lora_fusion_is_exact(dora, rslora, bias):
     import mlx.nn as nn
 
     mx.random.seed(0)
-    base = nn.Linear(8, 6, bias=False)
-    lora = engine.lora_class()(base, rank=4, alpha=8, dropout=0.0)
+    base = nn.Linear(8, 6, bias=bias)
+    lora = engine.lora_class()(base, rank=4, alpha=8, dropout=0.0, dora=dora, rslora=rslora)
     lora.lora_b = mx.random.normal(lora.lora_b.shape)
+    if dora:
+        lora.magnitude = lora.magnitude * mx.random.uniform(0.5, 1.5, lora.magnitude.shape)
     lora.eval()
     x = mx.random.normal((3, 8))
     np.testing.assert_allclose(
         np.asarray(lora(x)), np.asarray(lora.fused(mx.float32)(x)), rtol=1e-5, atol=1e-5
     )
+
+
+def test_dora_starts_as_the_base_layer():
+    import mlx.nn as nn
+
+    mx.random.seed(1)
+    base = nn.Linear(8, 6)
+    lora = engine.lora_class()(base, rank=4, alpha=8, dropout=0.0, dora=True)
+    x = mx.random.normal((3, 8))
+    np.testing.assert_allclose(np.asarray(lora(x)), np.asarray(base(x)), rtol=1e-5, atol=1e-5)
+
+
+def test_rslora_scales_by_the_square_root_of_the_rank():
+    assert engine.lora_scale(32, 16) == 2.0
+    assert engine.lora_scale(32, 16, rslora=True) == 8.0
 
 
 def test_temperature_fit_recovers_overconfidence():
@@ -216,3 +236,38 @@ def test_other_methods_train(checkpoint, tmp_path, method):
     )
     assert summary["trainable_params"] > 0
     assert (workspace / f"runs/tiny-{method}/model/model.safetensors").exists()
+
+
+def test_lora_variants_train(checkpoint, tmp_path):
+    workspace = tmp_path / "ws"
+    rows = "\n".join(json.dumps(r) for r in make_rows(30))
+    meta = engine.create_dataset("tiny", QUESTIONS, rows, "t.jsonl", workspace=workspace)
+    hp = {"epochs": 1, "batch_size": 8, "dora": True, "rslora": True, "loraplus_ratio": 16.0}
+    spec = {
+        "run_id": "tiny-variants",
+        "dataset": meta["id"],
+        "base_model": f"path:{checkpoint}",
+        "baseline": False,
+    }
+    engine.fit(spec, {**engine.HYPERPARAMETERS, **hp}, lambda *a, **k: None, workspace)
+    out = workspace / "runs/tiny-variants/model"
+    # DoRA's magnitudes fold into the weights: the checkpoint has exactly the base's tensors.
+    assert set(engine.safetensors_header(out / "model.safetensors")) == set(
+        engine.safetensors_header(checkpoint / "model.safetensors")
+    )
+    cfg = json.loads((out / "rl_agent_config.json").read_text())
+    assert cfg["fine_tuned"]["lora_variants"] == ["DoRA", "rsLoRA", "LoRA+ x16"]
+    assert laya_mlx.load(str(out)).predict("red", QUESTIONS)["answers"]
+
+
+def test_lora_variant_values_are_checked():
+    engine.check_lora_variants({"dora": True, "rslora": False, "loraplus_ratio": 16})
+    for bad in (
+        {"dora": "yes"},
+        {"loraplus_ratio": 0.5},
+        {"loraplus_ratio": 100},
+        {"loraplus_ratio": True},
+    ):
+        with pytest.raises(ValueError):
+            engine.check_lora_variants(bad)
+    assert engine.lora_variants({"method": "head", "dora": True}) == []

@@ -15,7 +15,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 [![Runtime](https://img.shields.io/badge/runtime-laya--mlx-6b46c1)](https://pypi.org/project/laya-mlx/)
 [![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20Mac-2b8a3e)](#privacy-and-security)
 
-**[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · part of [System One Models](https://systemonemodels.tech) ([LinkedIn](https://www.linkedin.com/company/system-one-models/) · [Hugging Face](https://huggingface.co/systemonemodels) · [Instagram](https://www.instagram.com/systemonemodels.tech/) · ceo@systemonemodels.tech) · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
+**[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · part of [System One Models](https://systemonemodels.tech) ([LinkedIn](https://www.linkedin.com/company/system-one-models/) · [X](https://x.com/SystemoneModels) · [Hugging Face](https://huggingface.co/systemonemodels) · [Instagram](https://www.instagram.com/systemonemodels.tech/) · ceo@systemonemodels.tech) · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
 
 ```bash
 git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
@@ -292,7 +292,7 @@ I was charged twice this month… [SEP]
 ## How fine-tuning works here
 
 1. **Baseline** — the base model answers the test split through the normal `predict` path (cached per model + dataset).
-2. **LoRA** — every encoder attention/MLP matrix gets a trainable `W + (α/r)·A·B`; base weights stay frozen in bfloat16 while the decision head, scorer and type embedding train in float32. For the 421M English model: **33.4M of 428M** parameters.
+2. **LoRA** — every encoder attention/MLP matrix gets a trainable `W + (α/r)·A·B`; base weights stay frozen in bfloat16 while the decision head, scorer and type embedding train in float32. For the 421M English model: **33.4M of 428M** parameters. Three variants can be switched on in Advanced settings, alone or together: **DoRA** (a trainable magnitude per output row, the adapted weight renormalised row by row), **rsLoRA** (scale α/√r instead of α/r, so high ranks keep learning) and **LoRA+** (the B matrices train at a multiple of the learning rate). All three merge into the weights like plain LoRA, on MLX and on PyTorch.
 3. **Objective** — `proper` (default) maximizes the RLCD reward directly; `rlcd` reproduces the upstream notebook (annealed Gaussian logit noise, group-normalized policy gradient, plus cross-entropy); `ce` is plain cross-entropy.
 4. **Regularization** — choice options reshuffled every epoch so the model learns labels, not positions; head dropout 0.1 as upstream; optional class weighting.
 5. **Early stopping** on validation loss, keeping the best epoch.
@@ -340,7 +340,7 @@ I was charged twice this month… [SEP]
 | **Head only** | Decision head, scorer, type embedding | Quick sanity check |
 | **Full top layers** | Top 4 encoder layers unfrozen, lower LR | Large datasets where LoRA plateaus |
 
-Advanced settings cover epochs, batch size, gradient accumulation, learning rates, LoRA rank/alpha, objective, class weighting, precision, option shuffling, patience and seed. Defaults are in `HYPERPARAMETERS` in [`layastudio/engine.py`](layastudio/engine.py), and the studio adapts batch size to the memory it finds.
+Advanced settings cover epochs, batch size, gradient accumulation, learning rates, LoRA rank/alpha, the LoRA variants (DoRA, rsLoRA, LoRA+ ratio), objective, class weighting, precision, option shuffling, patience and seed. Defaults are in `HYPERPARAMETERS` in [`layastudio/engine.py`](layastudio/engine.py), and the studio adapts batch size to the memory it finds.
 
 ## Performance and memory
 

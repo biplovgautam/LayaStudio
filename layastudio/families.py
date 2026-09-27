@@ -22,7 +22,7 @@ FAMILIES = {
     "laya": {
         "name": "Encoder + option-marker head (Laya style)",
         "how": "One [MASK] per option in a bidirectional encoder; a small head scores the markers. "
-        "LoRA on the encoder, the head trained in full.",
+        "LoRA on the encoder (optionally DoRA, rsLoRA or LoRA+), the head trained in full.",
         "trainer": "ready",
         "backends": "MLX on Apple silicon; PyTorch on NVIDIA, AMD, Intel or CPU",
     },

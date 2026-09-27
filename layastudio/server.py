@@ -659,6 +659,10 @@ class Studio:
                 for k, v in (body.get("hyperparameters") or {}).items()
                 if k in engine.HYPERPARAMETERS
             }
+            try:
+                engine.check_lora_variants(hp)
+            except ValueError as error:
+                raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
             name = (body.get("name") or f"{meta['name']} · {hp.get('method', 'lora')}").strip()
             run_id = f"{engine.slugify(name, 'run')[:40]}-{stamp}"
             spec = {
@@ -1203,6 +1207,7 @@ tr:last-child td{border-bottom:0}
 .steps span{padding:3px 10px;border-radius:999px;font-size:12px;background:var(--code);color:var(--faint)}
 .steps span.done{background:var(--good-soft);color:var(--good)}.steps span.now{background:var(--accent-soft);color:var(--accent);font-weight:600}
 details{margin-top:8px}summary{cursor:pointer;color:var(--muted);font-size:13px}
+.adv-group{grid-column:1/-1;border-top:1px solid var(--line);padding-top:12px;font-size:13px}
 .state{white-space:pre-wrap;word-break:break-word;max-height:7.5em;overflow:hidden}
 .opt{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 .choice{border:1px solid var(--line);border-radius:9px;padding:10px;cursor:pointer}
@@ -1830,6 +1835,7 @@ async function viewHome() {
         <li><a href="https://systemonemodels.tech" target="_blank" rel="noreferrer">systemonemodels.tech ↗</a></li>
         <li><a href="https://systemonemodels.tech/system-one-models" target="_blank" rel="noreferrer">Every System One model ↗</a></li>
         <li><a href="https://www.linkedin.com/company/system-one-models/" target="_blank" rel="noreferrer">LinkedIn ↗</a></li>
+        <li><a href="https://x.com/SystemoneModels" target="_blank" rel="noreferrer">X ↗</a></li>
         <li><a href="https://huggingface.co/systemonemodels" target="_blank" rel="noreferrer">Hugging Face ↗</a></li>
         <li><a href="https://www.instagram.com/systemonemodels.tech/" target="_blank" rel="noreferrer">Instagram ↗</a></li>
         <li><a href="mailto:ceo@systemonemodels.tech">ceo@systemonemodels.tech</a></li>
@@ -2067,6 +2073,10 @@ async function viewTrain(_, params) {
     ${select("class_weighting", "Class weighting", H.class_weighting, [["none", "none"], ["balanced", "balanced (rare labels count more)"]])}
     ${select("precision", "Frozen weights precision", H.precision, [["bfloat16", "bfloat16 (less memory)"], ["float32", "float32"]])}
     ${select("shuffle_options", "Shuffle choice options", String(H.shuffle_options), [["true", "yes — learn labels, not positions"], ["false", "no"]])}
+    <div class="adv-group"><b>LoRA variants</b> <span class="muted">Used by the Balanced and Fast recipes. They combine freely, and all of them merge into the weights, so the exported model is the same size and speed.</span></div>
+    ${select("dora", "DoRA", String(H.dora), [["false", "off"], ["true", "on — learn each row's magnitude and direction apart"]])}
+    ${select("rslora", "Scaling", String(H.rslora), [["false", "alpha / rank (LoRA)"], ["true", "alpha / √rank (rsLoRA, steadier at high rank)"]])}
+    ${field("loraplus_ratio", "LoRA+ ratio: B learns this many × faster (1 = off, 16 typical)", H.loraplus_ratio)}
   </div></details>
   <div class="grid two" style="margin-top:6px"><div><label>Run name (optional)</label><input type="text" id="trname" placeholder="auto"></div>
   <div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:450"><input type="checkbox" id="trbl" checked> Evaluate the base model first (cached after the first run)</label></div></div>
@@ -2091,6 +2101,12 @@ async function viewTrain(_, params) {
     } catch (e) { $("#trmsg").textContent = e.message; $("#trgo").disabled = false; }
   };
 }
+function loraTag(h) {
+  if (h.method !== "lora") return "";
+  const ratio = Number(h.loraplus_ratio || 1);
+  const tags = [h.dora ? "DoRA" : "", h.rslora ? "rsLoRA" : "", ratio !== 1 ? `LoRA+ ×${ratio}` : ""].filter(Boolean);
+  return tags.length ? esc(" + " + tags.join(" + ")) : "";
+}
 function field(k, labelText, v) { return `<div><label>${esc(labelText)}</label><input type="number" step="any" data-hp="${k}" id="hp-${k}" value="${esc(v)}"></div>`; }
 function select(k, labelText, v, opts) { return `<div><label>${esc(labelText)}</label><select data-hp="${k}" id="hp-${k}">${opts.map(([val, t]) => `<option value="${esc(val)}" ${String(val) === String(v) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>`; }
 
@@ -2099,7 +2115,7 @@ async function viewRuns() {
   const runs = OV.runs;
   main.innerHTML = `<h1>Runs &amp; results</h1><p class="lead">Every fine-tuning run, with the base model and the fine-tuned model scored on the same held-out test rows.</p>
   <section class="card">${runs.length ? `<div class="tablewrap"><table><tr><th>Run</th><th>Dataset</th><th>Base</th><th>Status</th><th>Before</th><th>After</th><th>Change</th><th>Created</th></tr>
-  ${runs.map(r => `<tr><td><a href="#/runs/${esc(r.id)}">${esc(r.name)}</a><div class="faint" style="font-size:12px">${esc(r.hyperparameters.method)} · ${esc(r.hyperparameters.objective)}</div></td><td>${esc(r.dataset_name)}</td><td>${esc(modelName(r.base_model))}</td><td>${pill(r.state)}</td><td>${pct(r.baseline_accuracy)}</td><td><b>${pct(r.accuracy)}</b></td><td>${delta(r.baseline_accuracy, r.accuracy)}${r.p_value != null ? `<div class="faint" style="font-size:11.5px">p = ${r.p_value < 0.001 ? "<0.001" : r.p_value.toFixed(3)}</div>` : ""}</td><td class="muted">${esc(r.created)}</td></tr>`).join("")}
+  ${runs.map(r => `<tr><td><a href="#/runs/${esc(r.id)}">${esc(r.name)}</a><div class="faint" style="font-size:12px">${esc(r.hyperparameters.method)}${loraTag(r.hyperparameters)} · ${esc(r.hyperparameters.objective)}</div></td><td>${esc(r.dataset_name)}</td><td>${esc(modelName(r.base_model))}</td><td>${pill(r.state)}</td><td>${pct(r.baseline_accuracy)}</td><td><b>${pct(r.accuracy)}</b></td><td>${delta(r.baseline_accuracy, r.accuracy)}${r.p_value != null ? `<div class="faint" style="font-size:11.5px">p = ${r.p_value < 0.001 ? "<0.001" : r.p_value.toFixed(3)}</div>` : ""}</td><td class="muted">${esc(r.created)}</td></tr>`).join("")}
   </table></div>` : `<div class="empty">No runs yet. <a href="#/train">Start one</a>.</div>`}</section>`;
 }
 
@@ -2112,7 +2128,7 @@ async function viewRun(id, _, token) {
   const shell = () => {
     const r = data.run;
     main.innerHTML = `
-    <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
+    <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}${loraTag(r.hyperparameters)}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
     <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto"><option value="onnx:float">ONNX · float</option><option value="onnx:int8">ONNX · int8</option><option value="onnx:int4">ONNX · int4</option><option value="coreml:float">Core ML · float</option><option value="coreml:int8">Core ML · int8</option><option value="coreml:int4">Core ML · int4</option></select><button class="btn" id="rexport" hidden>Export</button><button class="btn" id="rpublish" hidden title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
     <section class="card" id="live" style="margin-top:16px"><div class="steps" id="rsteps"></div><div id="rprog"></div><div id="rchart" style="margin-top:12px"></div>
     <details><summary>Event log</summary><pre id="rlog" style="max-height:260px"></pre></details></section>
@@ -2415,7 +2431,8 @@ async function viewGuide() {
 &lt;your state&gt; [SEP]</pre>
   <p>A bidirectional encoder (ModernBERT-large, 421M, or mmBERT-base, 322M) reads it once. A question-type embedding is added, a 2-layer decision transformer mixes the tokens, and a small scorer turns the hidden state at every <code>[MASK]</code> into one logit per option. Softmax with a calibrated temperature gives the probabilities. No tokens are generated.</p></section>
   <section class="card"><h2>2 · What fine-tuning changes</h2><p>The pretrained model knows language, but not your labels, your boundaries between them, or your domain vocabulary. Fine-tuning shows it thousands of your decisions and nudges the weights so the correct option's <code>[MASK]</code> scores higher.</p>
-  <p><b>LoRA</b> (default) freezes the encoder and learns a low-rank update <code>W + (α/r)·A·B</code> for each of its attention and MLP matrices, while the decision head trains fully. That is ~33M of 428M parameters, so it fits comfortably in 16 GB. After training the updates are merged back, so the saved model is an ordinary Laya checkpoint with zero extra inference cost.</p></section>
+  <p><b>LoRA</b> (default) freezes the encoder and learns a low-rank update <code>W + (α/r)·A·B</code> for each of its attention and MLP matrices, while the decision head trains fully. That is ~33M of 428M parameters, so it fits comfortably in 16 GB. After training the updates are merged back, so the saved model is an ordinary Laya checkpoint with zero extra inference cost.</p>
+  <p><b>LoRA variants</b> (Advanced settings, combinable): <b>DoRA</b> also learns a magnitude for every output row and renormalises the adapted weight, which follows full fine-tuning more closely at a small cost in speed. <b>rsLoRA</b> scales the update by <code>α/√r</code> instead of <code>α/r</code>, so larger ranks keep learning instead of fading out; with the same α the update is √r times stronger, so lower α or the learning rate when you switch it on. <b>LoRA+</b> trains the B matrices faster than A by the ratio you set (16 is the paper's suggestion). All of them merge into the weights, so the saved model is the same size and speed.</p></section>
   <section class="card"><h2>3 · The objective</h2><p>Laya was trained with RLCD: rewards from <i>strictly proper scoring rules</i> (log score, spherical score, and the ranked probability score for ordinal questions), which only reach their best value when the reported probabilities are honest.</p>
   <p><b>proper</b> (default) optimizes those same scores directly and deterministically. <b>rlcd</b> reproduces the upstream notebook: noisy Gaussian perturbations of the logits, a group-normalized policy gradient on that reward, plus cross-entropy. <b>ce</b> is plain cross-entropy (the log score alone).</p></section>
   <section class="card"><h2>4 · Calibration and honest measurement</h2><p>After training, temperatures are refitted per question type and option count on the validation split, so a 0.9 means right about nine times in ten. Early stopping keeps the epoch with the lowest validation loss.</p><p>The test split is never used for training or selection. Results show 95% confidence intervals and an exact McNemar test, so you can tell a real improvement from noise.</p></section>

@@ -93,6 +93,13 @@ HYPERPARAMETERS = {
     "lora_rank": 16,
     "lora_alpha": 32,
     "lora_dropout": 0.05,
+    # LoRA variants, combinable: DoRA learns each output row's magnitude separately from
+    # the adapted direction; rsLoRA scales by alpha / sqrt(rank) instead of alpha / rank,
+    # which keeps high ranks training; LoRA+ trains the B matrices at loraplus_ratio times
+    # the learning rate (1 = off; the paper suggests 16).
+    "dora": False,
+    "rslora": False,
+    "loraplus_ratio": 1.0,
     "lora_layers": 0,  # 0 = every encoder layer, otherwise the top N
     "full_layers": 4,  # method == "full": unfreeze the top N encoder layers
     "head_dropout": 0.1,  # upstream trains its head with PyTorch's default dropout 0.1
@@ -721,34 +728,82 @@ def collate(items, pad_id, multiple=16):
     }
 
 
+def lora_scale(alpha, rank, rslora=False):
+    """alpha / rank, or alpha / sqrt(rank) for rsLoRA."""
+    return alpha / math.sqrt(rank) if rslora else alpha / rank
+
+
+def check_lora_variants(hp):
+    """Reject values the LoRA variants cannot use, before a run starts."""
+    for key in ("dora", "rslora"):
+        if key in hp and not isinstance(hp[key], bool):
+            raise ValueError(f"{key} must be true or false")
+    ratio = hp.get("loraplus_ratio", 1.0)
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)) or not 1 <= ratio <= 64:
+        raise ValueError("loraplus_ratio must be a number from 1 (off) to 64")
+
+
+def lora_variants(hp):
+    """The LoRA variants a run used, for its record and its model card: e.g. ['DoRA']."""
+    if hp.get("method") != "lora":
+        return []
+    ratio = float(hp.get("loraplus_ratio") or 1.0)
+    return (
+        (["DoRA"] if hp.get("dora") else [])
+        + (["rsLoRA"] if hp.get("rslora") else [])
+        + ([f"LoRA+ x{ratio:g}"] if ratio != 1.0 else [])
+    )
+
+
 def lora_class():
     import mlx.core as mx
     import mlx.nn as nn
 
     class LoRALinear(nn.Module):
-        """y = x W^T + (alpha / r) * x A B. Only A and B train; the base layer stays frozen."""
+        """y = x W^T + s * x A B, with s = alpha / r (or alpha / sqrt(r) for rsLoRA).
 
-        def __init__(self, base, rank, alpha, dropout):
+        Only A and B train; the base layer stays frozen. With DoRA a magnitude m per output
+        row also trains, and the adapted weight is renormalised row by row:
+        W' = m * (W + s (A B)^T) / ||W + s (A B)^T||. The norm is treated as a constant in
+        the backward pass, as in the DoRA paper (section 4.3) and PEFT.
+        """
+
+        def __init__(self, base, rank, alpha, dropout, dora=False, rslora=False):
             super().__init__()
             out_dims, in_dims = base.weight.shape
             bound = 1 / math.sqrt(in_dims)
             self.base = base
             self.lora_a = mx.random.uniform(-bound, bound, (in_dims, rank)).astype(mx.float32)
             self.lora_b = mx.zeros((rank, out_dims), dtype=mx.float32)
-            self.scale = alpha / rank
+            self.scale = lora_scale(alpha, rank, rslora)
             self.p = dropout
+            self.dora = dora
+            if dora:
+                self.magnitude = mx.linalg.norm(base.weight.astype(mx.float32), axis=1)
+
+        def _delta(self):
+            return self.scale * (self.lora_a @ self.lora_b).T
 
         def __call__(self, x):
             y = self.base(x)
             h = x.astype(mx.float32)
             if self.training and self.p > 0:
                 h = h * mx.random.bernoulli(1 - self.p, h.shape) / (1 - self.p)
-            return y + (self.scale * ((h @ self.lora_a) @ self.lora_b)).astype(y.dtype)
+            update = self.scale * ((h @ self.lora_a) @ self.lora_b)
+            if not self.dora:
+                return y + update.astype(y.dtype)
+            weight = self.base.weight.astype(mx.float32)
+            norm = mx.stop_gradient(mx.linalg.norm(weight + self._delta(), axis=1))
+            bias = self.base.bias.astype(mx.float32) if "bias" in self.base else 0.0
+            out = (self.magnitude / norm) * (y.astype(mx.float32) - bias + update) + bias
+            return out.astype(y.dtype)
 
         def fused(self, dtype):
-            delta = self.scale * (self.lora_a @ self.lora_b).T
-            layer = nn.Linear(delta.shape[1], delta.shape[0], bias="bias" in self.base)
-            layer.weight = (self.base.weight.astype(mx.float32) + delta).astype(dtype)
+            weight = self.base.weight.astype(mx.float32) + self._delta()
+            if self.dora:
+                weight = (self.magnitude / mx.linalg.norm(weight, axis=1))[:, None] * weight
+            layer = nn.Linear(weight.shape[1], weight.shape[0], bias="bias" in self.base)
+            layer.weight = weight.astype(dtype)
             if "bias" in self.base:
                 layer.bias = self.base.bias.astype(dtype)
             return layer
@@ -788,7 +843,12 @@ def load_training_model(model_dir, hp):
                     owner,
                     name,
                     LoRALinear(
-                        getattr(owner, name), hp["lora_rank"], hp["lora_alpha"], hp["lora_dropout"]
+                        getattr(owner, name),
+                        hp["lora_rank"],
+                        hp["lora_alpha"],
+                        hp["lora_dropout"],
+                        dora=bool(hp.get("dora")),
+                        rslora=bool(hp.get("rslora")),
                     ),
                 )
     elif hp["method"] == "full":
@@ -802,7 +862,8 @@ def load_training_model(model_dir, hp):
             for parent, name in ENCODER_LINEARS:
                 module = getattr(getattr(layer, parent), name)
                 if hasattr(module, "lora_a"):
-                    module.unfreeze(keys=["lora_a", "lora_b"], recurse=False)
+                    keys = ["lora_a", "lora_b"] + (["magnitude"] if module.dora else [])
+                    module.unfreeze(keys=keys, recurse=False)
     model.head.unfreeze()
     model.scorer.unfreeze()
     model.type_emb.unfreeze()
@@ -1116,13 +1177,23 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     if hp["method"] == "head":
         optimizer = head_opt
     else:
-        optimizer = optim.MultiOptimizer(
-            [
-                optim.AdamW(learning_rate=schedule(hp["lr"]), weight_decay=hp["weight_decay"]),
-                head_opt,
-            ],
-            [lambda path, _: path.startswith("encoder.")],
-        )
+        optimizers = [
+            optim.AdamW(learning_rate=schedule(hp["lr"]), weight_decay=hp["weight_decay"])
+        ]
+        filters = [lambda path, _: path.startswith("encoder.")]
+        ratio = float(hp.get("loraplus_ratio") or 1.0)
+        if hp["method"] == "lora" and ratio != 1.0:
+            # LoRA+: the B matrices get their own, higher learning rate. First match wins.
+            optimizers.insert(
+                0,
+                optim.AdamW(
+                    learning_rate=schedule(hp["lr"] * ratio), weight_decay=hp["weight_decay"]
+                ),
+            )
+            filters.insert(
+                0, lambda path, _: path.startswith("encoder.") and path.endswith("lora_b")
+            )
+        optimizer = optim.MultiOptimizer([*optimizers, head_opt], filters)
     sigma = [0.4]
     loss_and_grad = nn.value_and_grad(
         model, lambda m, b: batch_loss(m, b, hp, sigma[0], training=True, checkpoint=checkpoint)
@@ -1233,6 +1304,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     new_cfg["fine_tuned"] = {
         key: summary[key] for key in ("base_model", "dataset_sha256", "best_epoch", "created")
     } | {"method": hp["method"], "objective": hp["objective"], "tool": "laya-mlx finetune"}
+    if lora_variants(hp):
+        new_cfg["fine_tuned"]["lora_variants"] = lora_variants(hp)
     save_checkpoint(model, base_dir, run_dir / "model", new_cfg, questions, summary)
     write_json(run_dir / "training.json", summary)
     return summary
@@ -1575,7 +1648,10 @@ def run_job(job_dir):
             from .export import export
 
             export(
-                spec["model"], spec["target"], workspace, emit,
+                spec["model"],
+                spec["target"],
+                workspace,
+                emit,
                 precision=spec.get("precision", "float"),
             )
         elif kind == "import":
@@ -1587,7 +1663,10 @@ def run_job(job_dir):
             from .publish_systemone import publish
 
             publish(
-                spec["model"], spec.get("repo"), workspace, emit,
+                spec["model"],
+                spec.get("repo"),
+                workspace,
+                emit,
                 private=bool(spec.get("private")),
             )
         else:

@@ -8,13 +8,18 @@ def test_every_model_is_in_a_known_family():
 def test_nothing_is_hidden_and_big_models_warn():
     small = {f["key"]: f for f in catalogue(8.0, "cuda")["families"]}
     assert sum(len(f["models"]) for f in small.values()) == len(CATALOG)
-    nimble = next(m for m in small["letter"]["models"] if m["repo"] == "bespokelabs/Bespoke-Nimble-9B")
+    nimble = next(
+        m for m in small["letter"]["models"] if m["repo"] == "bespokelabs/Bespoke-Nimble-9B"
+    )
     assert nimble["fit"] == "too-big"
     assert any("studio.systemonemodels.tech" in w for w in nimble["warnings"])
 
 
 def test_licences_warn():
-    assert any("Non-commercial" in w for w in assess(find("pngwn/system-one-qwen3.5-4b-scorer"), 64, "cuda")["warnings"])
+    assert any(
+        "Non-commercial" in w
+        for w in assess(find("pngwn/system-one-qwen3.5-4b-scorer"), 64, "cuda")["warnings"]
+    )
     assert any("No licence" in w for w in assess(find("together-ai/tev1"), 64, "cuda")["warnings"])
     assert assess(find("typesafe-ai/jev"), 64, "cuda")["fit"] == "not-trainable"
 
