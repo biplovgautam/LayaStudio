@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""LayaStudio: fine-tune Laya typed-decision models on your own data, on your own machine.
+"""System One Studio (formerly Laya Studio): fine-tune System One decision models on
+your own data, on your own machine.
 
     layastudio                    # or: uv run layastudio
 
@@ -936,7 +937,7 @@ def label_text(qdef, target):
 class Handler(BaseHTTPRequestHandler):
     studio: Studio = None
     port = 8765
-    server_version = "LayaStudio/1"
+    server_version = "SystemOneStudio/1"
 
     def log_message(self, fmt, *args):
         if os.environ.get("LAYA_STUDIO_VERBOSE"):
@@ -1146,7 +1147,7 @@ def main(argv=None):
     Handler.port = port
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(
-        f"LayaStudio  {url}\n"
+        f"System One Studio  {url}\n"
         f"Workspace   {workspace}\n"
         "Setting up in the background (machine check, model, examples) - the page shows "
         "progress.\nPress Ctrl+C to stop."
@@ -1172,7 +1173,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Laya Studio</title>
+<title>System One Studio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%235a58ca'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Helvetica,Arial' font-size='30' font-weight='700' letter-spacing='-1' fill='%23ffffff'%3Els%3C/text%3E%3C/svg%3E">
 <style>
 /* Tokens: the System One Models website's palette and scale (apps/web/app/globals.css).
@@ -1559,7 +1560,7 @@ details.family .family-body{padding:0 18px 12px;border-top:1px solid var(--borde
 <div class="shell">
   <aside class="side" id="side"><div class="side-in">
     <div class="side-top">
-      <a class="brand" href="#/home" aria-label="Laya Studio home"><span class="brand-mark" aria-hidden="true">ls</span><span class="brand-word">laya<b>studio</b></span></a>
+      <a class="brand" href="#/home" aria-label="System One Studio home"><span class="brand-mark" aria-hidden="true">s1</span><span class="brand-word">system one <b>studio</b></span></a>
       <span id="jobchip"></span>
       <button class="menu-toggle" id="menutoggle" type="button" aria-expanded="false" aria-controls="sidenav">Menu</button>
     </div>
@@ -1739,7 +1740,7 @@ function renderSetup(setup) {
   host.hidden = false;
   const failed = setup.state === "failed";
   host.innerHTML = `<section class="panel setup${failed ? " failed" : ""}"><header>
-    <h2>${failed ? "Setup needs your attention" : "Setting up Laya Studio"}</h2>
+    <h2>${failed ? "Setup needs your attention" : "Setting up System One Studio"}</h2>
     <span class="muted small">${failed ? "" : "You can look around while this finishes · " + Math.round(setup.seconds) + "s"}</span></header>
     <ul class="setup-steps">${setup.steps.map(st => `<li class="${esc(st.state)}"><span class="sdot" title="${esc(st.state)}"></span>
       <span>${esc(st.title)}</span>
@@ -1900,9 +1901,9 @@ async function viewHome() {
   main.innerHTML = `
   <header class="page-head">
     <div>
-      <p class="eyebrow"><span class="tiny-square"></span> Laya Studio</p>
+      <p class="eyebrow"><span class="tiny-square"></span> System One Studio</p>
       <h1>Your decisions deserve your own model.</h1>
-      <p class="lead">Laya Studio fine-tunes open System One decision models on your own labeled data${esc(where)}. No cloud, no per-call bill, nothing leaves the machine, and every run proves whether it actually got better.</p>
+      <p class="lead">System One Studio fine-tunes open System One decision models on your own labeled data${esc(where)}. No cloud, no per-call bill, nothing leaves the machine, and every run proves whether it actually got better.</p>
     </div>
     <div class="head-actions">
       <a class="btn" href="#/arena">Watch it play</a>

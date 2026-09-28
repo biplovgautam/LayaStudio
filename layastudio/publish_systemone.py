@@ -4,7 +4,7 @@
     systemone login                                   # once, in the browser
     python -m layastudio.publish_systemone run:<id>   # or the Publish button in the studio
 
-What goes up is the checkpoint LayaStudio wrote - the safetensors, tokenizer,
+What goes up is the checkpoint System One Studio wrote - the safetensors, tokenizer,
 calibration and questions - plus a model card built from the run's own measured
 numbers, so the page on the registry shows what the studio recorded. The
 registry's CLI reads the run's eval.json for accuracy, calibration and latency,

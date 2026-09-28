@@ -3,7 +3,7 @@
     hf auth login                                     # once, with your own token
     python -m layastudio.publish run:<id> --repo <you>/laya-snake-mlx
 
-The upload is the checkpoint LayaStudio already wrote - FP16 safetensors with the original
+The upload is the checkpoint System One Studio already wrote - FP16 safetensors with the original
 PyTorch parameter names, the tokenizer, the refitted calibration and the questions the
 model was trained for - plus a card built from that run's measured numbers, so the claims
 on the Hub are the ones the studio actually recorded.
@@ -35,7 +35,7 @@ base_model: {base_repo}
 # {title}
 
 A [Laya](https://github.com/NandhaKishorM/laya) typed-decision model, fine-tuned with
-[LayaStudio](https://github.com/biplovgautam/LayaStudio) on an Apple silicon Mac. It
+[System One Studio](https://github.com/biplovgautam/LayaStudio) on an Apple silicon Mac. It
 answers the questions below in a single forward pass, with calibrated probabilities and
 **zero generated tokens**.
 
@@ -74,7 +74,7 @@ input, so changing them changes the task it was tuned for.
 ```
 
 The same folder also loads in the upstream PyTorch `laya` package on Linux and NVIDIA, and
-LayaStudio can export it to ONNX.
+System One Studio can export it to ONNX.
 
 ## Provenance
 
@@ -87,7 +87,7 @@ LayaStudio can export it to ONNX.
 Apache-2.0. Laya and its pretrained weights are by
 [Convai Innovations](https://github.com/NandhaKishorM/laya); this checkpoint is a
 fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and published with
-[LayaStudio](https://github.com/biplovgautam/LayaStudio).
+[System One Studio](https://github.com/biplovgautam/LayaStudio).
 """
 
 
@@ -171,7 +171,7 @@ def publish(run_ref, repo, workspace=WORKSPACE, private=False, dry_run=False):
     api.upload_folder(
         repo_id=repo,
         folder_path=str(model_dir),
-        commit_message=f"LayaStudio: {run.get('name', run_id)}",
+        commit_message=f"System One Studio: {run.get('name', run_id)}",
     )
     print(f"  published: https://huggingface.co/{repo}")
     return {"repo": repo, "uploaded": True, "url": f"https://huggingface.co/{repo}"}

@@ -94,7 +94,7 @@ class Account:
                 with Client(current) as anonymous:
                     granted = device_login(
                         anonymous,
-                        f"Laya Studio on {socket.gethostname() or 'this machine'}",
+                        f"System One Studio on {socket.gethostname() or 'this machine'}",
                         on_code,
                         sleep=sleep,
                     )

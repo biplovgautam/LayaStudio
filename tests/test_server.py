@@ -45,7 +45,7 @@ def test_page_and_state(studio):
     base, _ = studio
     with urllib.request.urlopen(base + "/") as response:
         page = response.read().decode()
-        assert "LayaStudio" in page
+        assert "System One Studio" in page
         assert "default-src 'self'" in response.headers["Content-Security-Policy"]
     # Links out are fine; loading anything from outside this machine is not.
     loads = re.findall(r'(?:src|srcset)=["\']([^"\']+)|<link[^>]+href=["\']([^"\']+)', page)

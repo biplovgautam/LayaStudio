@@ -2,10 +2,12 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/logo.png">
-  <img src="docs/logo-light.png" alt="LayaStudio — tune your own decisions" width="420">
+  <img src="docs/logo-light.png" alt="System One Studio — tune your own decisions" width="420">
 </picture>
 
 **Build your own decision engine on your own machine, in minutes.**
+
+*System One Studio was called Laya Studio until September 2026. The command, `layastudio`, and the workspace folder, `~/.layastudio`, keep their names.*
 
 Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on your own data, locally — and prove the result is better before you ship it. For the decisions *your* product makes, a small model you tuned yourself can beat a general hosted API: more accurate on your labels, ~10× faster because there is no network, and free to run.
 
@@ -25,7 +27,7 @@ That is the whole setup. The browser opens, and the studio finishes preparing it
 
 </div>
 
-![LayaStudio: your decisions deserve your own model](docs/hero.png)
+![System One Studio: your decisions deserve your own model](docs/hero.png)
 
 ---
 
@@ -33,7 +35,7 @@ That is the whole setup. The browser opens, and the studio finishes preparing it
 
 Laya answers typed questions — `choice`, `score`, `noul` — in a single forward pass, locally, with calibrated probabilities and **zero generated tokens**. It is fast and free to run. But the public checkpoints are general-purpose: on one product's own decisions they are often fast and *not accurate enough*, the same pattern the community reports (Banking77 goes from ~51% to ~79% once fine-tuned).
 
-The only published way to fine-tune Laya is a PyTorch notebook for two cloud GPUs, which means copying your data to someone else's machine. LayaStudio came out of needing the opposite: adapt Laya to a real product's decisions **on the laptop**, without the data ever leaving it, and with honest before/after measurement so "fine-tuned" is a number rather than a feeling.
+The only published way to fine-tune Laya is a PyTorch notebook for two cloud GPUs, which means copying your data to someone else's machine. System One Studio came out of needing the opposite: adapt Laya to a real product's decisions **on the laptop**, without the data ever leaving it, and with honest before/after measurement so "fine-tuned" is a number rather than a feeling.
 
 The goal is simple: **anyone with a laptop should be able to turn a general model into a specialist for their own decisions, in minutes, and see exactly how much better it got.**
 
@@ -210,7 +212,7 @@ Your numbers will differ — these are public benchmarks, not your traffic.
 
 ## Does it really learn? The Snake test
 
-Classification accuracy is easy to believe. Playing a game is not: the model has to act, and a wrong move ends the run. So LayaStudio ships a Snake task as a built-in example, and it is deliberately harder than the well-known Laya Snake demo — in that demo a classical planner labels each option ("Safe. Best route to food."), so the model only reads labels.
+Classification accuracy is easy to believe. Playing a game is not: the model has to act, and a wrong move ends the run. So System One Studio ships a Snake task as a built-in example, and it is deliberately harder than the well-known Laya Snake demo — in that demo a classical planner labels each option ("Safe. Best route to food."), so the model only reads labels.
 
 Here the model gets the **board** and the facts a game engine already has — which neighbouring cells are free, and where the food is — and four plain directions. No advice, no safety layer, no retries:
 
@@ -501,13 +503,13 @@ uv run ruff check .
 - **laya-mlx**: the native MLX runtime this studio builds on ([PyPI](https://pypi.org/project/laya-mlx/), [GitHub](https://github.com/mizorewww/laya-mlx)).
 - **MLX**: [Apple's array framework](https://github.com/ml-explore/mlx) for Apple silicon.
 
-LayaStudio is an independent project and is not affiliated with Convai Innovations.
+System One Studio is an independent project and is not affiliated with Convai Innovations.
 
 ## License
 
 **Apache-2.0 — free to use, including commercially.** Clone it, run it, fine-tune Laya on your own machine with your own data, ship the result in your product, or fork it. No fee, no key, no account, no telemetry.
 
-- **Your data stays yours.** LayaStudio never uploads it; it has nowhere to upload it to.
+- **Your data stays yours.** System One Studio never uploads it; it has nowhere to upload it to.
 - **Your fine-tuned checkpoints are yours.** They are written into your workspace; nothing in this project claims any right to them. The base weights they build on are Apache-2.0 from Convai Innovations, so the usual attribution applies when you redistribute a model.
 - **No warranty.** Apache-2.0 means as-is: measure before you ship, and the studio is built to help you do exactly that.
 

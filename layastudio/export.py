@@ -1,6 +1,6 @@
 """Take a fine-tuned checkpoint off this Mac: ONNX today, Core ML next to it.
 
-A LayaStudio checkpoint is already a standard Laya checkpoint, so the upstream PyTorch
+A System One Studio checkpoint is already a standard Laya checkpoint, so the upstream PyTorch
 runtime loads it as-is on Linux and NVIDIA. This module goes one step further and writes a
 graph other runtimes can execute without any Laya code at all:
 
@@ -691,7 +691,7 @@ def export_coreml(model_dir, out_dir, emit, model_ref, precision="float", worksp
 
 ONNX_README = """# Exported Laya decision model (ONNX)
 
-Exported from `{model}` by LayaStudio on {created}.
+Exported from `{model}` by System One Studio on {created}.
 
 * `model.onnx` — {size_mb} MB, opset 17, dynamic batch, tokens and options
 * `tokenizer/`, `encoder/`, `rl_agent_config.json` — the tokenizer and the calibration
