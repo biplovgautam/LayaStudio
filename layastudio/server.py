@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""LayaStudio: fine-tune Laya typed-decision models on your own data, on your own Mac.
+"""LayaStudio: fine-tune Laya typed-decision models on your own data, on your own machine.
 
     layastudio                    # or: uv run layastudio
 
 One command. The server answers immediately and finishes setting itself up in the
-background: it detects this Mac, checks the MLX runtime, downloads a base checkpoint and
-fetches the public example datasets, reporting every step on the page.
+background: it detects this machine, checks the training runtime (MLX on Apple silicon,
+PyTorch elsewhere), downloads a base checkpoint and fetches the public example datasets,
+reporting every step on the page.
 
 Frontend (HTML, CSS, JavaScript) and backend (JSON API) live in this one file and use only
 the Python standard library, so there is nothing to build. Training, evaluation and
@@ -1072,7 +1073,7 @@ def find_port(preferred, host="127.0.0.1", tries=20):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="layastudio", description="Fine-tune Laya on your own data, on your own Mac"
+        prog="layastudio", description="Fine-tune Laya on your own data, on your own machine"
     )
     parser.add_argument("--port", type=int, default=8765, help="Default 8765, or the next free")
     parser.add_argument(
@@ -1640,6 +1641,12 @@ function runtimeLine(s) {
   const torch = s.torch && !String(s.torch).startsWith("broken") ? "PyTorch " + s.torch : "PyTorch";
   return [torch, s.laya && !String(s.laya).startsWith("broken") && "laya " + s.laya].filter(Boolean).join(" · ");
 }
+function trainsOn(s) {
+  if (s.backend === "mlx") return `MLX${s.mlx ? " " + s.mlx : ""} on the Apple GPU`;
+  const torch = s.torch && !String(s.torch).startsWith("broken") ? " " + s.torch : "";
+  const where = !s.device || String(s.device).startsWith("unavailable") ? "" : s.device === "CPU" ? " on the CPU" : ` on ${s.device}`;
+  return `PyTorch${torch}${where}`;
+}
 function acceleratorLine(s) {
   const gpus = (s.gpus || []).map(g => g.name + (g.memory_gb && s.backend !== "mlx" ? ` (${g.memory_gb} GB)` : "")).join(", ");
   if (s.backend === "mlx") return (gpus || "Apple GPU") + " through Metal";
@@ -2147,7 +2154,7 @@ async function viewTrain(_, params) {
   <div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:450"><input type="checkbox" id="trbl" checked> Evaluate the base model first (cached after the first run)</label></div></div>
   <div class="row" style="margin-top:16px"><button class="btn primary" id="trgo">Start fine-tuning</button><span class="muted" id="trmsg"></span></div>
   </section>
-  <section class="card"><h2>What to expect on this Mac</h2><p class="muted" style="margin:0">${esc(OV.system.chip || "This Mac")} with ${OV.system.memory_gb || "?"} GB${tuned.note ? " — " + esc(tuned.note) : ""} On a 16 GB M4, the balanced recipe trains the 421M English model at about 7 decisions per second (roughly 10 minutes for 1,000 examples × 4 epochs) with a peak under 3 GB of GPU memory; the 322M multilingual model is lighter. Training pauses the playground so the job has the GPU to itself.</p></section>`;
+  <section class="card"><h2>What to expect on this machine</h2><p class="muted" style="margin:0">${esc(machineName(OV.system))}, training with ${esc(trainsOn(OV.system))}.${tuned.note ? " " + esc(tuned.note) : ""}${OV.system.note ? " " + esc(OV.system.note) : ""} For scale: on a 16 GB Apple M4 with MLX, the balanced recipe trains the 421M English model at about 7 decisions per second (roughly 10 minutes for 1,000 examples × 4 epochs) with a peak under 3 GB of GPU memory, and the 322M multilingual model is lighter. Training pauses the playground and the arena so the job has the machine to itself.</p></section>`;
   let preset = "balanced";
   $$("#presets .choice").forEach(c => c.onclick = () => { $$("#presets .choice").forEach(x => x.classList.remove("on")); c.classList.add("on"); preset = c.dataset.p;
     const lr = PRESETS[preset].hp.lr; $("#hp-lr").value = lr ?? H.lr; loraWarnings(); });
@@ -2328,12 +2335,12 @@ function renderResults(data, id) {
     <div class="stat"><div class="k">Trainable parameters</div><div class="v">${(tr.trainable_params / 1e6).toFixed(1)}M</div><div class="d muted">of ${(tr.total_params / 1e6).toFixed(0)}M</div></div>
     <div class="stat"><div class="k">Best epoch</div><div class="v">${tr.best_epoch}</div><div class="d muted">validation loss ${num(tr.best_val_loss)}</div></div>
     <div class="stat"><div class="k">Training time</div><div class="v">${fmtTime(tr.train_seconds)}</div><div class="d muted">${tr.updates} updates</div></div>
-    <div class="stat"><div class="k">Peak memory</div><div class="v">${tr.peak_memory_gb} GB</div><div class="d muted">MLX active allocations</div></div>
+    <div class="stat"><div class="k">Peak memory</div><div class="v">${tr.peak_memory_gb} GB</div><div class="d muted">${tr.backend === "torch" ? "peak on " + esc(tr.device || "PyTorch") : "MLX active allocations"}</div></div>
     <div class="stat"><div class="k">Calibration (val ECE)</div><div class="v">${num(tr.calibration.ece_calibrated)}</div><div class="d muted">uncalibrated ${num(tr.calibration.ece_uncalibrated)}</div></div>
   </div><details><summary>Hyperparameters and temperatures</summary><pre>${esc(JSON.stringify({hyperparameters: tr.hyperparameters, temperature: tr.calibration.temperature, temperature_by_options: tr.calibration.temperature_by_options}, null, 2))}</pre></details></section>` : ""}
-  ${data.model_path ? `<section class="card"><h2>Use the fine-tuned model</h2><p class="muted" style="margin-top:0">A standard Laya checkpoint: FP16 safetensors with the original PyTorch parameter names, your questions and the refitted calibration. Ask the <b>same questions</b> it was trained on.</p>
+  ${data.model_path ? `<section class="card"><h2>Use the fine-tuned model</h2><p class="muted" style="margin-top:0">A standard Laya checkpoint: FP16 safetensors with the original PyTorch parameter names, your questions and the refitted calibration. It loads in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package everywhere else. Ask the <b>same questions</b> it was trained on.</p>
 <pre># from the repository root
-import json, laya_mlx as laya
+${OV.system.backend === "mlx" ? "import json, laya_mlx as laya" : "import json, laya"}
 
 agent = laya.load("${esc(data.model_path)}")
 questions = json.load(open("${esc(data.model_path)}/questions.json"))

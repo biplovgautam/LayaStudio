@@ -698,8 +698,8 @@ Exported from `{model}` by LayaStudio on {created}.
   temperatures that belong to this checkpoint
 * `questions.json` — the questions this model was fine-tuned for
 
-Runs on {runs_on}. Measured here: {ms_per_decision_cpu} ms per decision on this Mac's CPU
-through onnxruntime.
+Runs on {runs_on}. Measured here: {ms_per_decision_cpu} ms per decision on the exporting machine's
+CPU through onnxruntime.
 
 ## Using it
 

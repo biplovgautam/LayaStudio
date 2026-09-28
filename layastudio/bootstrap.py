@@ -206,8 +206,11 @@ class Bootstrap:
         self.lock = threading.Lock()
         self.started = time.time()
         self.steps = [
-            Step("machine", "Checking this Mac"),
-            Step("runtime", "Loading the MLX runtime"),
+            Step("machine", "Checking this machine"),
+            Step(
+                "runtime",
+                "Loading the MLX runtime" if runtime.backend() == "mlx" else "Loading PyTorch",
+            ),
             Step("workspace", "Preparing the workspace"),
             Step("model", "Getting a base model"),
             Step("demos", "Fetching a ready-made fine-tune"),

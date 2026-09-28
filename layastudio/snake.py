@@ -42,7 +42,7 @@ QUESTIONS = {
         },
     }
 }
-TITLE = "Snake moves (generated on this Mac)"
+TITLE = "Snake moves (generated on this machine)"
 
 
 def render(game):

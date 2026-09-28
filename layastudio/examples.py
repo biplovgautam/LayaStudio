@@ -62,7 +62,7 @@ EXAMPLES = {
         "question": "injection",
     },
     "snake": {
-        "title": "Snake moves (generated on this Mac)",
+        "title": "Snake moves (generated on this machine)",
         "description": "Boards from a real Snake game, labeled by a planner that never dies. "
         "No download: the games are played locally. Fine-tune it and the model plays "
         "unassisted - the demo that tells you whether fine-tuning really worked.",
