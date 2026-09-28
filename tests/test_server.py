@@ -77,6 +77,16 @@ def test_rejects_cross_site_and_foreign_hosts(studio):
     assert error.value.code == 415
 
 
+def test_jobs_list_and_unknown_job(studio):
+    base, _ = studio
+    status, body = call(base, "/api/jobs")
+    assert status == 200 and body == {"jobs": [], "count": 0}
+    status, body = call(base, "/api/jobs/no-such-job")
+    assert status == 404 and "no-such-job" in body["error"]
+    _, state = call(base, "/api/state")
+    assert state["job_count"] == 0
+
+
 def test_dataset_train_job_and_results(studio, checkpoint):  # noqa: F811
     base, _ = studio
     rows = "\n".join(json.dumps(r) for r in make_rows(45))
@@ -115,6 +125,8 @@ def test_dataset_train_job_and_results(studio, checkpoint):  # noqa: F811
             break
         time.sleep(0.5)
     assert info["job"]["state"] == "done", info["job"]
+    _, jobs = call(base, "/api/jobs")
+    assert jobs["count"] == 1 and jobs["jobs"][0]["id"] == job["id"]
     _, run = call(base, f"/api/runs/{job['id']}")
     assert run["comparison"]["finetuned"]["overall"]["n"] > 0
     assert "records" not in run["eval"]

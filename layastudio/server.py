@@ -163,6 +163,9 @@ class Jobs:
         job["last"] = progress[-1] if progress else None
         return job
 
+    def count(self):
+        return len(folders(self.root))
+
     def list(self, limit=30):
         jobs = sorted(folders(self.root), key=lambda p: p.stat().st_mtime, reverse=True)
         out = []
@@ -548,7 +551,7 @@ class Studio:
             "models": base,
             "finetuned": tuned,
             "jobs": self.jobs.list(12),
-            "job_count": len(folders(self.jobs.root)),
+            "job_count": self.jobs.count(),
             "exports": self.exports(),
             "examples": [
                 {
@@ -985,6 +988,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, studio.account.status())
                 if route == ["families"]:
                     return self._send(HTTPStatus.OK, studio.families())
+                if route == ["jobs"]:
+                    return self._send(
+                        HTTPStatus.OK, {"jobs": studio.jobs.list(100), "count": studio.jobs.count()}
+                    )
                 if route == ["registry"]:
                     return self._send(HTTPStatus.OK, {"items": studio.registry(query.get("q"))})
                 if len(route) == 2 and route[0] == "datasets":
@@ -1772,7 +1779,7 @@ async function refresh() {
   } else chip.innerHTML = "";
   return OV;
 }
-const routes = {home: viewHome, arena: viewArena, datasets: viewDatasets, dataset: viewDataset, train: viewTrain, runs: viewRuns, run: viewRun, playground: viewPlayground, models: viewModels, guide: viewGuide, jobs: viewJob};
+const routes = {home: viewHome, arena: viewArena, datasets: viewDatasets, dataset: viewDataset, train: viewTrain, runs: viewRuns, run: viewRun, playground: viewPlayground, models: viewModels, guide: viewGuide, jobs: viewJobs, job: viewJob};
 async function route() {
   clearTimers();
   const token = ++ROUTE;
@@ -1781,6 +1788,7 @@ async function route() {
   let view = a || "home", arg = b ? decodeURIComponent(b) : null;
   if (view === "datasets" && arg) view = "dataset";
   if (view === "runs" && arg) view = "run";
+  if (view === "jobs" && arg) view = "job";
   const here = routes[a] ? a : "home";
   $$(".side-nav a[data-v]").forEach(n => {
     const on = n.dataset.v === here;
@@ -2367,27 +2375,102 @@ print(agent.predict("your text here", questions)["answers"])</pre></section>` : 
   };
 }
 
-// ------------------------------------------------------------------ jobs (non-training)
-async function viewJob(id, _, token) {
-  const events = []; let next = 0;
-  main.innerHTML = `<h1 id="jt">Job</h1><section class="card"><div id="jstate"></div><div id="jprog" style="margin-top:10px"></div><pre id="jlog" style="max-height:300px"></pre></section>`;
-  const poll = async () => {
-    const r = await api(`/api/jobs/${encodeURIComponent(id)}?since=${next}`);
+// ------------------------------------------------------------------ jobs
+const JOB_KINDS = {train: "fine-tune", evaluate: "evaluate", export: "export", publish: "publish", download: "download", import: "import", example: "example"};
+function jobHref(j) { return (j.kind === "train" ? "#/runs/" : "#/jobs/") + encodeURIComponent(j.id); }
+function jobFraction(j) {
+  const last = j.last || {};
+  if (last.type === "step" && last.updates) return last.step / last.updates;
+  if (last.type === "progress" && last.total) return last.done / last.total;
+  return null;
+}
+function jobStarted(j) { return `started ${when(j.created)}${ago(j.created) ? ` (${ago(j.created)})` : ""}`; }
+function jobRow(j) {
+  const running = j.state === "running", f = running ? jobFraction(j) : null;
+  const doing = running && j.last && j.last.message ? j.last.message : "";
+  return `<li class="rowi">
+    <div class="rowi-main">
+      <a class="rowi-name" href="${esc(jobHref(j))}">${esc(j.title || j.id)}</a>
+      <span class="rowi-sub"><span class="mono">${esc(j.id)}</span> · ${esc(jobStarted(j))}</span>
+      ${doing ? `<span class="rowi-sub">${esc(doing)}</span>` : ""}
+      ${f != null ? `<div class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></div>` : ""}
+      ${j.error && !running ? `<span class="rowi-err">${esc(j.error)}</span>` : ""}
+    </div>
+    <div class="rowi-meta">${pill("", JOB_KINDS[j.kind] || j.kind)}${pill(j.state)}</div>
+  </li>`;
+}
+
+async function viewJobs(_, __, token) {
+  main.innerHTML = `<h1>Jobs</h1>
+  <p class="lead">Everything the studio runs in the background: fine-tunes, evaluations, downloads, imports, exports and publishes. One job runs at a time, and while it runs the playground and the arena wait.</p>
+  <div id="joblist"><div class="muted">Reading the jobs…</div></div>`;
+  let shown = "";
+  const load = async () => {
+    const r = await api("/api/jobs");
     if (!current(token)) return;
-    events.push(...r.events); next = r.next;
-    $("#jt").textContent = r.job.title; $("#jstate").innerHTML = pill(r.job.state) + (r.job.error ? `<div class="notice bad">${esc(r.job.error)}</div>` : "");
-    const p = events.filter(e => e.type === "progress").pop();
-    $("#jprog").innerHTML = r.job.state === "running" && p ? `<div class="bar"><i style="width:${100 * p.done / p.total}%"></i></div>` : "";
-    $("#jlog").textContent = events.map(e => `${e.type.padEnd(9)} ${e.message || ""}${e.type === "progress" ? `${e.done}/${e.total}` : ""}${e.type === "result" ? JSON.stringify(e) : ""}`).join("\n");
-    if (r.job.state !== "running") {
-      clearTimers();
-      const res = events.find(e => e.type === "result");
-      if (res && res.dataset) { toast("Dataset ready"); location.hash = "#/datasets/" + res.dataset; }
-      else if (r.job.kind === "download" && r.job.state === "done") { toast("Model downloaded"); location.hash = "#/models"; }
-      else if (r.job.kind === "evaluate" && r.job.state === "done") { toast("Evaluation finished"); history.back(); }
-    }
+    const html = r.jobs.length
+      ? `<section class="panel"><header><h2>${r.count} ${r.count === 1 ? "job" : "jobs"}</h2><span class="muted small">${r.count > r.jobs.length ? `the newest ${r.jobs.length}` : "newest first"}</span></header>
+         <ul class="rows">${r.jobs.map(jobRow).join("")}</ul></section>`
+      : `<div class="empty"><b>No jobs yet.</b><br>Fetching an example dataset, downloading a model, fine-tuning, evaluating, exporting and publishing each run as a job, and every job shows up here with its progress and log.
+         <div class="row"><a class="btn primary" href="#/datasets">Get a dataset</a><a class="btn" href="#/models">Download a model</a></div></div>`;
+    if (html !== shown) { $("#joblist").innerHTML = html; shown = html; }
   };
-  await poll(); every(poll, 1000);
+  await load();
+  every(() => load().catch(() => { /* transient */ }), 2000);
+}
+
+async function viewJob(id, _, token) {
+  const path = `/api/jobs/${encodeURIComponent(id)}`;
+  let first;
+  try { first = await api(path + "?since=0"); }
+  catch (e) {
+    if (!current(token)) return;
+    main.innerHTML = `<p class="eyebrow"><span class="tiny-square"></span> <a href="#/jobs">Jobs</a></p><h1>No such job</h1>
+      <div class="empty">There is no job called <span class="mono">${esc(id)}</span>${e.status === 404 ? "" : ` (${esc(e.message)})`}. Deleting a run deletes its job too.
+      <div class="row"><a class="btn primary" href="#/jobs">All jobs</a></div></div>`;
+    return;
+  }
+  if (!current(token)) return;
+  const events = [];
+  let next = 0, poller = null;
+  const watched = first.job.state === "running";  // only a job seen finishing moves the page on
+  main.innerHTML = `<p class="eyebrow"><span class="tiny-square"></span> <a href="#/jobs">Jobs</a></p>
+  <div class="row" style="justify-content:space-between;align-items:flex-start"><div style="min-width:0"><h1 id="jt"></h1><div class="muted small" id="jmeta"></div></div><div class="row" id="jact"></div></div>
+  <section class="card" style="margin-top:18px"><div id="jstate"></div><div id="jprog" style="margin-top:10px"></div><pre id="jlog" style="max-height:340px"></pre></section>`;
+  let drawn = null;
+  const draw = job => {
+    $("#jt").textContent = job.title || job.id;
+    $("#jmeta").innerHTML = `${esc(JOB_KINDS[job.kind] || job.kind)} · ${esc(jobStarted(job))} · <span class="mono">${esc(job.id)}</span>`;
+    if (drawn !== job.state) { drawn = job.state; drawActions(job); }
+    $("#jstate").innerHTML = pill(job.state) + (job.error ? `<div class="notice bad">${esc(job.error)}</div>` : "");
+    const f = job.state === "running" ? jobFraction(job) : null;
+    $("#jprog").innerHTML = f != null ? `<div class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></div>` : "";
+    $("#jlog").textContent = events.map(e => `${e.type.padEnd(9)} ${e.message || ""}${e.type === "progress" ? `${e.done}/${e.total}` : ""}${e.type === "result" ? JSON.stringify(e) : ""}`).join("\n") || "No events yet.";
+  };
+  const drawActions = job => {
+    $("#jact").innerHTML = (job.kind === "train" ? `<a class="btn" href="#/runs/${esc(encodeURIComponent(job.id))}">Open the run</a>` : "")
+      + (job.state === "running" ? `<button class="btn danger" id="jcancel" type="button">Cancel</button>` : "");
+    const cancel = $("#jcancel");
+    if (cancel) cancel.onclick = async () => {
+      if (!confirm("Stop this job?")) return;
+      try { await api(path + "/cancel", {method: "POST", body: {}}); } catch (e) { toast(e.message); }
+    };
+  };
+  const apply = r => {
+    events.push(...r.events); next = r.next;
+    draw(r.job);
+    if (r.job.state === "running") return;
+    if (poller) clearInterval(poller);
+    if (!watched) return;
+    const res = events.find(e => e.type === "result");
+    if (res && res.dataset) { toast("Dataset ready"); location.hash = "#/datasets/" + res.dataset; }
+    else if (r.job.kind === "download" && r.job.state === "done") { toast("Model downloaded"); location.hash = "#/models"; }
+    else if (r.job.kind === "evaluate" && r.job.state === "done") { toast("Evaluation finished"); history.back(); }
+  };
+  apply(first);
+  if (first.job.state === "running") poller = every(async () => {
+    try { const r = await api(`${path}?since=${next}`); if (current(token)) apply(r); } catch (e) { /* transient */ }
+  }, 1000);
 }
 
 // ------------------------------------------------------------------ playground
