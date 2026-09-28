@@ -5,7 +5,7 @@
   <img src="docs/logo-light.png" alt="LayaStudio — tune your own decisions" width="420">
 </picture>
 
-**Build your own decision engine on your Mac, in minutes.**
+**Build your own decision engine on your own machine, in minutes.**
 
 Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on your own data, locally — and prove the result is better before you ship it. For the decisions *your* product makes, a small model you tuned yourself can beat a general hosted API: more accurate on your labels, ~10× faster because there is no network, and free to run.
 
@@ -13,7 +13,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Apple silicon](https://img.shields.io/badge/Apple%20silicon-MLX-black)](https://github.com/ml-explore/mlx)
 [![Runtime](https://img.shields.io/badge/runtime-laya--mlx-6b46c1)](https://pypi.org/project/laya-mlx/)
-[![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20Mac-2b8a3e)](#privacy-and-security)
+[![Local](https://img.shields.io/badge/your%20data-never%20leaves%20your%20machine-2b8a3e)](#privacy-and-security)
 
 **[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · part of [System One Models](https://systemonemodels.tech) ([LinkedIn](https://www.linkedin.com/company/system-one-models/) · [X](https://x.com/SystemoneModels) · [Hugging Face](https://huggingface.co/systemonemodels) · [Instagram](https://www.instagram.com/systemonemodels.tech/) · ceo@systemonemodels.tech) · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
 
@@ -21,7 +21,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
 ```
 
-That is the whole setup. The browser opens, and the studio finishes preparing itself in the background — it detects your Mac, checks the MLX runtime, downloads a base checkpoint and fetches the public example datasets, showing every step on the page.
+That is the whole setup. The browser opens, and the studio finishes preparing itself in the background — it detects your machine, checks its runtime (MLX on Apple silicon, PyTorch on Windows and Linux), downloads a base checkpoint and fetches the public example datasets, showing every step on the page.
 
 </div>
 
@@ -35,7 +35,7 @@ Laya answers typed questions — `choice`, `score`, `noul` — in a single forwa
 
 The only published way to fine-tune Laya is a PyTorch notebook for two cloud GPUs, which means copying your data to someone else's machine. LayaStudio came out of needing the opposite: adapt Laya to a real product's decisions **on the laptop**, without the data ever leaving it, and with honest before/after measurement so "fine-tuned" is a number rather than a feeling.
 
-The goal is simple: **any Mac owner should be able to turn a general model into a specialist for their own decisions, in minutes, and see exactly how much better it got.**
+The goal is simple: **anyone with a laptop should be able to turn a general model into a specialist for their own decisions, in minutes, and see exactly how much better it got.**
 
 It is built on top of [`laya-mlx`](https://pypi.org/project/laya-mlx/), the native MLX runtime for Laya, and it is a separate project: an app around that runtime, not a fork of it.
 
@@ -126,6 +126,24 @@ copy: **196 moves, 25.7 apples, 99.4% legal moves, 40.7 decisions per second**.
 ```bash
 LAYASTUDIO_DEMO_MODELS="" uv run layastudio     # skip it, if you would rather not
 ```
+
+### Any System One model, through the System One Engine
+
+The Playground's **System One models** tab runs any model from
+[System One Models](https://systemonemodels.tech) on this machine, next to your own
+fine-tunes: Laya, Julia 1, Decider and every published Laya Studio fine-tune. It talks to
+the [System One Engine](https://github.com/systemonemodels/systemone-engine), which loads
+each model on the fastest device you have (an NVIDIA, AMD, Intel or Apple GPU, or the CPU)
+and keeps it loaded. Start it in another terminal:
+
+```bash
+systemone run engine
+```
+
+Then type a model's name (`convai-innovations/laya`, `supersonic-labs/julia-1`) and press
+Load; the page shows each checkpoint downloading and loading, then asks it your questions.
+The studio reaches the engine on `http://127.0.0.1:8766`; set `LAYASTUDIO_ENGINE_URL` to
+use another address.
 
 ### Publishing your own run
 
@@ -505,7 +523,7 @@ LayaStudio is an independent project and is not affiliated with Convai Innovatio
 
 ## License
 
-**Apache-2.0 — free to use, including commercially.** Clone it, run it, fine-tune Laya on your own Mac with your own data, ship the result in your product, or fork it. No fee, no key, no account, no telemetry.
+**Apache-2.0 — free to use, including commercially.** Clone it, run it, fine-tune Laya on your own machine with your own data, ship the result in your product, or fork it. No fee, no key, no account, no telemetry.
 
 - **Your data stays yours.** LayaStudio never uploads it; it has nowhere to upload it to.
 - **Your fine-tuned checkpoints are yours.** They are written into your workspace; nothing in this project claims any right to them. The base weights they build on are Apache-2.0 from Convai Innovations, so the usual attribution applies when you redistribute a model.
