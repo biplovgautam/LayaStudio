@@ -73,6 +73,18 @@ def shown_path(path, root=None):
     return str(path).replace(str(Path.home()), "~", 1)
 
 
+def dir_size(path):
+    """Bytes in a folder; the Hugging Face cache's symlinks count as the files they point to."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+    return total
+
+
 def strip_records(report):
     return {k: v for k, v in report.items() if k != "records"} if report else None
 
@@ -506,7 +518,11 @@ class Studio:
                 "name": r["name"],
                 "base_model": r["base_model"],
                 "dataset": r["dataset"],
+                "dataset_name": r.get("dataset_name"),
+                "method": (r.get("hyperparameters") or {}).get("method"),
                 "accuracy": r.get("accuracy"),
+                "baseline_accuracy": r.get("baseline_accuracy"),
+                "p_value": r.get("p_value"),
                 "path": shown_path(
                     self.workspace / "runs" / r["id"] / "model", self.workspace.parent
                 ),
@@ -516,6 +532,21 @@ class Studio:
             if r["has_model"] and r["state"] == "done"
         ]
         return base, tuned
+
+    def library(self):
+        """The Models page: your fine-tunes, the base checkpoints and exports, with sizes."""
+        base, tuned = self.models()
+        for model in base:
+            model["size_bytes"] = None
+            if model.get("cached"):
+                try:
+                    path = engine.resolve_model_ref(model["ref"], self.workspace)
+                    model["size_bytes"] = dir_size(path)
+                except (FileNotFoundError, ValueError, OSError):
+                    pass
+        for model in tuned:
+            model["size_bytes"] = dir_size(self.workspace / "runs" / model["ref"][4:] / "model")
+        return {"base": base, "finetuned": tuned, "exports": self.exports()}
 
     def _fit_inputs(self):
         machine = getattr(self.bootstrap, "machine", None)
@@ -988,6 +1019,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(HTTPStatus.OK, studio.account.status())
                 if route == ["families"]:
                     return self._send(HTTPStatus.OK, studio.families())
+                if route == ["models"]:
+                    return self._send(HTTPStatus.OK, studio.library())
                 if route == ["jobs"]:
                     return self._send(
                         HTTPStatus.OK, {"jobs": studio.jobs.list(100), "count": studio.jobs.count()}
@@ -1357,6 +1390,7 @@ td a:hover{color:var(--accent-text)}
 tr:last-child td{border-bottom:0}
 .tablewrap{overflow-x:auto;max-width:100%}
 .tablewrap th{white-space:nowrap}
+.tablewrap>table.wide{min-width:560px}
 .boxed{border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
 .boxed th{background:var(--bg-subtle);padding:10px 14px}
 .boxed td{padding:10px 14px}
@@ -1454,6 +1488,38 @@ footer.site .legal a{color:var(--text-muted)}
 .arena .num b{display:block;font-size:1.125rem;font-weight:600}
 .arena .num span{font-family:var(--font-mono);font-size:.6875rem;letter-spacing:.04em;color:var(--text-faint)}
 
+/* ---- models: compact rows, like the website's .model-row */
+.mrow{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:4px 14px;align-items:center;padding:14px 18px}
+.mrow+.mrow{border-top:1px solid var(--border)}
+.tile{display:grid;place-items:center;width:34px;height:34px;border-radius:9px;border:1px solid var(--accent-subtle-border);background:var(--accent-subtle-bg);
+  color:var(--accent-text);font-family:var(--font-mono);font-size:.875rem;font-weight:600}
+.tile.base{border-color:var(--border);background:var(--bg-subtle);color:var(--text-muted)}
+.mono-name{font-family:var(--font-mono);font-size:.8125rem;font-weight:500;color:var(--text)}
+a.mono-name:hover{color:var(--accent-text)}
+.rowi-name .pill{margin-left:6px}
+.path{font-size:.6875rem;color:var(--text-faint);overflow-wrap:anywhere}
+.mrow-score{display:grid;justify-items:end;gap:3px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;font-size:.8125rem}
+.mrow-score b{font-size:1rem;font-weight:600;color:var(--text)}
+.mrow-score span.faint{font-size:.75rem}
+.mrow-actions{grid-column:2/-1;display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px}
+.mrow-actions:empty{display:none}
+.joined{display:inline-flex}
+.joined select{width:auto;min-height:28px;padding:3px 8px;font-size:.75rem;border-radius:var(--radius) 0 0 var(--radius)}
+.joined .btn{border-radius:0 var(--radius) var(--radius) 0;border-left:0}
+.mrow-exp{grid-column:2/-1;margin:6px 0 0}
+.mrow-exp>summary{font-size:.75rem}
+.mrow-exports{grid-column:2/-1;list-style:none;margin:8px 0 0;padding:0;display:grid;gap:6px}
+.mrow-exports li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg-subtle);font-size:.75rem;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.mrow-exports .path{flex-basis:100%}
+details.family{margin:0 0 10px;border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
+details.family>summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 18px;list-style:none;color:var(--text);font-size:.875rem}
+details.family>summary::-webkit-details-marker{display:none}
+details.family>summary::before{content:"";width:6px;height:6px;margin:0 4px 0 2px;border-right:1.5px solid var(--text-faint);border-bottom:1.5px solid var(--text-faint);transform:rotate(-45deg);transition:transform .15s ease}
+details.family[open]>summary::before{transform:rotate(45deg)}
+details.family>summary b{font-weight:600}
+details.family .family-body{padding:0 18px 12px;border-top:1px solid var(--border)}
+
 /* ---- responsive */
 @media (max-width:1100px){.three{grid-template-columns:repeat(2,minmax(0,1fr))}
   .steps4{grid-template-columns:repeat(2,minmax(0,1fr))}.steps4 li:nth-child(3){border-left:0}.steps4 li:nth-child(n+3){border-top:1px solid var(--border)}
@@ -1480,6 +1546,8 @@ footer.site .legal a{color:var(--text-muted)}
   .setup-steps .sd{grid-column:2}
   .rowi{grid-template-columns:minmax(0,1fr)}
   .rowi-meta{justify-content:flex-start}
+  .mrow{grid-template-columns:34px minmax(0,1fr);padding:14px 16px}
+  .mrow-score{grid-column:2;justify-items:start;text-align:left;white-space:normal;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
   .toast{left:16px;right:16px;bottom:16px;max-width:none}
 }
 @media (max-width:560px){.steps4{grid-template-columns:minmax(0,1fr)}.steps4 li+li{border-left:0;border-top:1px solid var(--border)}
@@ -2141,7 +2209,7 @@ async function viewTrain(_, params) {
   <p class="lead">Adapts Laya to your questions and labels. The run first scores the base model on your test split, trains with early stopping on the validation split, re-fits confidence calibration, then scores the fine-tuned model on the same test split.</p>
   <section class="card"><div class="grid two">
     <div><label>Dataset</label><select id="trds">${OV.datasets.map(d => `<option value="${esc(d.id)}" ${params.get("dataset") === d.id ? "selected" : ""}>${esc(d.name)} — ${d.rows.train} train rows</option>`).join("")}</select></div>
-    <div><label>Base model</label><select id="trbase">${models.map(m => `<option value="${esc(m.ref)}" ${m.cached ? "" : "disabled"}>${esc(m.repo)} ${m.cached ? "" : "(download in Models)"}</option>`).join("")}</select><div class="muted" id="trbasedesc" style="font-size:12px;margin-top:4px"></div></div>
+    <div><label>Base model</label><select id="trbase">${models.map(m => `<option value="${esc(m.ref)}" ${m.cached ? (params.get("base") === m.ref ? "selected" : "") : "disabled"}>${esc(m.repo)} ${m.cached ? "" : "(download in Models)"}</option>`).join("")}</select><div class="muted" id="trbasedesc" style="font-size:12px;margin-top:4px"></div></div>
   </div>
   <label>Recipe</label><div class="opt" id="presets">${Object.entries(PRESETS).map(([k, p], i) => `<div class="choice ${i ? "" : "on"}" data-p="${k}"><b>${esc(p.title)}</b><span>${esc(p.sub)}</span></div>`).join("")}</div>
   <details><summary>Advanced settings</summary><div class="grid three" id="adv">
@@ -2220,26 +2288,13 @@ async function viewRun(id, _, token) {
     const r = data.run;
     main.innerHTML = `
     <div class="row" style="justify-content:space-between"><div><h1>${esc(r.name)}</h1><div class="muted">${esc(r.dataset_name)} · ${esc(modelName(r.base_model))} · ${esc(r.hyperparameters.method)}${r.hyperparameters.method === "lora" ? ` r${r.hyperparameters.lora_rank}${r.hyperparameters.lora_layers ? ", top " + r.hyperparameters.lora_layers + " layers" : ""}${loraTag(r.hyperparameters)}` : ""} · ${esc(r.hyperparameters.objective)}</div></div>
-    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto"><option value="onnx:float">ONNX · float</option><option value="onnx:int8">ONNX · int8</option><option value="onnx:int4">ONNX · int4</option><option value="coreml:float">Core ML · float</option><option value="coreml:int8">Core ML · int8</option><option value="coreml:int4">Core ML · int4</option></select><button class="btn" id="rexport" hidden>Export</button><button class="btn" id="rpublish" hidden title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
+    <div class="row"><span id="rstate"></span><a class="btn" id="rplay" href="#/playground?run=${esc(r.id)}" hidden>Try in playground</a><select id="rfmt" hidden style="width:auto" aria-label="Export format">${exportOptions()}</select><button class="btn" id="rexport" hidden>Export</button><button class="btn" id="rpublish" hidden title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button><button class="btn danger" id="rcancel" hidden>Cancel</button><button class="btn danger" id="rdel" hidden>Delete run</button></div></div>
     <section class="card" id="live" style="margin-top:16px"><div class="steps" id="rsteps"></div><div id="rprog"></div><div id="rchart" style="margin-top:12px"></div>
     <details><summary>Event log</summary><pre id="rlog" style="max-height:260px"></pre></details></section>
     <div id="results"></div>`;
     $("#rcancel").onclick = async () => { if (!confirm("Stop this run? The partial model is discarded.")) return; try { await api(`/api/jobs/${id}/cancel`, {method: "POST", body: {}}); } catch (e) { toast(e.message); } };
-    $("#rexport").onclick = async () => {
-      try {
-        const [target, precision] = $("#rfmt").value.split(":");
-        const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: "run:" + id, target, precision}});
-        location.hash = "#/jobs/" + job.id;
-      } catch (e) { toast(e.message); }
-    };
-    $("#rpublish").onclick = () => withAccount(async () => {
-      const repo = prompt(`Publish to systemonemodels.tech as ${ACCOUNT.username}.\nRepository as namespace/name — leave empty for ${ACCOUNT.username}/<this run's name>.`, "");
-      if (repo === null) return;
-      try {
-        const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: "run:" + id, repo: repo.trim() || null}});
-        location.hash = "#/jobs/" + job.id;
-      } catch (e) { toast(e.message); }
-    });
+    $("#rexport").onclick = () => startExport("run:" + id, $("#rfmt").value);
+    $("#rpublish").onclick = () => startPublish("run:" + id);
     $("#rdel").onclick = async () => { if (!confirm("Delete this run and its checkpoint?")) return; try { await api("/api/runs/" + id, {method: "DELETE", body: {}}); location.hash = "#/runs"; } catch (e) { toast(e.message); } };
   };
   const update = () => {
@@ -2487,9 +2542,10 @@ async function viewPlayground(_, params, token) {  // params: run, state, go
                 state: (d.sample[0] || {}).state || ""};
     } catch (e) { toast(e.message); }
   }
-  const checked = m => preset ? preset.models.includes(m.ref) : false;
+  const wanted = (params.get("models") || "").split(",").filter(Boolean);
+  const checked = m => preset ? preset.models.includes(m.ref) : wanted.includes(m.ref);
   main.innerHTML = `<h1>Playground</h1><p class="lead">Ask base and fine-tuned models the same questions side by side. Models stay loaded between requests, so later answers show real latency.</p>
-  <section class="card"><label>Models (up to 4)</label><div class="row" id="pgm">${models.map((m, i) => `<label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--ink);font-weight:450"><input type="checkbox" value="${esc(m.ref)}" ${preset ? (checked(m) ? "checked" : "") : (i === 0 ? "checked" : "")}>${esc(m.name)}</label>`).join("") || `<span class="muted">No models available. Download one in Models.</span>`}</div>
+  <section class="card"><label>Models (up to 4)</label><div class="row" id="pgm">${models.map((m, i) => `<label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--ink);font-weight:450"><input type="checkbox" value="${esc(m.ref)}" ${preset || wanted.length ? (checked(m) ? "checked" : "") : (i === 0 ? "checked" : "")}>${esc(m.name)}</label>`).join("") || `<span class="muted">No models available. Download one in Models.</span>`}</div>
   <div class="grid two"><div><label>Questions <select id="pgqs" style="width:auto;display:inline-block;margin-left:8px;padding:2px 6px"><option value="">custom</option>${OV.datasets.map(d => `<option value="${esc(d.id)}">from ${esc(d.name)}</option>`).join("")}${OV.finetuned.map(f => `<option value="run:${esc(f.ref.slice(4))}">from run ${esc(f.name)}</option>`).join("")}</select></label><textarea id="pgq" spellcheck="false" style="min-height:240px">${esc(preset ? JSON.stringify(preset.questions, null, 2) : TEMPLATE)}</textarea></div>
   <div><label>State</label><textarea id="pgs" style="min-height:240px;font-family:inherit;font-size:14px" placeholder="Paste a message, ticket or JSON object">${esc(params.get("state") || (preset ? preset.state : "I was charged twice for my subscription and nobody answers my emails. Please fix this today."))}</textarea></div></div>
   <div class="row" style="margin-top:12px"><button class="btn primary" id="pggo">Predict</button><span class="muted" id="pgmsg"></span></div></section><div id="pgout" class="grid two"></div>`;
@@ -2526,51 +2582,157 @@ function answerCard(q, a, def) {
 }
 
 // ------------------------------------------------------------------ models
-async function viewModels() {
-  const token = ROUTE;
+const EXPORT_FORMATS = [["onnx:float", "ONNX · float"], ["onnx:int8", "ONNX · int8"], ["onnx:int4", "ONNX · int4"], ["coreml:float", "Core ML · float"], ["coreml:int8", "Core ML · int8"], ["coreml:int4", "Core ML · int4"]];
+function exportOptions() { return EXPORT_FORMATS.map(([v, t]) => `<option value="${v}">${t}</option>`).join(""); }
+async function startExport(ref, format) {
+  const [target, precision] = format.split(":");
+  try { const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: ref, target, precision}}); location.hash = "#/jobs/" + job.id; }
+  catch (e) { toast(e.message); }
+}
+function startPublish(ref) {
+  withAccount(async () => {
+    const repo = prompt(`Publish to systemonemodels.tech as ${ACCOUNT.username}.\nRepository as namespace/name — leave empty for ${ACCOUNT.username}/<this run's name>.`, "");
+    if (repo === null) return;
+    try { const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: ref, repo: repo.trim() || null}}); location.hash = "#/jobs/" + job.id; }
+    catch (e) { toast(e.message); }
+  });
+}
+function exportLabel(x) {
+  return ({onnx: "ONNX", coreml: "Core ML"}[x.target] || String(x.target).toUpperCase()) + (x.precision && x.precision !== "float" ? " · " + x.precision : "");
+}
+function exportItem(x) {
+  const ms = x.ms_per_decision || x.ms_per_decision_cpu;
+  return `<li>${pill("accent", exportLabel(x))}
+    <span>${x.size_mb != null ? bytes(x.size_mb * 2 ** 20) : "–"}</span>
+    ${ms ? `<span>${num(ms, 1)} ms per decision${x.ms_per_decision ? "" : " on the CPU"}</span>` : ""}
+    ${x.test ? `<span>${pct(x.test.accuracy_exported)} on ${x.test.rows} test rows</span>` : ""}
+    ${x.verification ? `<span>${x.verification.same_answer}/${x.verification.decisions} same answers</span>` : ""}
+    <span>${esc(when(x.created))}</span>
+    <span class="mono path">${esc(x.path)}</span></li>`;
+}
+
+async function viewModels(_, __, token) {
   const fitPill = m => ({
-    "fits": `<span class="pill done">fits</span>`,
-    "qlora": `<span class="pill warn">4-bit QLoRA</span>`,
-    "too-big": `<span class="pill bad">too big here</span>`,
-    "not-trainable": `<span class="pill">no weights</span>`,
-    "unknown": `<span class="pill">unknown</span>`,
+    "fits": pill("done", "fits"),
+    "qlora": pill("warn", "4-bit QLoRA"),
+    "too-big": pill("bad", "too big here"),
+    "not-trainable": pill("", "no weights"),
+    "unknown": pill("", "unknown"),
   }[m.fit] || "");
-  const trainerPill = t => t === "ready" ? `<span class="pill done">trains here</span>` : t === "next" ? `<span class="pill running">trainer coming next</span>` : `<span class="pill">trainer planned</span>`;
+  const trainerPill = t => t === "ready" ? pill("done", "trains here") : t === "next" ? pill("running", "trainer coming next") : pill("", "trainer planned");
   const gb = n => n == null ? "–" : `${n} GB`;
   const params = b => b >= 1 ? `${b.toFixed(b >= 10 ? 0 : 1)}B` : b >= 0.001 ? `${Math.round(b * 1000)}M` : `${Math.round(b * 1e6)}K`;
-  main.innerHTML = `<h1>Models</h1><p class="lead">Every System One model family, what this machine can do with each, and your own models from systemonemodels.tech. Nothing is hidden: a model that will not fit here says so, and what to do instead.</p>
-  <section class="card"><h2>From systemonemodels.tech</h2>
-    <p class="muted">Import any model published on the registry — yours or anyone's — and train from it here.</p>
-    <div class="row" style="gap:8px"><input id="regq" placeholder="Search models, e.g. laya, jev, snake" style="flex:1"><button class="btn" id="regsearch">Search</button></div>
-    <div id="regout" style="margin-top:12px"></div></section>
-  <div id="families"><div class="muted">Reading the catalogue…</div></div>
-  <section class="card"><h2>Fine-tuned checkpoints</h2>
-  ${OV.finetuned.length ? `<div class="tablewrap"><table><tr><th>Run</th><th>Base</th><th>Test accuracy</th><th>Location</th></tr>${OV.finetuned.map(f => `<tr><td><a href="#/runs/${esc(f.ref.slice(4))}">${esc(f.name)}</a></td><td>${esc(modelName(f.base_model))}</td><td>${pct(f.accuracy)}</td><td class="mono faint" style="word-break:break-all">${esc(f.path)}</td></tr>`).join("")}</table></div>` : `<div class="muted">None yet.</div>`}
-  ${OV.exports && OV.exports.length ? `<h3>Exports</h3><div class="tablewrap"><table><tr><th>Model</th><th>Target</th><th>Size</th><th>Per decision</th><th>Verified</th><th>Location</th></tr>
-  ${OV.exports.map(x => `<tr><td>${esc(modelName(x.model))}</td><td>${esc(x.target.toUpperCase())}${x.precision && x.precision !== "float" ? " · " + esc(x.precision) : ""}</td><td>${x.size_mb} MB</td><td>${x.ms_per_decision || x.ms_per_decision_cpu || "–"} ms${x.test ? ` · ${(100 * x.test.accuracy_exported).toFixed(1)}%` : ""}</td><td>${x.verification ? `${x.verification.same_answer}/${x.verification.decisions} same answer · max Δp ${x.verification.max_probability_difference.toExponential(1)}` : "–"}</td><td class="mono faint" style="word-break:break-all">${esc(x.path)}</td></tr>`).join("")}</table></div>` : ""}
-  <h3>Format and portability</h3><p class="muted">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. The run page adds ONNX and Core ML exports in float, int8 or int4.</p></section>`;
+  main.innerHTML = `<h1>Models</h1>
+  <p class="lead">Your fine-tuned models, the base checkpoints they start from, and every System One model family with what this machine can do with it. A model that will not fit here says so, and what to do instead.</p>
+  <section class="section">
+    <div class="section-head"><h2>Your fine-tuned models</h2><a class="text-link" href="#/train">Fine-tune another</a></div>
+    <div id="mine"><div class="muted">Reading the workspace…</div></div>
+  </section>
+  <section class="section">
+    <div class="section-head"><h2>Base models</h2><span class="muted small">what a fine-tune starts from</span></div>
+    <div id="bases"></div>
+  </section>
+  <section class="section">
+    <div class="section-head"><h2>Import from systemonemodels.tech</h2></div>
+    <p class="hint">Any model published on the registry, yours or anyone's: import it, then train from it here.</p>
+    <div class="row"><input id="regq" type="search" placeholder="Search models, e.g. laya, jev, snake" style="flex:1;min-width:0"><button class="btn" id="regsearch" type="button">Search</button></div>
+    <div id="regout" style="margin-top:12px"></div>
+  </section>
+  <section class="section">
+    <div class="section-head"><h2>Every System One model family</h2></div>
+    <div id="families"><div class="muted">Reading the catalogue…</div></div>
+  </section>
+  <section class="section">
+    <div class="section-head"><h2>Format and portability</h2></div>
+    <p class="hint">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. Exports add ONNX and Core ML in float, int8 or int4.</p>
+  </section>`;
 
   const bindDownloads = root => $$("[data-dl]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
   const bindImports = root => $$("[data-import]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "import", repo: b.dataset.import}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
   const warnings = ws => ws && ws.length ? `<ul class="warnlist">${ws.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : "";
 
   try {
+    const lib = await api("/api/models");
+    if (!current(token)) return;
+    const byModel = {};
+    for (const x of lib.exports) (byModel[x.model] = byModel[x.model] || []).push(x);
+    const known = new Set([...lib.finetuned, ...lib.base].map(m => m.ref));
+    const exportsOf = ref => {
+      const xs = byModel[ref] || [];
+      if (!xs.length) return "";
+      const kinds = [...new Set(xs.map(exportLabel))].join(", ");
+      return `<details class="mrow-exp"><summary>${xs.length} ${xs.length === 1 ? "export" : "exports"}: ${esc(kinds)}</summary><ul class="mrow-exports">${xs.map(exportItem).join("")}</ul></details>`;
+    };
+    const initial = name => esc((String(name).replace(/^.*\//, "").match(/[a-z0-9]/i) || ["?"])[0].toUpperCase());
+
+    $("#mine").innerHTML = lib.finetuned.length ? `<section class="panel"><ul class="rows">${lib.finetuned.map(f => {
+      const id = f.ref.slice(4);
+      return `<li class="mrow">
+        <span class="tile" aria-hidden="true">${initial(f.name)}</span>
+        <div class="rowi-main">
+          <a class="rowi-name" href="#/runs/${esc(id)}">${esc(f.name)}</a>
+          <span class="rowi-sub">from ${esc(modelName(f.base_model))} · on ${esc(f.dataset_name || f.dataset)}${f.method ? " · " + esc(f.method) : ""} · ${bytes(f.size_bytes)} · ${esc(when(f.created))}${ago(f.created) ? ` (${esc(ago(f.created))})` : ""}</span>
+          <span class="rowi-sub mono path">${esc(f.path)}</span>
+        </div>
+        <div class="mrow-score">${f.accuracy != null ? `<b>${pct(f.accuracy)}</b> ${delta(f.baseline_accuracy, f.accuracy)}<span class="faint">test accuracy${f.baseline_accuracy != null ? ", base " + pct(f.baseline_accuracy) : ""}</span>` : `<span class="faint">not measured</span>`}</div>
+        <div class="mrow-actions">
+          <a class="btn small" href="#/playground?run=${esc(encodeURIComponent(id))}">Try in playground</a>
+          <span class="joined"><select aria-label="Export format" data-fmt="${esc(f.ref)}">${exportOptions()}</select><button class="btn small" type="button" data-export="${esc(f.ref)}">Export</button></span>
+          <button class="btn small" type="button" data-publish="${esc(f.ref)}" title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button>
+        </div>
+        ${exportsOf(f.ref)}
+      </li>`;
+    }).join("")}</ul></section>`
+      : `<div class="empty"><b>No fine-tuned models yet.</b><br>Fine-tune a base model on one of your datasets: the run measures it against the base model, and the result shows up here, ready to try, export or publish.
+         <div class="row"><a class="btn primary" href="#/train">Fine-tune a model</a><a class="btn" href="#/datasets">Add a dataset</a></div></div>`;
+
+    const orphans = lib.exports.filter(x => !known.has(x.model));
+    if (orphans.length) $("#mine").innerHTML += `<section class="panel"><header><h2>Other exports</h2><span class="muted small">of models no longer in the workspace</span></header>
+      <ul class="rows">${orphans.map(x => `<li class="mrow"><span class="tile base" aria-hidden="true">${initial(modelName(x.model))}</span><div class="rowi-main"><span class="rowi-name">${esc(modelName(x.model))}</span></div><div></div><ul class="mrow-exports">${exportItem(x)}</ul></li>`).join("")}</ul></section>`;
+
+    $("#bases").innerHTML = `<section class="panel"><ul class="rows">${lib.base.map(m => {
+      const repo = m.repo.replace(" (imported)", "");
+      const tag = m.demo ? pill("accent", "demo fine-tune") : m.imported ? pill("", "imported") : "";
+      const hub = m.ref.startsWith("hub:");
+      return `<li class="mrow">
+        <span class="tile base" aria-hidden="true">${initial(repo)}</span>
+        <div class="rowi-main">
+          <span class="rowi-name">${hub ? `<a class="mono-name" href="https://huggingface.co/${esc(repo)}" target="_blank" rel="noreferrer">${esc(repo)}</a>` : `<span class="mono-name">${esc(repo)}</span>`} ${tag}</span>
+          <span class="rowi-sub">${esc(m.description)}</span>
+        </div>
+        <div class="mrow-score">${m.cached ? `${pill("done", m.imported ? "ready" : "downloaded")}<span class="faint">${m.size_bytes ? bytes(m.size_bytes) + " on disk" : ""}</span>` : pill("", m.imported ? "not trainable yet" : "not downloaded")}</div>
+        <div class="mrow-actions">${m.cached
+          ? `<a class="btn small" href="#/playground?models=${esc(encodeURIComponent(m.ref))}">Try in playground</a><a class="btn small" href="#/train?base=${esc(encodeURIComponent(m.ref))}">Fine-tune from it</a>`
+          : !m.demo && !m.imported ? `<button class="btn small primary" type="button" data-dl="${esc(repo)}">Download</button>` : ""}</div>
+        ${exportsOf(m.ref)}
+      </li>`;
+    }).join("")}</ul></section>`;
+
+    $$("[data-export]").forEach(b => b.onclick = () => startExport(b.dataset.export, $(`select[data-fmt="${CSS.escape(b.dataset.export)}"]`).value));
+    $$("[data-publish]").forEach(b => b.onclick = () => startPublish(b.dataset.publish));
+    bindDownloads($("#bases"));
+  } catch (e) { if (current(token)) $("#mine").innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+
+  try {
     const cat = await api("/api/families");
     if (!current(token)) return;
     const m = cat.machine || {};
-    $("#families").innerHTML = `<p class="muted">This machine: ${m.memory_gb ? `${m.memory_gb} GB for training` : "memory unknown"} · ${esc(m.accelerator || "")}. Estimates are for LoRA in bf16, and 4-bit QLoRA where that is the only way in.</p>` +
-      cat.families.map(f => `<section class="card"><div class="row" style="justify-content:space-between;gap:10px;flex-wrap:wrap"><h2 style="margin:0">${esc(f.name)}</h2>${trainerPill(f.trainer)}</div>
-        <p class="muted" style="margin:6px 0 10px">${esc(f.how)} <span class="faint">· ${esc(f.backends)}</span></p>
-        <div class="tablewrap"><table><tr><th>Model</th><th>Maker</th><th>Size</th><th>Licence</th><th>Needs</th><th>Here</th><th></th></tr>
-        ${f.models.map(x => `<tr><td class="mono"><a href="https://huggingface.co/${esc(x.repo)}" target="_blank" rel="noreferrer">${esc(x.repo)}</a>${x.note ? `<div class="faint" style="font-family:inherit;font-size:12px">${esc(x.note)}</div>` : ""}${warnings(x.warnings)}</td>
+    $("#families").innerHTML = `<p class="hint">This machine: ${m.memory_gb ? `${m.memory_gb} GB for training` : "memory unknown"}${m.accelerator ? " · " + esc(m.accelerator) : ""}. Estimates are for LoRA in bf16, and 4-bit QLoRA where that is the only way in.</p>` +
+      cat.families.map((f, i) => {
+        const fit = f.models.filter(x => x.fit === "fits" || x.fit === "qlora").length;
+        return `<details class="family"${i === 0 ? " open" : ""}><summary><b>${esc(f.name)}</b><span class="muted small">${f.models.length} ${f.models.length === 1 ? "model" : "models"} · ${fit} fit here</span><span class="spacer"></span>${trainerPill(f.trainer)}</summary>
+        <div class="family-body"><p class="hint" style="margin:12px 0">${esc(f.how)} <span class="faint">· ${esc(f.backends)}</span></p>
+        <div class="tablewrap"><table class="wide"><tr><th>Model</th><th>Maker</th><th>Size</th><th>Licence</th><th>Needs</th><th>Here</th><th></th></tr>
+        ${f.models.map(x => `<tr><td><a class="mono" href="https://huggingface.co/${esc(x.repo)}" target="_blank" rel="noreferrer">${esc(x.repo)}</a>${x.note ? `<div class="faint small">${esc(x.note)}</div>` : ""}${warnings(x.warnings)}</td>
           <td>${esc(x.maker)}</td><td>${x.params_b ? params(x.params_b) : "–"}</td><td>${esc(x.licence)}</td>
-          <td>${gb(x.needed_gb && x.needed_gb.lora)}${x.needed_gb && x.needed_gb.qlora ? `<div class="faint" style="font-size:12px">${gb(x.needed_gb.qlora)} QLoRA</div>` : ""}</td>
+          <td>${gb(x.needed_gb && x.needed_gb.lora)}${x.needed_gb && x.needed_gb.qlora ? `<div class="faint small">${gb(x.needed_gb.qlora)} QLoRA</div>` : ""}</td>
           <td>${fitPill(x)}</td>
-          <td>${x.fit === "not-trainable" ? "" : x.downloaded ? `<span class="pill done">downloaded</span>` : `<button class="btn small" data-dl="${esc(x.repo)}">Download</button>`}</td></tr>`).join("")}
-        </table></div></section>`).join("") +
-      `<p class="muted">A model too big for this machine trains on a bigger GPU, or in the cloud studio at <a href="${esc(cat.cloud_studio)}" target="_blank" rel="noreferrer">${esc(cat.cloud_studio.replace("https://", ""))}</a> (coming).</p>`;
+          <td>${x.fit === "not-trainable" ? "" : x.downloaded ? pill("done", "downloaded") : `<button class="btn small" type="button" data-dl="${esc(x.repo)}">Download</button>`}</td></tr>`).join("")}
+        </table></div></div></details>`;
+      }).join("") +
+      `<p class="hint">A model too big for this machine trains on a bigger GPU, or in the cloud studio at <a href="${esc(cat.cloud_studio)}" target="_blank" rel="noreferrer">${esc(cat.cloud_studio.replace("https://", ""))}</a> (coming).</p>`;
     bindDownloads($("#families"));
-  } catch (e) { $("#families").innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+  } catch (e) { if (current(token)) $("#families").innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
 
   const search = async () => {
     const out = $("#regout");
@@ -2578,12 +2740,16 @@ async function viewModels() {
     try {
       const r = await api("/api/registry?q=" + encodeURIComponent($("#regq").value.trim()));
       if (!current(token)) return;
-      out.innerHTML = r.items.length ? `<div class="tablewrap"><table><tr><th>Model</th><th>Family</th><th>Here</th><th></th></tr>${r.items.map(x => `<tr><td><span class="mono">${esc(x.repo)}</span><div class="faint" style="font-size:12px">${esc(x.maker)}${x.summary ? " · " + esc(x.summary.slice(0, 120)) : ""}</div>${warnings(x.warnings)}</td><td>${esc(x.family || "unknown")}</td><td>${fitPill(x)}</td><td>${x.availability === "hosted-api" ? `<span class="pill">API only</span>` : `<button class="btn small" data-import="${esc(x.repo)}">Import</button>`}</td></tr>`).join("")}</table></div>` : `<div class="muted">Nothing found.</div>`;
+      const all = out.dataset.all === "1" || r.items.length <= 8;
+      const items = all ? r.items : r.items.slice(0, 6);
+      out.innerHTML = r.items.length ? `<div class="tablewrap boxed"><table class="wide"><tr><th>Model</th><th>Family</th><th>Here</th><th></th></tr>${items.map(x => `<tr><td><span class="mono">${esc(x.repo)}</span><div class="faint small">${esc(x.maker)}${x.summary ? " · " + esc(x.summary.slice(0, 120)) : ""}</div>${warnings(x.warnings)}</td><td>${esc(x.family || "unknown")}</td><td>${fitPill(x)}</td><td>${x.availability === "hosted-api" ? pill("", "API only") : `<button class="btn small" type="button" data-import="${esc(x.repo)}">Import</button>`}</td></tr>`).join("")}</table></div>${all ? "" : `<div class="row" style="margin-top:10px"><button class="btn small" type="button" id="regall">Show all ${r.items.length}</button></div>`}` : `<div class="muted">Nothing found.</div>`;
       bindImports(out);
-    } catch (e) { out.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+      const more = $("#regall");
+      if (more) more.onclick = () => { out.dataset.all = "1"; search(); };
+    } catch (e) { if (current(token)) out.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
   };
-  $("#regsearch").onclick = search;
-  $("#regq").onkeydown = e => { if (e.key === "Enter") search(); };
+  $("#regsearch").onclick = () => { $("#regout").dataset.all = ""; search(); };
+  $("#regq").onkeydown = e => { if (e.key === "Enter") { $("#regout").dataset.all = ""; search(); } };
   search();
 }
 

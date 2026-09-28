@@ -144,5 +144,9 @@ def test_dataset_train_job_and_results(studio, checkpoint):  # noqa: F811
     assert status == 200 and len(out["results"]) == 2
     _, state = call(base, "/api/state")
     assert state["finetuned"][0]["ref"] == f"run:{job['id']}"
+    status, library = call(base, "/api/models")
+    assert status == 200 and library["finetuned"][0]["ref"] == f"run:{job['id']}"
+    assert library["finetuned"][0]["size_bytes"] > 0 and library["exports"] == []
+    assert len(library["base"]) == len(state["models"])
     status, _ = call(base, f"/api/runs/{job['id']}", {}, method="DELETE")
     assert status == 200
