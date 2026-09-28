@@ -2321,7 +2321,7 @@ async function viewDataset(id, _, token) {
     <div class="stat"><div class="k">Test rows</div><div class="v">${m.rows.test}</div><div class="d muted">never trained on</div></div>
     <div class="stat"><div class="k">Skipped rows</div><div class="v ${m.error_count ? "down" : ""}">${m.error_count}</div><div class="d muted">parse / label errors</div></div>
   </div>
-  ${m.error_count ? `<details class="card"><summary>${m.error_count} rows were skipped — see why</summary><table>${m.errors.map(e => `<tr><td class="mono faint">${esc(e.file)}:${e.line}</td><td>${esc(e.error)}</td></tr>`).join("")}</table></details>` : ""}
+  ${m.error_count ? `<details class="card"><summary>${m.error_count} rows were skipped — see why</summary><div class="tablewrap"><table>${m.errors.map(e => `<tr><td class="mono faint">${esc(e.file)}:${e.line}</td><td>${esc(e.error)}</td></tr>`).join("")}</table></div></details>` : ""}
   <section class="card"><h2>Token budget check</h2>
     <p class="muted" style="margin-top:0">Laya reads at most 512 (English) or 1,024 (multilingual) tokens, and all option texts share a fixed budget. Anything past the window is cut silently — check before you train.</p>
     <div class="row"><select id="anmodel" style="max-width:340px">${cached.map(x => `<option value="${esc(x.ref)}" ${a && a.model === x.ref ? "selected" : ""}>${esc(x.repo || x.name)}</option>`).join("")}</select><button class="btn" id="anrun" ${cached.length ? "" : "disabled"}>Check</button>${cached.length ? "" : `<span class="muted">Download a base model first (Models).</span>`}</div>
@@ -2334,7 +2334,7 @@ async function viewDataset(id, _, token) {
   }).join("")}
   </div>
   <section class="card"><h2>Model evaluations on the test split</h2>
-  ${d.evals.length ? `<table><tr><th>Model</th><th>Accuracy</th><th>ECE</th><th>Decisions</th><th>p50 latency</th><th>When</th></tr>${d.evals.map(e => `<tr><td>${esc(modelName(e.model))}</td><td>${pct(e.accuracy)}</td><td>${num(e.ece)}</td><td>${e.n}</td><td>${num(e.latency_ms.p50, 1)} ms</td><td class="muted">${esc(e.created)}</td></tr>`).join("")}</table>` : `<div class="muted">None yet. Fine-tuning evaluates the base model first automatically.</div>`}
+  ${d.evals.length ? `<div class="tablewrap"><table><tr><th>Model</th><th>Accuracy</th><th>ECE</th><th>Decisions</th><th>p50 latency</th><th>When</th></tr>${d.evals.map(e => `<tr><td>${esc(modelName(e.model))}</td><td>${pct(e.accuracy)}</td><td>${num(e.ece)}</td><td>${e.n}</td><td>${num(e.latency_ms.p50, 1)} ms</td><td class="muted">${esc(when(e.created))}</td></tr>`).join("")}</table></div>` : `<div class="muted">None yet. Fine-tuning evaluates the base model first automatically.</div>`}
   <div class="row" style="margin-top:12px"><select id="evmodel" style="max-width:340px">${cached.map(x => `<option value="${esc(x.ref)}">${esc(x.repo || x.name)}</option>`).join("")}</select><button class="btn" id="evrun" ${cached.length ? "" : "disabled"}>Evaluate this model</button></div>
   </section>
   <section class="card"><h2>Sample training rows</h2><div class="tablewrap"><table><tr><th>State</th><th>Labels</th></tr>
