@@ -773,7 +773,7 @@ class Studio:
         if kind == "publish" and not self.account.status().get("signed_in"):
             raise ApiError(
                 HTTPStatus.UNAUTHORIZED,
-                "Sign in to System One Models first (the Sign in button, top right).",
+                "Sign in to System One Models first (the button at the foot of the sidebar).",
             )
         stamp = time.strftime("%m%d-%H%M%S")
         if kind == "train":
