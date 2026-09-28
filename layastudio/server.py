@@ -1352,7 +1352,7 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-sans
 a{color:var(--accent-text);text-decoration:none}
 a:hover{text-decoration:underline;text-underline-offset:3px}
 button{font:inherit;color:inherit}
-:is(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--border-focus);outline-offset:2px;border-radius:var(--radius-sm)}
+:is(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--border-focus);outline-offset:2px}
 ::selection{background:var(--accent);color:var(--accent-fg)}
 h1,h2,h3,h4{font-weight:600;letter-spacing:-.022em;line-height:1.2;margin:0}
 h1{font-size:clamp(1.75rem,3vw,2.25rem);margin:0 0 10px}
