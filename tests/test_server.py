@@ -1,11 +1,10 @@
 import json
 import re
-import socket
 import threading
 import time
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 
 import pytest
 from test_engine import QUESTIONS, checkpoint, make_rows  # noqa: F401 - pytest fixture
@@ -151,82 +150,3 @@ def test_dataset_train_job_and_results(studio, checkpoint):  # noqa: F811
     assert len(library["base"]) == len(state["models"])
     status, _ = call(base, f"/api/runs/{job['id']}", {}, method="DELETE")
     assert status == 200
-
-
-class FakeEngine(BaseHTTPRequestHandler):
-    """Just enough of the System One Engine's local HTTP contract to exercise the proxy."""
-
-    seen = []
-
-    def log_message(self, *args):
-        pass
-
-    def reply(self, status, body=None):
-        data = b"" if body is None else json.dumps(body).encode()
-        self.send_response(status)
-        if body is not None:
-            self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        FakeEngine.seen.append(("GET", self.path, None))
-        if self.path == "/healthz":
-            return self.reply(200, {"ok": True, "ready": 1})
-        self.reply(404, {"detail": "Not Found"})
-
-    def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        FakeEngine.seen.append(("POST", self.path, body))
-        if self.path == "/v1/models" and body["model"] == "ns/name":
-            return self.reply(202, {"model": "ns/name", "checkpoints": ["main"]})
-        if self.path == "/v1/models":
-            return self.reply(404, {"detail": f"No model {body['model']}"})
-        self.reply(409, {"detail": "starting"})
-
-    def do_DELETE(self):
-        FakeEngine.seen.append(("DELETE", self.path, None))
-        self.reply(204)
-
-
-def test_engine_proxy(studio):
-    base, running = studio
-    with socket.socket() as probe:  # a port nothing listens on
-        probe.bind(("127.0.0.1", 0))
-        free = probe.getsockname()[1]
-    running.engine = server.EngineProxy(f"http://127.0.0.1:{free}")
-    status, body = call(base, "/api/engine/healthz")
-    assert status == 503 and "systemone run engine" in body["error"]
-    assert body["engine_url"] == f"http://127.0.0.1:{free}"
-
-    running.engine = server.EngineProxy(base)  # the studio itself: forwarding would loop
-    status, body = call(base, "/api/engine/v1/models")
-    assert status == 503 and "this studio" in body["error"]
-
-    fake = ThreadingHTTPServer(("127.0.0.1", 0), FakeEngine)
-    threading.Thread(target=fake.serve_forever, daemon=True).start()
-    try:
-        running.engine = server.EngineProxy(f"http://127.0.0.1:{fake.server_address[1]}/")
-        assert call(base, "/api/engine/healthz") == (200, {"ok": True, "ready": 1})
-        status, body = call(base, "/api/engine/v1/models", {"model": "ns/name"})
-        assert (status, body) == (202, {"model": "ns/name", "checkpoints": ["main"]})
-        assert ("POST", "/v1/models", {"model": "ns/name"}) in FakeEngine.seen
-        status, body = call(base, "/api/engine/v1/models", {"model": "no/such"})
-        assert status == 404 and body["detail"] == "No model no/such"
-        question = {"q": {"type": "noul", "instructions": "Yes?"}}
-        status, body = call(
-            base,
-            "/api/engine/v1/systemone",
-            {"model": "ns/name", "state": "hi", "questions": question},
-        )
-        assert status == 409 and body["detail"] == "starting"
-        status, _ = call(base, "/api/engine/v1/models/ns/name", method="DELETE")
-        assert status == 204 and ("DELETE", "/v1/models/ns/name", None) in FakeEngine.seen
-        request = urllib.request.Request(base + "/api/engine/v1/models", b"x", method="POST")
-        request.add_header("Content-Type", "text/plain")  # JSON bodies only
-        with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(request)
-        assert error.value.code == 415
-    finally:
-        fake.shutdown()

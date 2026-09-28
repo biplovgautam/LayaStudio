@@ -28,12 +28,9 @@ import subprocess
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
-from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -47,11 +44,6 @@ PACKAGE = Path(__file__).resolve().parent
 
 MAX_BODY = 512 * 2**20
 TERMINAL = {"done": "done", "error": "failed", "cancelled": "cancelled"}
-# The System One Engine (`systemone run engine`) serves System One models on this machine.
-# The studio itself defaults to 8765, so the engine listens on 8766 unless told otherwise.
-ENGINE_URL = "http://127.0.0.1:8766"
-ENGINE_COMMAND = "systemone run engine"
-ENGINE_MAX_BODY = 4 * 2**20
 
 
 class ApiError(Exception):
@@ -266,85 +258,6 @@ class Playground:
         self.pool.submit(run).result()
 
 
-# ----------------------------------------------------------------------------- engine
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None  # a redirect comes back as it is instead of leading elsewhere
-
-
-class EngineProxy:
-    """Forwards /api/engine/... to the local System One Engine.
-
-    The page never talks to the engine directly, so the studio's own rules still hold: one
-    origin, 127.0.0.1 only. GET, POST and DELETE with JSON bodies go to
-    $LAYASTUDIO_ENGINE_URL (default http://127.0.0.1:8766) and nowhere else: no proxies from
-    the environment and no redirects. The engine's status and JSON come back unchanged.
-    """
-
-    TIMEOUT = 60
-
-    def __init__(self, url=None):
-        self.url = (url or os.environ.get("LAYASTUDIO_ENGINE_URL") or ENGINE_URL).rstrip("/")
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-
-    def is_studio(self, port):
-        """True when the engine address is this studio's own: forwarding would loop."""
-        target = urlparse(self.url)
-        loopback = target.hostname in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
-        try:
-            return loopback and (target.port or 80) == port
-        except ValueError:
-            return False
-
-    def unavailable(self, detail, status=HTTPStatus.SERVICE_UNAVAILABLE):
-        return status, {
-            "error": detail,
-            "detail": detail,
-            "engine_url": self.url,
-            "command": ENGINE_COMMAND,
-        }
-
-    def forward(self, method, parts, query="", body=None):
-        """(status, bytes) from the engine, or (status, dict) saying why there is no answer."""
-        if any(part in (".", "..") for part in parts):
-            raise ApiError(HTTPStatus.BAD_REQUEST, "Not an engine path")
-        url = f"{self.url}/{'/'.join(parts)}" + (f"?{query}" if query else "")
-        data = None if body is None else json.dumps(body).encode()
-        request = urllib.request.Request(url, data=data, method=method)
-        request.add_header("Accept", "application/json")
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
-        try:
-            with self.opener.open(request, timeout=self.TIMEOUT) as response:
-                return response.status, response.read()
-        except urllib.error.HTTPError as error:
-            return error.code, error.read()
-        except TimeoutError:
-            return self.slow()
-        except urllib.error.URLError as error:
-            if isinstance(error.reason, TimeoutError):
-                return self.slow()
-            return self.not_running()
-        except (HTTPException, OSError):
-            return self.not_running()
-        except ValueError as error:
-            return self.unavailable(f"LAYASTUDIO_ENGINE_URL is not a usable URL: {error}")
-
-    def not_running(self):
-        return self.unavailable(
-            f"The System One Engine is not running at {self.url}. "
-            f"Start it in a terminal: {ENGINE_COMMAND}"
-        )
-
-    def slow(self):
-        return self.unavailable(
-            f"The System One Engine at {self.url} did not answer within {self.TIMEOUT} s.",
-            HTTPStatus.GATEWAY_TIMEOUT,
-        )
-
-
 # ----------------------------------------------------------------------------- arena
 
 
@@ -506,7 +419,6 @@ class Studio:
         self.jobs = Jobs(workspace, self.pause_gpu)
         self.bootstrap = bootstrap or Bootstrap(workspace, download=False, fetch_examples=False)
         self.account = Account()
-        self.engine = EngineProxy()
 
     def exports(self):
         out = []
@@ -671,7 +583,6 @@ class Studio:
             "finetuned": tuned,
             "jobs": self.jobs.list(12),
             "job_count": self.jobs.count(),
-            "engine_url": self.engine.url,
             "exports": self.exports(),
             "examples": [
                 {
@@ -1099,8 +1010,6 @@ class Handler(BaseHTTPRequestHandler):
             if not parts or parts[0] != "api":
                 raise ApiError(HTTPStatus.NOT_FOUND, "Not found")
             route = parts[1:]
-            if route[:1] == ["engine"]:
-                return self._engine(method, route[1:], url.query)
             if method == "GET":
                 if route == ["state"]:
                     return self._send(HTTPStatus.OK, studio.overview())
@@ -1172,40 +1081,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send(
                 HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(error).__name__}: {error}"}
             )
-
-    def _engine(self, method, parts, query):
-        proxy = self.studio.engine
-        if proxy.is_studio(self.server.server_address[1]):
-            return self._send(
-                *proxy.unavailable(
-                    f"{proxy.url} is this studio's own address, not the engine's. Start the "
-                    "engine on another port (8766 unless told otherwise) and point "
-                    "LAYASTUDIO_ENGINE_URL at it, or start the studio with another --port."
-                )
-            )
-        body = None
-        length = int(self.headers.get("Content-Length") or 0)
-        if method != "GET" and length:
-            if length > ENGINE_MAX_BODY:
-                raise ApiError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Engine requests stop at 4 MB")
-            body = self._body()
-        status, payload = proxy.forward(method, parts, query, body)
-        if isinstance(payload, dict):
-            return self._send(status, payload)
-        if not payload:
-            self.send_response(status)
-            self.send_header("Content-Length", "0")
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            return
-        try:
-            json.loads(payload)
-        except ValueError:
-            text = payload.decode("utf-8", "replace").strip()[:500]
-            detail = f"The engine answered {status} without JSON: {text}"
-            status = status if status >= 400 else HTTPStatus.BAD_GATEWAY
-            return self._send(status, {"error": detail, "detail": detail})
-        self._send(status, payload)
 
     def do_GET(self):
         self._dispatch("GET")
@@ -1499,8 +1374,6 @@ input[type=file]{font-size:.8125rem;color:var(--text-muted);max-width:100%}
 input[type=file]::file-selector-button{font:inherit;font-weight:550;margin-right:10px;padding:5px 10px;border:1px solid var(--border-strong);
   border-radius:var(--radius);background:var(--surface);color:var(--text);cursor:pointer}
 .check{display:inline-flex;gap:8px;align-items:center;margin:0;color:var(--text);font-weight:450}
-.labelrow{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
-.labelrow select{width:auto;flex:0 1 auto;min-width:0;max-width:100%;min-height:0;padding:3px 8px;font-size:.8125rem}
 .checks{display:flex;flex-wrap:wrap;gap:8px 18px}
 .segmented{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;margin:0 0 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-subtle);max-width:100%}
 .segmented button{border:0;background:none;padding:6px 12px;border-radius:var(--radius-sm);font-size:.8125rem;font-weight:500;color:var(--text-secondary);cursor:pointer}
@@ -1614,25 +1487,6 @@ footer.site .legal a{color:var(--text-muted)}
 .arena .num{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;font-variant-numeric:tabular-nums}
 .arena .num b{display:block;font-size:1.125rem;font-weight:600}
 .arena .num span{font-family:var(--font-mono);font-size:.6875rem;letter-spacing:.04em;color:var(--text-faint)}
-
-/* ---- playground: System One models through the engine */
-.engine-bar{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;padding-bottom:12px;border-bottom:1px solid var(--border);font-size:.8125rem;color:var(--text-secondary)}
-.enrows{margin-top:14px;border:1px solid var(--border);border-radius:var(--radius)}
-.enrow{display:grid;gap:6px;padding:10px 12px}
-.enrow+.enrow{border-top:1px solid var(--border)}
-.enrow.on{background:var(--bg-subtle)}
-.enrow-head{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
-.enpick{display:inline-flex;align-items:center;gap:8px;margin:0;min-width:0;cursor:pointer;overflow-wrap:anywhere}
-.cps{list-style:none;margin:0;padding:0 0 0 22px;display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.75rem}
-.cps li{display:inline-flex;align-items:center;flex-wrap:wrap;gap:6px}
-.cppick{display:flex;align-items:center;gap:8px;margin:2px 0 0 22px}
-.cppick select{width:auto;min-height:30px;padding:3px 8px;font-size:.8125rem}
-.copy-command{position:relative;max-width:560px;margin:14px 0;border:1px solid #262833;border-radius:var(--radius);background:#111218}
-.copy-command pre{margin:0;padding:11px 46px 11px 13px;border:0;background:none;color:#d9d9e6;font-size:.8125rem;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}
-.copy-command .prompt{color:#aeadf0;user-select:none}
-.copy-command button{position:absolute;top:7px;right:7px;display:grid;place-items:center;width:28px;height:28px;border:1px solid #2e3040;border-radius:6px;
-  background:#1a1b23;color:#aeadf0;cursor:pointer}
-.copy-command button:hover{border-color:#aeadf0}
 
 /* ---- models: compact rows, like the website's .model-row */
 .mrow{display:grid;grid-template-columns:34px minmax(0,1fr) auto;gap:4px 14px;align-items:center;padding:14px 18px}
@@ -1878,30 +1732,6 @@ function acceleratorLine(s) {
 function machineTitle(s) {
   return [`${s.cores} cores`, s.os, runtimeLine(s), s.usable_gpu_gb ? `${s.usable_gpu_gb} GB usable for training` : ""].filter(Boolean).join(" · ");
 }
-
-// A command to paste into a terminal, with a copy button (the website's .copy-command).
-function copyCommand(text) {
-  return `<div class="copy-command"><pre><span class="prompt" aria-hidden="true">$ </span>${esc(text)}</pre><button type="button" data-copy="${esc(text)}" aria-label="Copy the command" title="Copy">${icon("copy", 14)}</button></div>`;
-}
-async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); return true; }
-  catch (e) {
-    const area = document.createElement("textarea");
-    area.value = text; area.setAttribute("readonly", ""); area.style.position = "fixed"; area.style.opacity = "0";
-    document.body.appendChild(area); area.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
-    area.remove();
-    return ok;
-  }
-}
-document.addEventListener("click", async e => {
-  const b = e.target.closest("[data-copy]");
-  if (!b) return;
-  const ok = await copyText(b.dataset.copy);
-  if (ok) { b.innerHTML = icon("check", 14); setTimeout(() => { b.innerHTML = icon("copy", 14); }, 1600); }
-  else toast("Copy did not work here: select the command and copy it.");
-});
 
 function renderSetup(setup) {
   const host = $("#setup");
@@ -2699,35 +2529,7 @@ async function viewJob(id, _, token) {
 }
 
 // ------------------------------------------------------------------ playground
-// System One models run in the System One Engine (`systemone run engine`); the studio's
-// /api/engine/... forwards to it, and answers 503 when it is not running.
-const ENGINE_COMMAND = "systemone run engine";
-const ENGINE_EXAMPLES = ["convai-innovations/laya", "supersonic-labs/julia-1"];
-const REGISTRY_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
-async function engineApi(path, opts = {}) {
-  const init = {method: opts.method || "GET", headers: {}};
-  if (opts.body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(opts.body); }
-  let r;
-  try { r = await fetch("/api/engine" + path, init); }
-  catch (e) { const err = new Error("The studio did not answer."); err.status = 0; err.detail = err.message; throw err; }
-  const data = r.status === 204 ? {} : await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const detail = typeof data.detail === "string" ? data.detail : data.detail ? JSON.stringify(data.detail) : (data.error || r.statusText);
-    const err = new Error(detail); err.status = r.status; err.detail = detail; err.data = data; throw err;
-  }
-  return data;
-}
-const engineDown = e => [0, 502, 503, 504].includes(e.status);
-
-function resultCard(title, res, questions, sub = "") {
-  const tokens = res.usage && res.usage.input_tokens != null ? ` · ${res.usage.input_tokens} tokens in · 0 out` : "";
-  return `<section class="card"><div class="row" style="justify-content:space-between;align-items:flex-start">
-    <div style="min-width:0"><h2 style="margin:0;overflow-wrap:anywhere">${esc(title)}</h2>${sub ? `<div class="muted small">${sub}</div>` : ""}</div>
-    <span class="chip">${res.latency_ms != null ? num(res.latency_ms, 1) + " ms" : "–"}${esc(tokens)}</span></div>
-    ${Object.entries(res.answers || {}).map(([q, a]) => answerCard(q, a, questions[q])).join("")}</section>`;
-}
-
-async function viewPlayground(_, params, token) {  // params: source, model, run, models, state, go
+async function viewPlayground(_, params, token) {  // params: run, state, go
   const models = OV.models.filter(m => m.cached).map(m => ({ref: m.ref, name: m.repo})).concat(OV.finetuned.map(f => ({ref: f.ref, name: f.name + " (fine-tuned)"})));
   // "#/playground?run=<id>" compares a run against the model it started from.
   let preset = null;
@@ -2742,157 +2544,11 @@ async function viewPlayground(_, params, token) {  // params: source, model, run
   }
   const wanted = (params.get("models") || "").split(",").filter(Boolean);
   const checked = m => preset ? preset.models.includes(m.ref) : wanted.includes(m.ref);
-  let source = params.get("source") === "engine" ? "engine" : "local";
-  main.innerHTML = `<h1>Playground</h1>
-  <p class="lead">Ask models the same questions side by side and see every probability. This studio's checkpoints answer here; System One models from the registry answer through the System One Engine on this machine. Models stay loaded between requests, so later answers show real latency.</p>
-  <div class="segmented" role="tablist" aria-label="Which models answer">
-    <button type="button" role="tab" id="tab-local" data-source="local" aria-controls="src-local">This studio's checkpoints</button>
-    <button type="button" role="tab" id="tab-engine" data-source="engine" aria-controls="src-engine">System One models</button>
-  </div>
-  <section class="card" id="src-local" role="tabpanel" aria-labelledby="tab-local">
-    <h2>Models <span class="faint">up to 4</span></h2>
-    <div class="checks" id="pgm">${models.map((m, i) => `<label class="check"><input type="checkbox" value="${esc(m.ref)}" ${preset || wanted.length ? (checked(m) ? "checked" : "") : (i === 0 ? "checked" : "")}><span>${esc(m.name)}</span></label>`).join("") || `<span class="muted">No models available. Download one in <a href="#/models">Models</a>.</span>`}</div>
-  </section>
-  <section class="card" id="src-engine" role="tabpanel" aria-labelledby="tab-engine">
-    <div id="enwait" class="muted">Looking for the System One Engine…</div>
-    <div id="enoff" hidden></div>
-    <div id="enon" hidden>
-      <div class="engine-bar" id="enbar"></div>
-      <label for="enmodel">A System One model from the registry</label>
-      <div class="row"><input type="text" id="enmodel" placeholder="namespace/name, e.g. convai-innovations/laya" spellcheck="false" autocomplete="off" autocapitalize="off" style="flex:1;min-width:0"><button class="btn primary" id="enload" type="button">Load</button></div>
-      <p class="hint" style="margin:8px 0 0">For example ${ENGINE_EXAMPLES.map(n => `<a href="#" data-example="${esc(n)}">${esc(n)}</a>`).join(" or ")}. The engine downloads it from systemonemodels.tech and keeps it loaded.</p>
-      <div id="enmsg"></div>
-      <div id="enlist"></div>
-    </div>
-  </section>
-  <section class="card">
-    <div class="grid two"><div><label class="labelrow">Questions <select id="pgqs" aria-label="Questions from"><option value="">custom</option>${OV.datasets.map(d => `<option value="${esc(d.id)}">from ${esc(d.name)}</option>`).join("")}${OV.finetuned.map(f => `<option value="run:${esc(f.ref.slice(4))}">from run ${esc(f.name)}</option>`).join("")}</select></label><textarea id="pgq" spellcheck="false" style="min-height:240px">${esc(preset ? JSON.stringify(preset.questions, null, 2) : TEMPLATE)}</textarea></div>
-    <div><label for="pgs">State</label><textarea id="pgs" style="min-height:240px;font-family:var(--font-sans);font-size:.875rem" placeholder="Paste a message, ticket or JSON object">${esc(params.get("state") || (preset ? preset.state : "I was charged twice for my subscription and nobody answers my emails. Please fix this today."))}</textarea></div></div>
-    <div class="row" style="margin-top:12px"><button class="btn primary" id="pggo">Predict</button><span class="muted" id="pgmsg"></span></div>
-  </section>
-  <div id="pgout" class="grid two"></div>`;
-
-  // ---- the System One Engine: reachable or not, the models it holds, their checkpoints
-  const E = {up: null, url: OV.engine_url || "", error: "", ready: 0, models: [], devices: [], selected: params.get("model") || "", checkpoint: "", loading: "", poll: null, drawn: "", off: ""};
-  $("#enmodel").value = E.selected;
-  const say = (html, kind = "") => { $("#enmsg").innerHTML = html ? `<div class="notice ${kind}">${html}</div>` : ""; };
-  const markDown = e => {
-    E.up = false;
-    // The usual "not running" needs no repeating; anything else (a wrong address) is shown.
-    E.error = /is not running at/.test(e.detail || "") ? "" : (e.detail || e.message);
-    if (e.data && e.data.engine_url) E.url = e.data.engine_url;
-  };
-  const drawEngine = () => {
-    $("#enwait").hidden = E.up !== null;
-    $("#enoff").hidden = E.up !== false;
-    $("#enon").hidden = E.up !== true;
-    if (E.up === false) {
-      const html = `<h2>Start the System One Engine</h2>
-        <p class="muted" style="margin:0">System One models run in the System One Engine, a separate server on this machine that downloads models from systemonemodels.tech and keeps them loaded. It is not answering yet. Start it in a terminal:</p>
-        ${copyCommand(ENGINE_COMMAND)}
-        <p class="hint" style="margin:0">The studio looks for it at <span class="mono">${esc(E.url || "http://127.0.0.1:8766")}</span> (set <code>LAYASTUDIO_ENGINE_URL</code> before starting the studio to change that) and connects as soon as it answers.${E.error ? `<br><span class="faint">${esc(E.error)}</span>` : ""}</p>`;
-      if (E.off !== html) { $("#enoff").innerHTML = html; E.off = html; }
-      return;
-    }
-    if (E.up !== true) return;
-    const sel = E.models.find(m => m.model === E.selected) || (!E.selected && E.models.length === 1 ? E.models[0] : null);
-    const loading = E.models.find(m => m.model === E.loading);
-    if (loading && (loading.checkpoints || []).every(c => c.state === "ready" || c.state === "failed")) {
-      E.loading = "";  // settled: the list below says ready or why not
-      say("");
-    }
-    if (sel) {
-      E.selected = sel.model;
-      const cps = sel.checkpoints || [];
-      if (!cps.some(c => c.name === E.checkpoint)) E.checkpoint = (cps.find(c => c.state === "ready") || cps[0] || {}).name || "";
-    }
-    $("#enbar").innerHTML = `<span class="sdot ok"></span><b>System One Engine</b><span class="mono faint">${esc((E.url || "").replace(/^https?:\/\//, ""))}</span><span class="faint">·</span><span>${E.ready} ready</span>${E.devices.map(d => pill("", `${d.name} · ${d.key}`)).join("")}`;
-    const sig = JSON.stringify([E.models, E.selected, E.checkpoint]);
-    if (sig === E.drawn) return;
-    E.drawn = sig;
-    $("#enlist").innerHTML = E.models.length ? `<ul class="rows enrows">${E.models.map(m => {
-      const on = m.model === E.selected, cps = m.checkpoints || [];
-      return `<li class="enrow${on ? " on" : ""}">
-        <div class="enrow-head">
-          <label class="enpick"><input type="radio" name="enpick" value="${esc(m.model)}" ${on ? "checked" : ""}><span class="mono-name">${esc(m.model)}</span></label>
-          <span class="faint small">${[m.version && "version " + m.version, m.runtime && m.runtime + " runtime"].filter(Boolean).map(esc).join(" · ")}</span>
-          <span class="spacer"></span>
-          <button class="btn small" type="button" data-unload="${esc(m.model)}">Unload</button>
-        </div>
-        <ul class="cps">${cps.map(c => `<li><span class="mono">${esc(c.name)}</span>${pill(c.state)}${c.device ? `<span class="faint">on ${esc(c.device)}</span>` : ""}${c.detail ? `<span class="down">${esc(c.detail)}</span>` : ""}</li>`).join("") || `<li class="faint">no checkpoints reported</li>`}</ul>
-        ${on && cps.length > 1 ? `<label class="cppick">Checkpoint <select id="encp">${cps.map(c => `<option value="${esc(c.name)}" ${c.name === E.checkpoint ? "selected" : ""}>${esc(c.name)} · ${esc(c.state)}</option>`).join("")}</select></label>` : ""}
-      </li>`;
-    }).join("")}</ul>` : `<p class="hint" style="margin:14px 0 0">The engine holds no models yet. Load one by its registry name.</p>`;
-    $$("input[name=enpick]").forEach(r => r.onchange = () => { E.selected = r.value; E.checkpoint = ""; $("#enmodel").value = r.value; drawEngine(); });
-    $$("[data-unload]").forEach(b => b.onclick = () => unload(b.dataset.unload));
-    const pick = $("#encp");
-    if (pick) pick.onchange = () => { E.checkpoint = pick.value; drawEngine(); };
-  };
-  const engineCheck = async () => {
-    try {
-      const health = await engineApi("/healthz");
-      const list = await engineApi("/v1/models");
-      if (!current(token)) return;
-      E.up = true; E.error = ""; E.ready = health.ready ?? 0; E.models = list.models || []; E.devices = list.devices || [];
-    } catch (e) {
-      if (!current(token)) return;
-      if (engineDown(e)) markDown(e);
-      else { E.up = false; E.error = `Something answers at ${E.url}, but not as the System One Engine does (${e.status}: ${e.message}).`; }
-    }
-    drawEngine();
-  };
-  const load = async name => {
-    name = (name || "").trim();
-    if (!REGISTRY_NAME.test(name)) { say("Enter a model as namespace/name, for example convai-innovations/laya.", "warn"); return; }
-    $("#enload").disabled = true;
-    say(`Asking the engine for <span class="mono">${esc(name)}</span>…`);
-    try {
-      const r = await engineApi("/v1/models", {method: "POST", body: {model: name}});
-      if (!current(token)) return;
-      E.selected = E.loading = r.model || name; E.checkpoint = "";
-      say(`The engine is getting <span class="mono">${esc(E.selected)}</span> from systemonemodels.tech and loading it. Each checkpoint shows its state below; ask once one is ready.`, "info");
-    } catch (e) {
-      if (!current(token)) return;
-      if (engineDown(e)) { markDown(e); say(""); }
-      else if (e.status === 404) say(`systemonemodels.tech has no model called <span class="mono">${esc(name)}</span>.${e.detail ? ` <span class="faint">${esc(e.detail)}</span>` : ""}`, "bad");
-      else if (e.status === 422) say(`The engine cannot run <span class="mono">${esc(name)}</span>: ${esc(e.detail)}`, "bad");
-      else say(esc(e.message), "bad");
-    }
-    $("#enload").disabled = false;
-    await engineCheck();
-  };
-  const unload = async name => {
-    try {
-      await engineApi("/v1/models/" + name.split("/").map(encodeURIComponent).join("/"), {method: "DELETE"});
-      if (E.selected === name) { E.selected = ""; E.checkpoint = ""; }
-      say(`Unloaded <span class="mono">${esc(name)}</span>.`);
-    } catch (e) { if (engineDown(e)) markDown(e); else say(esc(e.message), "bad"); }
-    await engineCheck();
-  };
-  $("#enload").onclick = () => load($("#enmodel").value);
-  $("#enmodel").onkeydown = e => { if (e.key === "Enter") load($("#enmodel").value); };
-  $$("[data-example]").forEach(a => a.onclick = e => { e.preventDefault(); $("#enmodel").value = a.dataset.example; load(a.dataset.example); });
-
-  const setSource = (s, byUser) => {
-    source = s;
-    $$("[data-source]").forEach(b => { const on = b.dataset.source === s; b.setAttribute("aria-selected", String(on)); b.tabIndex = on ? 0 : -1; });
-    $("#src-local").hidden = s !== "local"; $("#src-engine").hidden = s !== "engine";
-    if (byUser) {
-      $("#pgout").innerHTML = ""; $("#pgmsg").textContent = "";
-      history.replaceState(null, "", "#/playground" + (s === "engine" ? "?source=engine" : ""));
-    }
-    if (s === "engine") { engineCheck(); if (!E.poll) E.poll = every(engineCheck, 2000); }
-    else if (E.poll) { clearInterval(E.poll); E.poll = null; }
-  };
-  $$("[data-source]").forEach(b => b.onclick = () => setSource(b.dataset.source, true));
-  $(".segmented").onkeydown = e => {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-    const next = source === "local" ? "engine" : "local";
-    setSource(next, true); $(`[data-source=${next}]`).focus();
-  };
-  setSource(source, false);
-
-  // ---- questions and the answers
+  main.innerHTML = `<h1>Playground</h1><p class="lead">Ask base and fine-tuned models the same questions side by side. Models stay loaded between requests, so later answers show real latency.</p>
+  <section class="card"><label>Models (up to 4)</label><div class="row" id="pgm">${models.map((m, i) => `<label style="display:flex;gap:6px;align-items:center;margin:0;color:var(--ink);font-weight:450"><input type="checkbox" value="${esc(m.ref)}" ${preset || wanted.length ? (checked(m) ? "checked" : "") : (i === 0 ? "checked" : "")}>${esc(m.name)}</label>`).join("") || `<span class="muted">No models available. Download one in Models.</span>`}</div>
+  <div class="grid two"><div><label>Questions <select id="pgqs" style="width:auto;display:inline-block;margin-left:8px;padding:2px 6px"><option value="">custom</option>${OV.datasets.map(d => `<option value="${esc(d.id)}">from ${esc(d.name)}</option>`).join("")}${OV.finetuned.map(f => `<option value="run:${esc(f.ref.slice(4))}">from run ${esc(f.name)}</option>`).join("")}</select></label><textarea id="pgq" spellcheck="false" style="min-height:240px">${esc(preset ? JSON.stringify(preset.questions, null, 2) : TEMPLATE)}</textarea></div>
+  <div><label>State</label><textarea id="pgs" style="min-height:240px;font-family:inherit;font-size:14px" placeholder="Paste a message, ticket or JSON object">${esc(params.get("state") || (preset ? preset.state : "I was charged twice for my subscription and nobody answers my emails. Please fix this today."))}</textarea></div></div>
+  <div class="row" style="margin-top:12px"><button class="btn primary" id="pggo">Predict</button><span class="muted" id="pgmsg"></span></div></section><div id="pgout" class="grid two"></div>`;
   $("#pgqs").onchange = async () => {
     const v = $("#pgqs").value; if (!v) return;
     try {
@@ -2900,40 +2556,17 @@ async function viewPlayground(_, params, token) {  // params: source, model, run
       $("#pgq").value = JSON.stringify((await api("/api/datasets/" + d)).questions, null, 2);
     } catch (e) { toast(e.message); }
   };
-  const predictEngine = async (questions, state) => {
-    if (E.up !== true) { $("#pgmsg").textContent = "Start the System One Engine first."; return; }
-    const model = E.selected;
-    if (!model) { $("#pgmsg").textContent = "Load a System One model first."; return; }
-    if (!state.trim()) { $("#pgmsg").textContent = "Enter a state."; return; }
-    const body = {model, state, questions};
-    if (E.checkpoint) body.checkpoint = E.checkpoint;
-    $("#pggo").disabled = true; $("#pgmsg").textContent = "Asking the engine…";
-    try {
-      const r = await engineApi("/v1/systemone", {method: "POST", body});
-      if (!current(token)) return;
-      $("#pgmsg").textContent = "";
-      $("#pgout").innerHTML = resultCard(r.model || model, r, questions, `checkpoint ${esc(r.checkpoint || E.checkpoint || "default")} · System One Engine`);
-    } catch (e) {
-      if (!current(token)) return;
-      if (e.status === 409) $("#pgmsg").textContent = e.detail === "starting" ? `${model} is still starting: ask again when its checkpoint shows ready.`
-        : e.detail === "not loaded" ? `${model} is not loaded in the engine: press Load.` : e.detail;
-      else if (engineDown(e)) { markDown(e); drawEngine(); $("#pgmsg").textContent = "The System One Engine is not answering."; }
-      else $("#pgmsg").textContent = e.detail || e.message;
-    }
-    $("#pggo").disabled = false;
-  };
   $("#pggo").onclick = async () => {
+    const refs = $$("#pgm input:checked").map(i => i.value);
     let questions, state = $("#pgs").value;
     try { questions = JSON.parse($("#pgq").value); } catch (e) { $("#pgmsg").textContent = "Questions are not valid JSON"; return; }
-    if (source === "engine") return predictEngine(questions, state);
-    const refs = $$("#pgm input:checked").map(i => i.value);
     try { const t = state.trim(); if (t.startsWith("{") || t.startsWith("[")) state = JSON.parse(t); } catch (_) {}
     $("#pggo").disabled = true; $("#pgmsg").textContent = "Running (first use loads the model)…";
     try {
       const r = await api("/api/predict", {method: "POST", body: {models: refs, questions, state}});
-      if (!current(token)) return;
       $("#pgmsg").textContent = "";
-      $("#pgout").innerHTML = Object.entries(r.results).map(([ref, res]) => resultCard(modelName(ref), res, questions)).join("");
+      $("#pgout").innerHTML = Object.entries(r.results).map(([ref, res]) => `<section class="card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(modelName(ref))}</h2><span class="chip">${res.latency_ms} ms · ${res.usage.input_tokens} tokens in · 0 out</span></div>
+        ${Object.entries(res.answers).map(([q, a]) => answerCard(q, a, questions[q])).join("")}</section>`).join("");
     } catch (e) { $("#pgmsg").textContent = e.message; }
     $("#pggo").disabled = false;
   };
@@ -2942,12 +2575,9 @@ async function viewPlayground(_, params, token) {  // params: source, model, run
 function answerCard(q, a, def) {
   let head = "", probs = a.probabilities || {};
   if (a.type === "choice") head = `<b>${esc(a.choice)}</b>`;
-  else if (a.type === "score") {
-    head = `<b>${num(a.score, 2)}</b> <span class="muted">expected level</span>`;
-    probs = Object.fromEntries(Object.entries(probs).map(([k, v]) => [a.legend && a.legend[k] != null ? `${k}: ${a.legend[k]}` : k, v]));
-  } else if (a.type === "noul") { head = `<b>${a.noul >= 0.5 ? "true" : "false"}</b> <span class="muted">P(true) = ${num(a.noul)}</span>`; probs = {"true": a.noul, "false": 1 - a.noul}; }
-  else return `<h3>${esc(q)} · ${esc(a.type || "answer")}</h3><pre>${esc(JSON.stringify(a, null, 2))}</pre>`;
-  return `<h3>${esc(q)} · ${esc(a.type)}</h3><div class="row" style="justify-content:space-between">${head}${a.confidence != null ? `<span class="muted small">confidence ${num(a.confidence, 2)}</span>` : ""}</div>
+  else if (a.type === "score") { head = `<b>${num(a.score, 2)}</b> <span class="muted">expected level</span>`; probs = Object.fromEntries(Object.entries(a.probabilities).map(([k, v]) => [`${k}: ${a.legend[k]}`, v])); }
+  else { head = `<b>${a.noul >= 0.5 ? "true" : "false"}</b> <span class="muted">P(true) = ${num(a.noul)}</span>`; probs = {"true": a.noul, "false": 1 - a.noul}; }
+  return `<h3>${esc(q)} · ${esc(a.type)}</h3><div class="row" style="justify-content:space-between">${head}<span class="muted" style="font-size:12px">confidence ${num(a.confidence, 2)}</span></div>
   ${Object.entries(probs).map(([k, v]) => `<div class="hbar"><span class="t" title="${esc(k)}">${esc(k)}</span><div class="bar"><i style="width:${100 * v}%"></i></div><span class="n">${pct(v, 0)}</span></div>`).join("")}`;
 }
 

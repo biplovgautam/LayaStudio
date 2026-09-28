@@ -127,24 +127,6 @@ copy: **196 moves, 25.7 apples, 99.4% legal moves, 40.7 decisions per second**.
 LAYASTUDIO_DEMO_MODELS="" uv run layastudio     # skip it, if you would rather not
 ```
 
-### Any System One model, through the System One Engine
-
-The Playground's **System One models** tab runs any model from
-[System One Models](https://systemonemodels.tech) on this machine, next to your own
-fine-tunes: Laya, Julia 1, Decider and every published Laya Studio fine-tune. It talks to
-the [System One Engine](https://github.com/systemonemodels/systemone-engine), which loads
-each model on the fastest device you have (an NVIDIA, AMD, Intel or Apple GPU, or the CPU)
-and keeps it loaded. Start it in another terminal:
-
-```bash
-systemone run engine
-```
-
-Then type a model's name (`convai-innovations/laya`, `supersonic-labs/julia-1`) and press
-Load; the page shows each checkpoint downloading and loading, then asks it your questions.
-The studio reaches the engine on `http://127.0.0.1:8766`; set `LAYASTUDIO_ENGINE_URL` to
-use another address.
-
 ### Publishing your own run
 
 Your fine-tuned checkpoints are yours. To put one on the Hub with a model card built from
