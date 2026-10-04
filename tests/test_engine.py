@@ -271,3 +271,35 @@ def test_lora_variant_values_are_checked():
         with pytest.raises(ValueError):
             engine.check_lora_variants(bad)
     assert engine.lora_variants({"method": "head", "dora": True}) == []
+
+
+def test_question_rules_match_laya_mlx():
+    """engine.internal_question is laya_mlx's Agent._to_internal without MLX: same answers, same errors."""
+    from laya_mlx.agent import Agent
+
+    cases = [
+        {"type": "choice", "instructions": "Pick", "criteria": ["a", "b"]},
+        {"type": "choice", "instructions": "Pick", "criteria": {"a": "first", "b": None}},
+        {"type": "choice", "instructions": {"x": 1}, "criteria": ["a"]},
+        {"type": "score", "instructions": "Rate", "criteria": ["low", "high"]},
+        {"type": "noul", "instructions": "Is it?"},
+        {"type": "noul", "instructions": "Is it?", "criteria": {"false": "no", "true": "yes"}},
+        "not a dict",
+        {"type": "rank", "instructions": "?"},
+        {"type": "choice", "criteria": ["a"]},
+        {"type": "choice", "instructions": "Pick", "criteria": ["a", "a"]},
+        {"type": "choice", "instructions": "Pick", "criteria": [1, 2]},
+        {"type": "choice", "instructions": "Pick", "criteria": []},
+        {"type": "score", "instructions": "Rate", "criteria": {}},
+        {"type": "noul", "instructions": "Is it?", "criteria": ["no", "yes"]},
+    ]
+    for case in cases:
+        try:
+            expected = ("ok", Agent._to_internal(case))
+        except ValueError as error:
+            expected = ("error", str(error))
+        try:
+            got = ("ok", engine.internal_question(case))
+        except ValueError as error:
+            got = ("error", str(error))
+        assert got == expected, case

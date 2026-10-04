@@ -10,6 +10,8 @@ This product includes software developed as an independent application on top of
   not redistributed in this repository.
 
 * laya-mlx (https://pypi.org/project/laya-mlx/), the native MLX inference runtime for
-  Laya, licensed under the Apache License 2.0 and used as a dependency.
+  Laya, licensed under the Apache License 2.0 and used as a dependency. Its question
+  validation (Agent._to_internal) is adapted in layastudio/engine.py (internal_question)
+  so that datasets can be made on machines without MLX.
 
 System One Studio is not affiliated with or endorsed by Convai Innovations.
