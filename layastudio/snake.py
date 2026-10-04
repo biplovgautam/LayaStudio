@@ -22,9 +22,11 @@ import json
 import random
 import time
 
-from laya_mlx.snake.game import DIRECTIONS, SnakeGame
-
 from .engine import WORKSPACE, create_dataset, resolve_model_ref
+from .laya_mlx_free import laya_mlx_module
+
+_game = laya_mlx_module("snake.game")
+DIRECTIONS, SnakeGame = _game.DIRECTIONS, _game.SnakeGame
 
 WIDTH, HEIGHT, INITIAL_LENGTH = 12, 8, 4
 QUESTIONS = {

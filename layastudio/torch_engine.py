@@ -409,7 +409,10 @@ def schedule_factor(warm, updates):
 def fit(spec, hp, emit, workspace=WORKSPACE):
     """Train, pick the best epoch, calibrate and save. Returns a training summary."""
     import torch
-    from laya_mlx.tokenizer import Tokenizer
+
+    from .laya_mlx_free import laya_mlx_module
+
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     device = runtime.torch_device()
     run_dir = workspace / "runs" / check_id(spec["run_id"])

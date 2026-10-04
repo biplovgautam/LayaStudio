@@ -282,9 +282,10 @@ class Arena:
         self.error = None
 
     def _new_game(self, seed):
-        from laya_mlx.snake.game import SnakeGame
-
+        from .laya_mlx_free import laya_mlx_module
         from .snake import HEIGHT, INITIAL_LENGTH, WIDTH
+
+        SnakeGame = laya_mlx_module("snake.game").SnakeGame
 
         return SnakeGame(WIDTH, HEIGHT, seed=seed, initial_length=INITIAL_LENGTH)
 
@@ -332,9 +333,10 @@ class Arena:
             time.sleep(max(0, interval - (time.perf_counter() - started)))
 
     def _step(self):
-        from laya_mlx.snake.game import DIRECTIONS
-
+        from .laya_mlx_free import laya_mlx_module
         from .snake import QUESTIONS, render
+
+        DIRECTIONS = laya_mlx_module("snake.game").DIRECTIONS
 
         for side in self.sides:
             game = side["game"]
@@ -2669,7 +2671,7 @@ function startPublish(ref) {
       if (!box.checked) note.innerHTML = `<p class="hint">The checkpoint goes up alone. The registry will not check it for NoulXP compatibility, and its card says so.</p>`;
       else if (p) note.innerHTML = `<p class="hint">The run's package goes up as the version's <code>noulxp/</code> folder: ${p.cases_passed}/${p.cases} cases reproduced on the CPU, max |Δp| ${dpText(p.max_abs_dp)}. The registry checks it again before it shows the model as NoulXP compatible.${p.test_rows ? ` Its conformance file holds ${p.test_rows} rows of your test split, which are published with it.` : ""}</p>`;
       else if (info && info.tooling) note.innerHTML = `<div class="notice warn">This run has no NoulXP package, and this machine cannot build one: ${esc(info.tooling)}</div>`;
-      else note.innerHTML = `<p class="hint">This run has no NoulXP package yet, so one is built and checked on the CPU first, which takes a few minutes. Its conformance file holds up to ${info ? info.test_rows : 100} rows of your test split, which are published with it. If the package does not pass, nothing is uploaded.</p>`;
+      else note.innerHTML = `<p class="hint">This run has no NoulXP package yet, so one is built and checked on the CPU first, which takes a few minutes. ${info && info.test_rows ? `Its conformance file holds up to ${info.test_rows} rows of your test split, which are published with it.` : `Its conformance file holds NoulXP's own requests only: none of your dataset goes up with it.`} If the package does not pass, nothing is uploaded.</p>`;
     };
     box.checked = true; box.onchange = explain; explain();
     modal.hidden = false; repo.focus();

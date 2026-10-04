@@ -30,14 +30,16 @@ import time
 import traceback
 from pathlib import Path
 
-from laya_mlx.common import (
-    QTYPES,
-    build_prefix,
-    build_sequence,
-    render_options,
-    serialize_state,
-    temp_bucket,
-)
+from .laya_mlx_free import laya_mlx_module
+
+# laya_mlx's plain-Python helpers: imported normally on Apple silicon, from their files elsewhere.
+_common = laya_mlx_module("common")
+QTYPES = _common.QTYPES
+build_prefix = _common.build_prefix
+build_sequence = _common.build_sequence
+render_options = _common.render_options
+serialize_state = _common.serialize_state
+temp_bucket = _common.temp_bucket
 
 PACKAGE = Path(__file__).resolve().parent
 
@@ -547,7 +549,7 @@ def percentile(values, q):
 
 def analyze_dataset(dataset_id, model_dir, workspace=WORKSPACE):
     """Token budget report: truncated states, clipped option labels, thin classes."""
-    from laya_mlx.tokenizer import Tokenizer
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     questions, rows, meta = load_dataset(dataset_id, workspace)
     tok = Tokenizer(Path(model_dir) / "tokenizer")
@@ -1119,7 +1121,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
-    from laya_mlx.tokenizer import Tokenizer
+
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
     from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
     run_dir = workspace / "runs" / check_id(spec["run_id"])

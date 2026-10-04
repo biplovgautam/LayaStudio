@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from .engine import WORKSPACE, now, read_json, resolve_model_ref, write_json
+from .laya_mlx_free import laya_mlx_module
 
 TARGETS = ("onnx", "coreml", "noulxp")
 # What each target can be squeezed to. "float" is the plain export; the rest trade a little
@@ -96,8 +97,9 @@ def sample_batch(model_dir, torch, questions=None, min_tokens=0, min_options=0):
     min_tokens and min_options widen the batch beyond what the sample prompts need. A
     fixed-shape export has to be at least as wide as the rows it will be asked about, and
     the sample prompts here are short next to a real one (a rendered Snake board, say)."""
-    from laya_mlx.common import QTYPES, build_sequence
-    from laya_mlx.tokenizer import Tokenizer
+    common = laya_mlx_module("common")
+    QTYPES, build_sequence = common.QTYPES, common.build_sequence
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     cfg = read_json(model_dir / "rl_agent_config.json")
     questions = (
@@ -270,7 +272,8 @@ def quantize_coreml(model, precision, emit):
 def onnx_batch(items, model_dir):
     """Collate encoded items into the five tensors the exported graph expects."""
     import torch
-    from laya_mlx.tokenizer import Tokenizer
+
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     tok = Tokenizer(model_dir / "tokenizer")
     length = max(len(i["ids"]) for i in items)
@@ -308,7 +311,8 @@ def mlx_logits(model_dir, items):
     """The same batch through this machine's MLX runtime, for comparison."""
     import mlx.core as mx
     import numpy as np
-    from laya_mlx.tokenizer import Tokenizer
+
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     from .engine import HYPERPARAMETERS as HP
     from .engine import collate, decision_logits, load_training_model
@@ -327,7 +331,7 @@ def mlx_logits(model_dir, items):
 
 def test_items(model_dir, workspace, model_ref, limit=200):
     """Encoded test rows for the dataset this model was fine-tuned on, if there is one."""
-    from laya_mlx.tokenizer import Tokenizer
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     from .engine import check_id, encode_items, load_dataset
 
@@ -358,7 +362,8 @@ def mlx_reference(model_dir, items, batch_size=16):
     """The same items through this machine's MLX runtime, one row of logits each."""
     import mlx.core as mx
     import numpy as np
-    from laya_mlx.tokenizer import Tokenizer
+
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     from .engine import HYPERPARAMETERS as HP
     from .engine import collate, decision_logits, load_training_model
@@ -430,7 +435,7 @@ def coreml_test_score(converted, model_dir, items, dataset, tokens, options, emi
     if not usable:
         return None
     emit("phase", phase="score", message=f"Scoring the Core ML model on {len(usable)} rows")
-    from laya_mlx.tokenizer import Tokenizer
+    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
 
     pad = Tokenizer(model_dir / "tokenizer").pad_token_id
     rows, times = [], []
@@ -757,9 +762,8 @@ def main(argv=None):
     parser.add_argument(
         "--test-rows",
         type=int,
-        help="noulxp: rows of the run's test split recorded in the conformance file, next to "
-        "NoulXP's own requests (default 100; they are published with the package; 0 leaves "
-        "them out)",
+        help="noulxp: rows of the run's test split to record in the conformance file too, next "
+        "to NoulXP's own requests (default 0: they would be published with the package)",
     )
     args = parser.parse_args(argv)
     try:
