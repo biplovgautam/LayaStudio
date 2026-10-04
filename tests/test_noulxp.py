@@ -451,7 +451,8 @@ def test_the_api_explains_noulxp_before_starting_a_job(studio, tmp_path, monkeyp
     workspace = make_workspace(tmp_path)  # the same workspace the studio serves
     assert app.workspace == workspace
     status, info = call(base, f"/api/runs/{RUN}/noulxp")
-    assert status == 200 and info["package"] is None and info["test_rows"] == 100
+    # 0 by default: a test row in the conformance file is published with the package
+    assert status == 200 and info["package"] is None and info["test_rows"] == 0
     status, catalogue = call(base, "/api/families")
     assert all(f["noulxp"]["status"] for f in catalogue["families"])
 

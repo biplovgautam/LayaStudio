@@ -15,8 +15,9 @@ in the way the standard asks (SPEC.md, section 9):
    checkpoint's own weights file, the tokenizer, template.json and calibration.json.
 2. `noulxp conformance generate` records the fine-tune's own answers, from the `laya`
    package in float32 on the CPU, to NoulXP's request set (52 requests in 11 languages, the
-   coverage the standard asks for) and to up to 100 rows of the run's test split, asked the
-   questions the run was tuned for. Those rows are published inside the package.
+   coverage the standard asks for). Rows of the run's test split, asked the questions the run
+   was tuned for, are added only on request (test_rows > 0): they are published inside the
+   package.
 3. `noulxp validate`, then `noulxp check` on the CPU: the reference runtime has to reproduce
    every case (each probability within 0.01, and the same leading option).
 
@@ -51,7 +52,9 @@ from .engine import WORKSPACE, check_id, load_dataset, now, read_json, resolve_m
 
 REQUIREMENT = "noulxp[export,laya,onnx]>=0.4,<0.5"
 RELEASE = (0, 4)  # the noulxp release line systemonemodels.tech checks packages with
-TEST_ROWS = 100  # rows of the run's test split recorded next to NoulXP's request set
+# Rows of the run's test split recorded next to NoulXP's request set. 0 by default: the
+# conformance file is published with the package, and a dataset can be private. Opt in per run.
+TEST_ROWS = 0
 
 PACKAGE = "noulxp"  # runs/<id>/noulxp: a package that passed its check, and nothing else
 BUILDING = "noulxp.partial"

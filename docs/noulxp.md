@@ -23,9 +23,9 @@ python -m layastudio.publish_systemone run:<id>          # or Publish to System 
    `calibration.json`.
 2. `noulxp conformance generate` records the fine-tune's own answers, from the `laya` package in
    float32 on the CPU, to NoulXP's request set (52 requests, 11 languages: the coverage SPEC.md 9.2
-   asks for) and to up to 100 rows of the run's test split, asked the run's own questions
-   (`--test-rows N`; 0 leaves them out). **Those rows are published inside the package**, in
-   `conformance.jsonl`. A question over NoulXP's limits (20 options, 10 levels) cannot be asked
+   asks for). Rows of the run's own test split can be added with `--test-rows N` (default 0);
+   **rows added that way are published inside the package**, in `conformance.jsonl`, so a private
+   dataset should stay at 0. A question over NoulXP's limits (20 options, 10 levels) cannot be asked
    through a package; it is left out of the file and the export says so.
 3. `noulxp validate`, then `noulxp check` on the CPU. The package passes only when the reference
    runtime reproduces every case (each probability within 0.01, the same leading option) and the
