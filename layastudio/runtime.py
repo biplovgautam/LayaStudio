@@ -1,6 +1,6 @@
 """Which machine-learning stack this studio runs on, and the few calls that differ.
 
-Two backends train and evaluate the same Laya checkpoints:
+Two backends train and evaluate the same checkpoints (Laya, Julia 1 and Decider):
 
 - **mlx** on Apple silicon: the native laya-mlx runtime, fastest on a Mac.
 - **torch** everywhere else: the upstream PyTorch `laya` package on NVIDIA (CUDA),
@@ -121,7 +121,25 @@ def torch_checkpoint(model_dir):
 
 
 def load_agent(model_dir, batch_size=16):
-    """An inference agent for a local Laya checkpoint, on this machine's backend."""
+    """An inference agent for a local checkpoint, on this machine's backend.
+
+    Laya through laya-mlx or laya, Julia 1 through julia.Agent, Decider through
+    decider.Agent; each answers `predict(state, questions)` in the System One format."""
+    from . import kinds
+
+    kind = kinds.detect(model_dir)
+    if kind == kinds.JULIA:
+        from .julia import Agent
+
+        if backend() == "mlx":
+            return Agent(model_dir, backend="mlx")
+        return Agent(model_dir, backend="torch", device=torch_device())
+    if kind == kinds.DECIDER:
+        from .decider import Agent
+
+        if backend() == "mlx":
+            return Agent(model_dir, backend="mlx")
+        return Agent(model_dir, backend="torch", device=torch_device())
     if backend() == "mlx":
         import laya_mlx
 

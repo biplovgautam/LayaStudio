@@ -91,11 +91,142 @@ fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and publishe
 """
 
 
+# The cards of the other kinds (kinds.py): the same measured sections, each model's own
+# runtime, licence and maker.
+JULIA_CARD = """---
+license: apache-2.0
+library_name: pytorch
+pipeline_tag: text-classification
+tags:
+- julia
+- typed-decisions
+- decision-model
+- lora
+- noulxp
+- layastudio
+base_model: {base_repo}
+---
+
+# {title}
+
+A [Julia 1](https://huggingface.co/SupersonicLabs/Julia-1) typed-decision model by Supersonic
+Labs, fine-tuned with [System One Studio](https://github.com/biplovgautam/LayaStudio). It answers
+the questions below in a single forward pass, with probabilities and **zero generated tokens**.
+
+Base model: `{base_repo}` · method: {method}, {objective} objective · trained in {minutes}
+minutes on {chip}. The files are Julia 1's own: `julia_config.json`, `inference-policy.json`,
+`encoder/`, `tokenizer/` and float32 `model.safetensors`. The fine-tune's fitted temperature is
+folded into the scorer's last layer, so every runtime reads calibrated probabilities.
+
+## Measured on the held-out test split
+
+{metrics}
+
+{extra}
+
+Test rows were never trained on. Accuracy intervals are Wilson intervals; the paired test
+is an exact McNemar test between the base and the fine-tuned model on the same rows.
+
+## Use it
+
+```bash
+pip install noulxp            # the NoulXP package in noulxp/, on any machine
+noulxp run noulxp --request request.json
+```
+
+Or with Julia's own runtime from [SupersonicLabs/Julia-1](https://huggingface.co/SupersonicLabs/Julia-1)
+(`pip install -e ./Julia-1`), pointed at this folder: `load_model("{repo}", device="cpu")`.
+
+Ask it **these** questions: the instructions and option texts are part of the model's
+input, so changing them changes the task it was tuned for.
+
+```json
+{questions}
+```
+
+## Provenance
+
+```json
+{provenance}
+```
+
+## License and attribution
+
+Apache-2.0. Julia 1 and its pretrained weights are by
+[Supersonic Labs](https://huggingface.co/SupersonicLabs/Julia-1); this checkpoint is a
+fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and published with
+[System One Studio](https://github.com/biplovgautam/LayaStudio).
+"""
+
+DECIDER_CARD = """---
+license: apache-2.0
+library_name: transformers
+pipeline_tag: text-classification
+tags:
+- decider
+- typed-decisions
+- decision-model
+- lora
+- noulxp
+- layastudio
+base_model: {base_repo}
+---
+
+# {title}
+
+A [Decider](https://huggingface.co/Mapika/decider-2b) typed-decision model by Mapika, fine-tuned
+with LoRA in [System One Studio](https://github.com/biplovgautam/LayaStudio) and merged into the
+weights. It reads its answer from the option letters at an answer slot: no text is generated.
+
+Base model: `{base_repo}` · LoRA{variants}, {objective} objective · trained in {minutes} minutes on
+{chip}. The files are Decider's own (`config.json`, bfloat16 `model.safetensors`, tokenizer,
+`decider/` inference code), with `decider_config.json` holding this fine-tune's temperatures.
+
+## Measured on the held-out test split
+
+{metrics}
+
+{extra}
+
+Test rows were never trained on. Accuracy intervals are Wilson intervals; the paired test
+is an exact McNemar test between the base and the fine-tuned model on the same rows.
+
+## Use it
+
+```python
+from decider.infer import Decider          # decider/ is in this repository
+d = Decider("{repo}")
+print(d.system_one("your text here", questions)["answers"])
+```
+
+The NoulXP package in `noulxp/` runs anywhere llama.cpp does: `pip install "noulxp[gguf]"`.
+
+Ask it **these** questions: the instructions and option texts are part of the model's
+input, so changing them changes the task it was tuned for.
+
+```json
+{questions}
+```
+
+## Provenance
+
+```json
+{provenance}
+```
+
+## License and attribution
+
+Apache-2.0. Decider and its weights are by [Mapika](https://github.com/Mapika/decider); this
+checkpoint is a fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and
+published with [System One Studio](https://github.com/biplovgautam/LayaStudio).
+"""
+
+
 def percent(value):
     return "–" if value is None else f"{100 * value:.1f}%"
 
 
-def build_card(run, training, comparison, repo, questions):
+def build_card(run, training, comparison, repo, questions, kind="laya"):
     base_repo = run["base_model"].split(":", 1)[-1]
     rows, extra = [], ""
     if comparison:
@@ -129,14 +260,21 @@ def build_card(run, training, comparison, repo, questions):
         "trained_on": (training or {}).get("created"),
     }
     seconds = (training or {}).get("train_seconds") or 0
-    return CARD.format(
+    template = {"julia": JULIA_CARD, "decider": DECIDER_CARD}.get(kind, CARD)
+    variants = (training or {}).get("lora_variants") or []
+    if kind == "decider":
+        provenance["temperature_by_type"] = calibration.get("temperature_by_type")
+    return template.format(
         title=run.get("name", "Laya fine-tune"),
         base_repo=base_repo,
         repo=repo,
         method=(training or {}).get("hyperparameters", {}).get("method", "lora"),
         objective=(training or {}).get("hyperparameters", {}).get("objective", "proper"),
+        variants=f" ({', '.join(variants)})" if variants else "",
         minutes=f"{seconds / 60:.0f}",
-        chip=(training or {}).get("chip", "an Apple silicon Mac"),
+        chip=(training or {}).get("chip")
+        or (training or {}).get("device")
+        or ("an Apple silicon Mac" if (training or {}).get("backend", "mlx") == "mlx" else "a GPU"),
         metrics="\n".join(rows) or "_No comparison was recorded for this run._",
         extra=extra,
         questions=json.dumps(questions, indent=2, ensure_ascii=False),
@@ -151,12 +289,15 @@ def publish(run_ref, repo, workspace=WORKSPACE, private=False, dry_run=False):
     run_dir = workspace / "runs" / run_id
     model_dir = resolve_model_ref(f"run:{run_id}", workspace)
     run = read_json(run_dir / "run.json") or {"name": run_id, "base_model": "unknown"}
+    from . import kinds
+
     card = build_card(
         run,
         read_json(run_dir / "training.json"),
         read_json(run_dir / "comparison.json"),
         repo,
         read_json(model_dir / "questions.json") or {},
+        kinds.detect(model_dir) or "laya",
     )
     (model_dir / "README.md").write_text(card)
     files = sorted(p.name for p in model_dir.iterdir())

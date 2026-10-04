@@ -9,15 +9,22 @@ NoulXP compatible.
     python -m layastudio.export run:<id> --target noulxp
 
 builds that package for one fine-tune with noulxp 0.4, the release the registry checks with,
-in the way the standard asks (SPEC.md, section 9):
+in the way the standard asks (SPEC.md, section 9), with the converter and the model's own
+runtime that noulxp has for the run's checkpoint kind (kinds.py):
 
-1. `noulxp export laya` writes it from the run's checkpoint: an ONNX graph over the
-   checkpoint's own weights file, the tokenizer, template.json and calibration.json.
-2. `noulxp conformance generate` records the fine-tune's own answers, from the `laya`
-   package in float32 on the CPU, to NoulXP's request set (52 requests in 11 languages, the
-   coverage the standard asks for). Rows of the run's test split, asked the questions the run
-   was tuned for, are added only on request (test_rows > 0): they are published inside the
-   package.
+    laya     noulxp export laya     the `laya` package               encoder-markers (ONNX)
+    julia    noulxp export julia    noulxp.native.julia (Julia's own) encoder-markers (ONNX)
+    decider  noulxp export decider  noulxp.native.decider (Decider's  causal-letters (GGUF)
+                                    GGUF readout, llama.cpp)
+
+1. `noulxp export <kind>` writes it from the run's checkpoint: for the encoders an ONNX graph
+   over the checkpoint's own weights file, the tokenizer, template.json and calibration.json;
+   for Decider the run's GGUF (gguf.py: converted with a pinned llama.cpp, q8_0 by default, as
+   Decider's own package ships), its tokenizer, prompt.json and calibration.json.
+2. `noulxp conformance generate` records the fine-tune's own answers, from the model's own
+   runtime on the CPU, to NoulXP's request set (52 requests in 11 languages, the coverage the
+   standard asks for). Rows of the run's test split, asked the questions the run was tuned for,
+   are added only on request (test_rows > 0): they are published inside the package.
 3. `noulxp validate`, then `noulxp check` on the CPU: the reference runtime has to reproduce
    every case (each probability within 0.01, and the same leading option).
 
@@ -30,7 +37,7 @@ describes the last attempt.
 Publishing (publish_systemone.py) places the passing package next to the checkpoint's own
 files, as the version's `noulxp/` folder, for as long as the upload takes.
 
-Needs the optional extra:  uv sync --extra export
+Needs the optional extra:  uv sync --extra export   (Decider: --extra export --extra gguf)
 """
 
 import collections
@@ -64,31 +71,48 @@ MANIFEST = "noulxp.json"
 CHECK = "check-cpu.json"
 TEST_TAG = "studio:test-split"
 
-# What `noulxp export laya`, the `laya` runtime and `noulxp check` import, besides noulxp.
-NEEDED = (
+# What each kind's `noulxp export`, the model's own runtime and `noulxp check` import, besides
+# noulxp. Decider's also covers the GGUF conversion (gguf.py) and llama.cpp.
+ENCODER_NEEDS = (
     ("torch", "torch"),
     ("transformers", "transformers"),
     ("safetensors", "safetensors"),
-    ("laya", "laya"),
     ("onnx", "onnx"),
     ("onnxscript", "onnxscript"),
     ("onnx_ir", "onnx-ir"),
     ("onnxruntime", "onnxruntime"),
 )
+NEEDS = {
+    "laya": (*ENCODER_NEEDS[:3], ("laya", "laya"), *ENCODER_NEEDS[3:]),
+    "julia": ENCODER_NEEDS,
+    "decider": (
+        ("llama_cpp", "llama-cpp-python"),
+        ("transformers", "transformers"),
+        ("tokenizers", "tokenizers"),
+        ("torch", "torch"),
+        ("safetensors", "safetensors"),
+        ("sentencepiece", "sentencepiece"),
+        ("yaml", "pyyaml"),
+    ),
+}
+NEEDED = NEEDS["laya"]
+EXTRAS = {"laya": "export", "julia": "export", "decider": "export --extra gguf"}
+RUNTIME = {"laya": "the `laya` package", "julia": "Julia's own inference", "decider": "Decider's"}
+GGUF_PRECISION = "q8_0"  # the GGUF in a Decider package: half of bf16, as Decider's own package
 # noulxp refuses to export an encoder with an older transformers: older releases compute
 # ModernBERT differently, and the package would not give the model's own answers.
 MIN_TRANSFORMERS = (5, 2)
 # The file entries a manifest names (SPEC.md 4.2); weights also list their external data.
 FILE_KEYS = ("weights", "tokenizer", "template", "prompt", "calibration", "conformance")
 
-# `noulxp export laya`, called as its command calls it (hard-linked weights, opset 18), with
-# the fine-tune's own provenance in the manifest's `source` instead of upstream Laya's.
+# `noulxp export <kind>`, called as its command calls it (hard-linked weights, opset 18), with
+# the fine-tune's own provenance in the manifest's `source` instead of the base model's.
 EXPORT = (
-    "import json, sys\n"
+    "import importlib, json, sys\n"
     "from pathlib import Path\n"
-    "from noulxp.export import laya\n"
-    "laya.export(Path(sys.argv[1]), Path(sys.argv[2]), name=sys.argv[3],"
-    " source=json.loads(sys.argv[4]))\n"
+    "exporter = importlib.import_module('noulxp.export.' + sys.argv[1])\n"
+    "exporter.export(Path(sys.argv[2]), Path(sys.argv[3]), name=sys.argv[4],"
+    " source=json.loads(sys.argv[5]), **json.loads(sys.argv[6]))\n"
 )
 CASES = re.compile(r"^\s*(\d+)/(\d+) cases\b")
 GLOG = re.compile(r"^[WIEF]\d{4} ")  # torch's own warnings, e.g. "W1004 15:17:08 ..."
@@ -109,8 +133,8 @@ def _importable(module):
         return False
 
 
-def missing_tooling():
-    """Why this environment cannot build a NoulXP package, or None when it can."""
+def missing_tooling(kind="laya"):
+    """Why this environment cannot build a NoulXP package of this kind, or None when it can."""
     try:
         version = importlib.metadata.version("noulxp")
     except importlib.metadata.PackageNotFoundError:
@@ -120,7 +144,7 @@ def missing_tooling():
             f"noulxp {version} is installed, and the studio builds packages with noulxp 0.4, "
             "the release systemonemodels.tech checks them with"
         )
-    for module, name in NEEDED:
+    for module, name in NEEDS.get(kind, NEEDED):
         if not _importable(module):
             return f"{name} is not installed"
     try:
@@ -128,15 +152,17 @@ def missing_tooling():
     except importlib.metadata.PackageNotFoundError:
         return "transformers is not installed"
     if _release(found) < MIN_TRANSFORMERS:
-        return f"transformers {found} is installed; noulxp exports Laya with 5.2 or later"
+        return f"transformers {found} is installed; noulxp exports with 5.2 or later"
     return None
 
 
-def tooling_message(missing):
+def tooling_message(missing, kind="laya"):
+    extra = EXTRAS.get(kind, "export")
+    gguf = ' "llama-cpp-python==0.3.35"' if kind == "decider" else ""
     return (
         f"{missing}. Building a NoulXP package needs the optional extra:\n"
-        "    uv sync --extra export\n"
-        f'or, outside a checkout:  pip install "{REQUIREMENT}"'
+        f"    uv sync --extra {extra}\n"
+        f'or, outside a checkout:  pip install "{REQUIREMENT}"{gguf}'
     )
 
 
@@ -176,14 +202,18 @@ def base_model(ref, workspace=WORKSPACE, depth=0):
     return None
 
 
-def support(run, workspace=WORKSPACE):
-    """(family, the family's NoulXP entry) for a run, from the model it was tuned from."""
+def support(run, workspace=WORKSPACE, model_dir=None):
+    """(family, the family's NoulXP entry) for a run: from its checkpoint's kind when the
+    studio trained it (every kind it trains has a NoulXP exporter), else from the catalogue."""
+    from . import kinds
     from .families import NOULXP, find
 
+    if model_dir is not None and kinds.detect(model_dir):
+        kind = kinds.detect(model_dir)
+        family = kinds.FAMILY[kind]
+        return family, {**NOULXP[family], "profile": kinds.PROFILE[kind], "status": "ready"}
     base = base_model(run.get("base_model"), workspace)
     known = find(base) if base else None
-    # Only the laya trainer exists, so a run's checkpoint is a Laya checkpoint unless the
-    # catalogue knows its base belongs to another family.
     family = known.family if known else "laya"
     return family, NOULXP[family]
 
@@ -252,14 +282,27 @@ def own_requests(questions, rows, limits, count=TEST_ROWS):
     return requests, {"rows": len(requests), "asked": list(asked), "left_out": left_out}
 
 
-def checkpoint_view(model_dir, dest):
-    """A copy of the checkpoint for the `laya` package to read.
+def checkpoint_view(model_dir, dest, kind="laya", gguf=None):
+    """A copy of the checkpoint for the model's own runtime (and Decider's exporter) to read.
 
     laya rewrites tokenizer/tokenizer_config.json in place when it names no tokenizer class;
-    the copy keeps that away from the run's own files. The weights are hard-linked: laya
-    only reads them."""
+    the copy keeps that away from the run's own files. Decider's runtime and exporter read a
+    folder holding one GGUF: the run's export, as model.gguf. Weights are hard-linked: the
+    runtimes only read them."""
     dest.mkdir(parents=True)
-    shutil.copyfile(model_dir / "rl_agent_config.json", dest / "rl_agent_config.json")
+    if kind == "decider":
+        for name in ("tokenizer.json", "tokenizer_config.json", "decider_config.json"):
+            shutil.copyfile(model_dir / name, dest / name)
+        if (model_dir / "chat_template.jinja").is_file():
+            shutil.copyfile(model_dir / "chat_template.jinja", dest / "chat_template.jinja")
+        _place(gguf, dest / "model.gguf")
+        return dest
+    if kind == "julia":
+        for name in ("julia_config.json", "inference-policy.json", "config.json"):
+            if (model_dir / name).is_file():
+                shutil.copyfile(model_dir / name, dest / name)
+    else:
+        shutil.copyfile(model_dir / "rl_agent_config.json", dest / "rl_agent_config.json")
     for folder in ("encoder", "tokenizer"):
         shutil.copytree(model_dir / folder, dest / folder)
     _place(model_dir / "model.safetensors", dest / "model.safetensors")
@@ -326,17 +369,27 @@ def _last(tail):
     return (useful or tail or ["no output"])[-1]
 
 
-def export_package(model_dir, out_dir, name, source, emit):
-    """Step 1: `noulxp export laya` from the run's checkpoint."""
+def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=None):
+    """Step 1: `noulxp export <kind>` from the run's checkpoint."""
     code, tail = _python(
-        ["-c", EXPORT, str(model_dir), str(out_dir), name, json.dumps(source)], emit
+        [
+            "-c",
+            EXPORT,
+            kind,
+            str(model_dir),
+            str(out_dir),
+            name,
+            json.dumps(source),
+            json.dumps(options or {}),
+        ],
+        emit,
     )
     if code:
-        raise RuntimeError(f"noulxp export laya failed: {_last(tail)}")
+        raise RuntimeError(f"noulxp export {kind} failed: {_last(tail)}")
 
 
-def record_conformance(package_dir, checkpoint, requests, emit):
-    """Step 2: the fine-tune's own answers (laya, float32, CPU) into conformance.jsonl."""
+def record_conformance(package_dir, checkpoint, requests, emit, runtime="laya"):
+    """Step 2: the fine-tune's own answers (its own runtime, CPU) into conformance.jsonl."""
     code, tail = _python(
         [
             "-m",
@@ -347,7 +400,7 @@ def record_conformance(package_dir, checkpoint, requests, emit):
             "--native",
             str(checkpoint),
             "--runtime",
-            "laya",
+            runtime,
             "--requests",
             str(requests),
         ],
@@ -391,19 +444,43 @@ def check_package(package_dir, emit):
 # ----------------------------------------------------------------------------- build
 
 
-def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS):
+def ensure_gguf(model_ref, workspace, emit, precision=GGUF_PRECISION):
+    """The run's GGUF export at this precision, converted (gguf.py) unless one exists that
+    was converted from the checkpoint's current weights. (path, export report)"""
+    from . import gguf
+
+    _, run_dir, model_dir, _ = locate(model_ref, workspace)
+    target = run_dir / "exports" / gguf.FILE.format(precision=precision)
+    report = read_json(run_dir / "exports" / f"gguf-{precision}.json") or {}
+    weights = {p.name: _sha256(p) for p in sorted(model_dir.glob("*.safetensors"))}
+    if (
+        target.is_file()
+        and report.get("source_sha256") == weights
+        and report.get("sha256") == _sha256(target)
+        and report.get("llama_cpp") == gguf.LLAMA_CPP_COMMIT
+    ):
+        emit("log", message=f"Using the run's GGUF export ({precision})")
+        return target, report
+    report = gguf.export(model_ref, workspace, emit, precision=precision)
+    return target, report
+
+
+def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=GGUF_PRECISION):
     """Build, record, validate and check one run's package. Returns the report.
 
     Raises when the package does not pass, after keeping it as runs/<id>/noulxp-failed: a
     failing package never replaces the run's package, and is never published."""
+    from . import kinds
+
     emit = emit or (lambda *a, **k: None)
     run_id, run_dir, model_dir, run = locate(model_ref, workspace)
-    family, entry = support(run, workspace)
+    kind = kinds.detect(model_dir) or "laya"
+    family, entry = support(run, workspace, model_dir)
     if entry["status"] != "ready":
         raise ValueError(refusal(family))
-    missing = missing_tooling()
+    missing = missing_tooling(kind)
     if missing:
-        raise RuntimeError(tooling_message(missing))
+        raise RuntimeError(tooling_message(missing, kind))
 
     started = time.perf_counter()
     staging, kept, failed = run_dir / BUILDING, run_dir / PACKAGE, run_dir / FAILED
@@ -418,14 +495,52 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS):
         "created": now(),
         "noulxp": importlib.metadata.version("noulxp"),
         "family": family,
+        "kind": kind,
         "profile": entry["profile"],
     }
     try:
         with tempfile.TemporaryDirectory(prefix=".noulxp-", dir=run_dir) as scratch:
             scratch = Path(scratch)
-            emit("phase", phase="export", message="Writing the NoulXP package (noulxp export laya)")
             source = provenance(run, run_id, workspace)
-            export_package(model_dir, building, f"studio:{run_id}", source, emit)
+            view = None
+            if kind == "decider":
+                gguf_file, converted = ensure_gguf(f"run:{run_id}", workspace, emit, gguf)
+                report["gguf"] = {
+                    k: converted.get(k)
+                    for k in ("precision", "sha256", "size_mb", "llama_cpp", "verification")
+                }
+                source = {
+                    **source,
+                    "gguf": {k: converted.get(k) for k in ("precision", "llama_cpp")},
+                }
+                view = checkpoint_view(model_dir, scratch / "checkpoint", kind, gguf_file)
+                emit(
+                    "phase",
+                    phase="export",
+                    message="Writing the NoulXP package (noulxp export decider)",
+                )
+                export_package(
+                    view, building, f"studio:{run_id}", source, emit, kind, {"gguf": "model.gguf"}
+                )
+            elif kind == "julia":
+                # The package's budgets are the checkpoint's own inference policy.
+                from . import julia
+
+                policy = julia.config(model_dir)
+                emit(
+                    "phase",
+                    phase="export",
+                    message="Writing the NoulXP package (noulxp export julia)",
+                )
+                options = {"max_tokens": policy["max_len"], "head_tokens": policy["head_max_len"]}
+                export_package(model_dir, building, f"studio:{run_id}", source, emit, kind, options)
+            else:
+                emit(
+                    "phase",
+                    phase="export",
+                    message="Writing the NoulXP package (noulxp export laya)",
+                )
+                export_package(model_dir, building, f"studio:{run_id}", source, emit, kind)
             limits = (read_json(building / MANIFEST) or {}).get("limits") or {}
             questions = read_json(model_dir / "questions.json") or {}
             try:
@@ -449,10 +564,11 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS):
                 "phase",
                 phase="conformance",
                 message=f"Recording the fine-tune's own answers to {len(requests)} requests "
-                "(laya, float32, CPU)",
+                f"({RUNTIME.get(kind, kind)} runtime, CPU)",
             )
-            view = checkpoint_view(model_dir, scratch / "checkpoint")
-            record_conformance(building, view, scratch / "requests.jsonl", emit)
+            if view is None:
+                view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
+            record_conformance(building, view, scratch / "requests.jsonl", emit, runtime=kind)
         emit("phase", phase="validate", message="Validating the package: schemas, hashes, coverage")
         problems = validate_package(building, emit)
         emit("phase", phase="check", message="Checking the package on the CPU (noulxp check)")
@@ -578,6 +694,7 @@ def describe(package_dir):
         "name": manifest.get("name"),
         "standard": manifest.get("standard"),
         "profile": manifest.get("profile"),
+        "gguf": (manifest.get("source") or {}).get("gguf"),
         "noulxp": (manifest.get("source") or {}).get("converted_by"),
         "generated_by": conformance.get("generated_by") or {},
         "test_rows": own,
@@ -657,7 +774,7 @@ def passing_package(run_dir, model_dir):
         return None
     if checked.get("weights_sha256") != (manifest.get("weights") or {}).get("sha256"):
         return None
-    weights_data = None
+    weights_data = gguf_file = None
     for entry in _entries(manifest):
         relative = str(entry.get("path", ""))
         if not _safe(relative) or not (root / relative).is_file():
@@ -666,12 +783,27 @@ def passing_package(run_dir, model_dir):
             return None
         if relative.endswith(".safetensors"):
             weights_data = root / relative
+        elif relative.endswith(".gguf"):
+            gguf_file = root / relative
+    if gguf_file is not None:
+        return info if _gguf_of_checkpoint(run_dir, model_dir, gguf_file) else None
     own = model_dir / "model.safetensors"
     if weights_data is None or not own.is_file():
         return None
     if not os.path.samefile(weights_data, own) and _sha256(weights_data) != _sha256(own):
         return None
     return info
+
+
+def _gguf_of_checkpoint(run_dir, model_dir, gguf_file):
+    """A Decider package's GGUF is the run's export, converted from these very weights."""
+    digest = _sha256(gguf_file)
+    weights = {p.name: _sha256(p) for p in sorted(Path(model_dir).glob("*.safetensors"))}
+    for path in sorted((Path(run_dir) / "exports").glob("gguf-*.json")):
+        report = read_json(path) or {}
+        if report.get("sha256") == digest and report.get("source_sha256") == weights:
+            return True
+    return False
 
 
 # ----------------------------------------------------------------------------- publishing
@@ -742,14 +874,27 @@ def card_line(info):
     asked = f"NoulXP's {cases - own} conformance requests" + (
         f" and {own} rows of this model's test split" if own else ""
     )
-    laya = (info.get("generated_by") or {}).get("laya")
-    native = f"the `laya` package {laya}" if laya else "the `laya` package"
+    by = info.get("generated_by") or {}
+    runtime = by.get("runtime") or "laya"
+    if runtime == "decider":
+        what = (
+            f"this fine-tune as a {(info.get('gguf') or {}).get('precision', 'GGUF')} GGUF, "
+            "converted with llama.cpp"
+        )
+        native = "Decider's own GGUF readout (llama.cpp, every row decoded in full, CPU)"
+    elif runtime == "julia":
+        what = "an ONNX graph over these weights"
+        native = "Julia 1's own inference (float32, CPU)"
+    else:
+        what = "an ONNX graph over these weights"
+        native = f"the `laya` package {by['laya']}" if by.get("laya") else "the `laya` package"
+        native += " (float32, CPU)"
     return (
         f"**NoulXP:** this version carries a NoulXP package in `noulxp/` "
-        f"({info.get('standard')}, {info.get('profile')} profile: an ONNX graph over these "
-        f"weights). Before publishing, System One Studio recorded this fine-tune's own answers to "
-        f"{asked} with {native} (float32, CPU), and the NoulXP reference runtime "
-        f"({info.get('noulxp')}) reproduced {info.get('cases_passed')} of {cases} cases on the CPU "
+        f"({info.get('standard')}, {info.get('profile')} profile: {what}). Before publishing, "
+        f"System One Studio recorded this fine-tune's own answers to {asked} with {native}, and "
+        f"the NoulXP reference runtime ({info.get('noulxp')}) reproduced "
+        f"{info.get('cases_passed')} of {cases} cases on the CPU "
         f"(max |Δp| {float(info.get('max_abs_dp') or 0):.1e}, tolerance 0.01). "
         "systemonemodels.tech runs the same check before it shows the model as NoulXP compatible."
     )

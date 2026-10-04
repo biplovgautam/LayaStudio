@@ -30,14 +30,16 @@ from .engine import (
     calibrated_ece,
     check_id,
     class_weights,
-    encode_items,
+    encoder_config,
+    encoder_items,
+    encoder_kind,
+    encoder_tokenizer,
     load_dataset,
     lora_scale,
     lora_variants,
     make_batches,
     nll_at,
     now,
-    read_json,
     resolve_model_ref,
     safetensors_header,
     upstream_name,
@@ -157,19 +159,26 @@ def frozen_dtype(torch, device, precision):
 def load_training_model(model_dir, hp, device):
     """The PyTorch decision model with frozen and trainable parts for the chosen method."""
     import torch
-    from laya.common import build_model
     from safetensors.torch import load_file
 
     model_dir = Path(model_dir)
-    cfg = read_json(model_dir / "rl_agent_config.json")
+    kind = encoder_kind(model_dir)
+    cfg = encoder_config(model_dir, kind)
     # The fused TransformerEncoderLayer fast path does not train; the plain path does.
     torch.backends.mha.set_fastpath_enabled(False)
-    model = build_model(cfg, encoder_dir=str(model_dir / "encoder"))
-    # MLX ports (aac6fef/laya-mlx) store MLX parameter names; map them back.
-    state = {
-        upstream_name(k): v for k, v in load_file(str(model_dir / "model.safetensors")).items()
-    }
-    model.load_state_dict(state, strict=True)
+    if kind == "julia":
+        from . import julia
+
+        model = julia.torch_model(model_dir)
+    else:
+        from laya.common import build_model
+
+        model = build_model(cfg, encoder_dir=str(model_dir / "encoder"))
+        # MLX ports (aac6fef/laya-mlx) store MLX parameter names; map them back.
+        state = {
+            upstream_name(k): v for k, v in load_file(str(model_dir / "model.safetensors")).items()
+        }
+        model.load_state_dict(state, strict=True)
     for layer in model.head.layers if model.head is not None else []:
         for module in layer.modules():
             if isinstance(module, torch.nn.Dropout):
@@ -394,6 +403,44 @@ def save_checkpoint(model, base_dir, out_dir, cfg, questions, provenance):
     return out_dir
 
 
+def save_julia_checkpoint(model, base_dir, out_dir, questions, provenance):
+    """A Julia 1 checkpoint from a PyTorch model: the LoRA updates merged into the base's own
+    float32 weights, the trained parts in float32, the temperature folded into the scorer.
+    The same files engine.save_julia_checkpoint writes from MLX."""
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    from . import julia
+
+    base = {k: v.float() for k, v in load_file(str(Path(base_dir) / "model.safetensors")).items()}
+    tensors = dict(base)
+    with torch.no_grad():
+        for i, layer in enumerate(model.encoder.layers):
+            for parent, name in ENCODER_LINEARS:
+                module = getattr(getattr(layer, parent), name)
+                if not hasattr(module, "lora_a"):
+                    continue
+                key = f"encoder.layers.{i}.{parent}.{name}.weight"
+                weight = base[key] + module._delta().float().cpu()
+                if module.dora:
+                    norm = weight.norm(dim=1)
+                    weight = (module.magnitude.detach().float().cpu() / norm)[:, None] * weight
+                tensors[key] = weight
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad or name.endswith(("lora_a", "lora_b", "magnitude")):
+                continue
+            if name not in base:
+                raise RuntimeError(f"Trained parameter {name} is not in the base checkpoint")
+            tensors[name] = parameter.detach().float().cpu()
+    julia.fold_temperature(tensors, provenance["calibration"]["folded_temperature"])
+    tensors = {k: v.contiguous() for k, v in tensors.items()}
+
+    def save(path):
+        save_file(tensors, str(path), metadata={"format": "pt", "family": "julia"})
+
+    return julia.write_checkpoint(tensors, base_dir, out_dir, questions, provenance, save)
+
+
 def schedule_factor(warm, updates):
     """Linear warm-up from 1% to the peak, then cosine decay to 10% of it (engine.fit's schedule)."""
 
@@ -410,16 +457,14 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     """Train, pick the best epoch, calibrate and save. Returns a training summary."""
     import torch
 
-    from .laya_mlx_free import laya_mlx_module
-
-    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
-
     device = runtime.torch_device()
     run_dir = workspace / "runs" / check_id(spec["run_id"])
     questions, rows, meta = load_dataset(spec["dataset"], workspace)
     base_dir = resolve_model_ref(spec["base_model"], workspace)
-    cfg = read_json(base_dir / "rl_agent_config.json")
-    tok = Tokenizer(base_dir / "tokenizer")
+    kind = encoder_kind(base_dir)
+    cfg = encoder_config(base_dir, kind)
+    tok = encoder_tokenizer(base_dir, kind)
+    encode = encoder_items(kind)
     random.seed(hp["seed"])
     torch.manual_seed(hp["seed"])
     rng = random.Random(hp["seed"])
@@ -432,8 +477,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     train_rows = [r for r in rows if r["split"] == "train"]
     val_rows = [r for r in rows if r["split"] == "val"]
     weights = class_weights(train_rows, questions) if hp["class_weighting"] == "balanced" else None
-    val_items, _ = encode_items(tok, cfg, val_rows, questions)
-    probe, skipped = encode_items(tok, cfg, train_rows, questions)
+    val_items, _ = encode(tok, cfg, val_rows, questions)
+    probe, skipped = encode(tok, cfg, train_rows, questions)
     if not probe:
         raise ValueError("No training decisions fit the model's token budget")
     model, cfg = load_training_model(base_dir, hp, device)
@@ -508,9 +553,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     step, started, seen, stale, history = 0, time.perf_counter(), 0, 0, []
     for epoch in range(1, hp["epochs"] + 1):
         sigma = 0.4 + (0.1 - 0.4) * ((epoch - 1) / max(1, hp["epochs"] - 1))
-        items, _ = encode_items(
-            tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights
-        )
+        items, _ = encode(tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights)
         batches = make_batches(items, hp["batch_size"], rng)
         count, running = 0, []
         optimizer.zero_grad(set_to_none=True)
@@ -564,14 +607,20 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
 
     emit("phase", phase="calibrate", message="Fitting temperatures on validation logits")
     triples = evaluate_logits(model, val_items, tok.pad_token_id, device)
-    temperature, by_options, fitted = calibrate(triples, cfg)
-    calibration = {
-        "ece_uncalibrated": calibrated_ece(triples, [1.0, 1.0, 1.0], {}),
-        "ece_calibrated": calibrated_ece(triples, temperature, by_options),
-        "temperature": temperature,
-        "temperature_by_options": by_options,
-        "fitted_types": fitted,
-    }
+    if kind == "julia":
+        from . import julia
+
+        calibration = julia.fit_calibration(triples)
+        temperature, by_options = calibration["temperature"], {}
+    else:
+        temperature, by_options, fitted = calibrate(triples, cfg)
+        calibration = {
+            "ece_uncalibrated": calibrated_ece(triples, [1.0, 1.0, 1.0], {}),
+            "ece_calibrated": calibrated_ece(triples, temperature, by_options),
+            "temperature": temperature,
+            "temperature_by_options": by_options,
+            "fitted_types": fitted,
+        }
     emit("calibration", **calibration)
 
     emit("phase", phase="save", message="Merging adapters and writing the checkpoint")
@@ -579,6 +628,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "run_id": spec["run_id"],
         "base_model": spec["base_model"],
         "base_model_dir": str(base_dir),
+        "kind": kind,
         "dataset": spec["dataset"],
         "dataset_sha256": meta.get("sha256"),
         "hyperparameters": hp,
@@ -586,6 +636,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "total_params": total,
         "train_decisions": len(probe),
         "val_decisions": len(val_items),
+        "skipped_decisions": skipped,
         "updates": step,
         "best_epoch": best["epoch"],
         "best_val_loss": best["loss"],
@@ -598,6 +649,11 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "device": runtime.device_label(device),
         "created": now(),
     }
+    if kind == "julia":
+        model.eval()
+        save_julia_checkpoint(model, base_dir, run_dir / "model", questions, summary)
+        write_json(run_dir / "training.json", summary)
+        return summary
     new_cfg = {**cfg, "temperature": temperature, "temperature_by_options": by_options}
     new_cfg["fine_tuned"] = {
         key: summary[key] for key in ("base_model", "dataset_sha256", "best_epoch", "created")

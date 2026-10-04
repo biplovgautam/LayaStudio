@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "layastudio"
 version = "0.1.0"
 description = "Fine-tune System One decision models on your own data, on your own machine"
-keywords = ["laya", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai"]
+keywords = ["laya", "julia", "decider", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai", "noulxp"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -32,7 +32,30 @@ dependencies = [
 dev = ["pytest>=8", "ruff>=0.12", "build>=1"]
 # Training on NVIDIA, AMD, Intel or the CPU. `systemone run studio` installs the PyTorch build
 # the machine needs (CUDA, ROCm, XPU or CPU) before this extra, so it only adds the rest.
-torch = ["laya>=0.3.5", "torch>=2.4", "transformers>=4.48", "safetensors>=0.4"]
+# Julia 1's encoder (mmBERT) and Decider's Qwen3.5 need transformers 5.
+torch = ["laya>=0.3.5", "torch>=2.4", "transformers>=5.2", "safetensors>=0.4"]
+# Decoder families (Decider): LoRA through PEFT on PyTorch, MLX-LM on Apple silicon. On NVIDIA,
+# flash-linear-attention makes Qwen3.5's linear attention several times faster, and
+# bitsandbytes enables 4-bit QLoRA: pip install flash-linear-attention bitsandbytes
+decoder = [
+  "torch>=2.4",
+  "transformers>=5.2",
+  "safetensors>=0.4",
+  "peft>=0.17",
+  "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# GGUF exports of decoder fine-tunes and their NoulXP packages: llama.cpp's converter at the
+# commit llama-cpp-python 0.3.35 vendors (fetched on first use, layastudio/gguf.py) with the
+# requirements of its gguf-py, and llama-cpp-python to run and check the files.
+gguf = [
+  "llama-cpp-python==0.3.35",
+  "numpy>=1.26",
+  "sentencepiece>=0.2",
+  "protobuf>=4.21",
+  "pyyaml>=6",
+  "tqdm>=4.27",
+  "requests>=2.25",
+]
 # ONNX and Core ML exports, and NoulXP packages. noulxp 0.4.x is the release systemonemodels.tech
 # checks packages with; its extras bring `noulxp export laya` (torch, transformers 5.2+, onnx,
 # onnxscript), the `laya` package that records the conformance file, and onnxruntime for the check.
@@ -69,3 +92,14 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+# llama-cpp-python publishes prebuilt CPU wheels (macOS, Linux, Windows) on its own index, not
+# on PyPI, where only the source is: take them, so no machine needs a C compiler. With pip:
+#   pip install "layastudio[gguf]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cpu" }

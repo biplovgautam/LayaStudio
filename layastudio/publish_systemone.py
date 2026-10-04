@@ -52,13 +52,45 @@ print(agent.predict("your text here", questions)["answers"])
 """
 
 
-def registry_card(card, repo):
+SYSTEMONE_USE_JULIA = """## Use it
+
+```bash
+pip install systemonemodels "noulxp[onnx]"
+systemone pull {repo}
+noulxp run <the pulled folder>/noulxp --request request.json
+```
+
+Julia's own runtime (from SupersonicLabs/Julia-1) reads the pulled folder as it is.
+
+"""
+SYSTEMONE_USE_DECIDER = """## Use it
+
+```bash
+pip install systemonemodels
+systemone pull {repo}
+```
+
+```python
+from pathlib import Path
+from systemone import snapshot_download
+
+path = snapshot_download("{repo}")      # Decider's own files and its decider/ code
+import sys; sys.path.insert(0, str(path))
+from decider.infer import Decider
+print(Decider(str(path)).system_one("your text here", questions)["answers"])
+```
+
+"""
+
+
+def registry_card(card, repo, kind="laya"):
     """The Hugging Face card, with its "Use it" section pointed at the registry."""
     start = card.find(USE_IT_MARK)
     end = card.find(QUESTIONS_MARK)
     if start == -1 or end == -1 or end < start:
         return card
-    return card[:start] + SYSTEMONE_USE.format(repo=repo) + card[end:]
+    use = {"julia": SYSTEMONE_USE_JULIA, "decider": SYSTEMONE_USE_DECIDER}.get(kind, SYSTEMONE_USE)
+    return card[:start] + use.format(repo=repo) + card[end:]
 
 
 def with_noulxp(card, line):
@@ -106,6 +138,17 @@ def publish(
             "then `systemone login`, and try again."
         )
 
+    from . import kinds
+    from .families import find, licence_allows
+
+    kind = kinds.detect(model_dir) or "laya"
+    base = noulxp_package.base_model(run.get("base_model"), workspace)
+    known = find(base) if base else None
+    if known and not licence_allows(known.licence_kind, "publish"):
+        raise RuntimeError(
+            f"{known.repo} is licensed {known.licence}: the studio does not publish its fine-tunes."
+        )
+
     # Before the card: a run whose package cannot pass publishes nothing, card included.
     package = noulxp_package.for_publish(f"run:{run_id}", workspace, emit) if noulxp else None
 
@@ -119,8 +162,10 @@ def publish(
             read_json(run_dir / "comparison.json"),
             target,
             read_json(model_dir / "questions.json") or {},
+            kind,
         ),
         target,
+        kind,
     )
     card = with_noulxp(card, noulxp_package.card_line(package))
     (model_dir / "README.md").write_text(card)

@@ -117,6 +117,22 @@ HYPERPARAMETERS = {
 }
 
 
+# Julia 1 trains with Laya's recipe. Its frozen weights stay in float32 by default: the model
+# is small (144M, most of it the vocabulary), and the checkpoint is float32 like the release.
+JULIA_HYPERPARAMETERS = {**HYPERPARAMETERS, "precision": "float32"}
+
+
+def hyperparameters(kind="laya"):
+    """The default hyperparameters of the trainer for a checkpoint kind (kinds.py)."""
+    if kind == "decider":
+        from .decider import HYPERPARAMETERS as DECIDER
+
+        return dict(DECIDER)
+    if kind == "julia":
+        return dict(JULIA_HYPERPARAMETERS)
+    return dict(HYPERPARAMETERS)
+
+
 class Cancelled(Exception):
     pass
 
@@ -510,7 +526,12 @@ def load_dataset(dataset_id, workspace=WORKSPACE):
 
 
 def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
-    """'hub:<repo>', 'run:<id>' or 'path:<dir>' -> local checkpoint directory."""
+    """'hub:<repo>', 'run:<id>' or 'path:<dir>' -> local checkpoint directory.
+
+    The folder must be a complete checkpoint of a kind the studio trains (kinds.py): Laya,
+    Julia 1 or Decider. Hub repositories are fetched with the files their kind needs."""
+    from . import kinds
+
     kind, _, value = str(ref).partition(":")
     if kind == "run":
         path = workspace / "runs" / check_id(value) / "model"
@@ -523,7 +544,7 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
             path = Path(
                 snapshot_download(
                     value,
-                    allow_patterns=list(CHECKPOINT_FILES),
+                    allow_patterns=list(kinds.DOWNLOAD[kinds.of_repo(value)]),
                     local_files_only=not allow_download,
                 )
             )
@@ -531,15 +552,15 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
             raise FileNotFoundError(f"{value} is not downloaded yet. Download it first.") from error
     else:
         raise ValueError(f"Unknown model reference {ref!r}")
-    for name in (
-        "model.safetensors",
-        "rl_agent_config.json",
-        "encoder/config.json",
-        "tokenizer/tokenizer.json",
-    ):
-        if not (path / name).is_file():
-            raise FileNotFoundError(f"Not a complete Laya checkpoint: {path / name} is missing")
+    kinds.check(path)
     return path
+
+
+def model_kind(ref, workspace=WORKSPACE):
+    """The kind (kinds.py) of the checkpoint a reference points at."""
+    from . import kinds
+
+    return kinds.check(resolve_model_ref(ref, workspace))
 
 
 def hub_cached(repo_id):
@@ -848,6 +869,49 @@ def lora_class():
 ENCODER_LINEARS = (("attn", "Wqkv"), ("attn", "Wo"), ("mlp", "Wi"), ("mlp", "Wo"))
 
 
+# ----------------------------------------------------------------------------- encoder kinds
+# Laya and Julia 1 are the same network with different prompts and checkpoint files
+# (julia.py). The trainers below take both; these pick the parts that differ.
+
+
+def encoder_kind(model_dir):
+    """'laya' or 'julia' for a checkpoint the encoder trainers take; ValueError otherwise."""
+    from . import kinds
+
+    kind = kinds.check(model_dir)
+    if kind not in (kinds.LAYA, kinds.JULIA):
+        raise ValueError(f"{kinds.NAME[kind]} checkpoints are trained by their own trainer")
+    return kind
+
+
+def encoder_config(model_dir, kind=None):
+    """The configuration the trainers read: rl_agent_config.json, or Julia's equivalent."""
+    kind = kind or encoder_kind(model_dir)
+    if kind == "julia":
+        from . import julia
+
+        return julia.config(model_dir)
+    return read_json(Path(model_dir) / "rl_agent_config.json")
+
+
+def encoder_tokenizer(model_dir, kind=None):
+    kind = kind or encoder_kind(model_dir)
+    if kind == "julia":
+        from . import julia
+
+        return julia.tokenizer(model_dir)
+    return laya_mlx_module("tokenizer").Tokenizer(Path(model_dir) / "tokenizer")
+
+
+def encoder_items(kind):
+    """The function that encodes (row, question) pairs in this kind's own prompt."""
+    if kind == "julia":
+        from . import julia
+
+        return julia.encode_items
+    return encode_items
+
+
 def load_training_model(model_dir, hp):
     """Build the decision model with frozen/trainable parts for the chosen method."""
     import mlx.core as mx
@@ -855,9 +919,15 @@ def load_training_model(model_dir, hp):
     from mlx.utils import tree_map
 
     model_dir = Path(model_dir)
-    cfg = read_json(model_dir / "rl_agent_config.json")
+    kind = encoder_kind(model_dir)
+    cfg = encoder_config(model_dir, kind)
     enc_cfg = EncoderConfig.from_dict(read_json(model_dir / "encoder/config.json"))
-    model = DecisionModel(enc_cfg, cfg)
+    if kind == "julia":
+        # laya_mlx sizes the unused action head from act_costs: n_act = len(act_costs) + 1
+        acts = {f"action{i}": 0.0 for i in range(cfg["n_act"] - 1)}
+        model = DecisionModel(enc_cfg, {"head_layers": cfg["head_layers"], "act_costs": acts})
+    else:
+        model = DecisionModel(enc_cfg, cfg)
     frozen_dtype = mx.bfloat16 if hp["precision"] == "bfloat16" else mx.float32
     weights = sanitize_weights(mx.load(str(model_dir / "model.safetensors")))
     weights = {
@@ -1144,6 +1214,46 @@ def save_checkpoint(model, base_dir, out_dir, cfg, questions, provenance):
     return out_dir
 
 
+def save_julia_checkpoint(model, base_dir, out_dir, questions, provenance):
+    """A Julia 1 checkpoint from an MLX model: the LoRA updates merged into the base's own
+    float32 weights, the trained parts in float32, the fitted temperature folded into the
+    scorer (julia.py). Never the bfloat16 training copy of the frozen encoder."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    from . import julia
+
+    base = {
+        k: v.astype(mx.float32)
+        for k, v in mx.load(str(Path(base_dir) / "model.safetensors")).items()
+    }
+    tensors = dict(base)
+    for i, layer in enumerate(model.encoder.layers):
+        for parent, name in ENCODER_LINEARS:
+            module = getattr(getattr(layer, parent), name)
+            if not hasattr(module, "lora_a"):
+                continue
+            key = f"encoder.layers.{i}.{parent}.{name}.weight"
+            weight = base[key] + module._delta().astype(mx.float32)
+            if module.dora:
+                weight = (module.magnitude / mx.linalg.norm(weight, axis=1))[:, None] * weight
+            tensors[key] = weight
+    for name, value in tree_flatten(model.trainable_parameters()):
+        if name.endswith(("lora_a", "lora_b", "magnitude")):
+            continue
+        key = upstream_name(name)
+        if key not in base:
+            raise RuntimeError(f"Trained parameter {key} is not in the base checkpoint")
+        tensors[key] = value.astype(mx.float32)
+    julia.fold_temperature(tensors, provenance["calibration"]["folded_temperature"])
+    mx.eval(tensors)
+
+    def save(path):
+        mx.save_safetensors(str(path), tensors, metadata={"format": "pt", "family": "julia"})
+
+    return julia.write_checkpoint(tensors, base_dir, out_dir, questions, provenance, save)
+
+
 def fit(spec, hp, emit, workspace=WORKSPACE):
     """Train, pick the best epoch, calibrate and save. Returns a training summary.
 
@@ -1153,15 +1263,15 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
-
-    Tokenizer = laya_mlx_module("tokenizer").Tokenizer
     from mlx.utils import tree_flatten, tree_map, tree_unflatten
 
     run_dir = workspace / "runs" / check_id(spec["run_id"])
     questions, rows, meta = load_dataset(spec["dataset"], workspace)
     base_dir = resolve_model_ref(spec["base_model"], workspace)
-    cfg = read_json(base_dir / "rl_agent_config.json")
-    tok = Tokenizer(base_dir / "tokenizer")
+    kind = encoder_kind(base_dir)
+    cfg = encoder_config(base_dir, kind)
+    tok = encoder_tokenizer(base_dir, kind)
+    encode = encoder_items(kind)
     random.seed(hp["seed"])
     mx.random.seed(hp["seed"])
     rng = random.Random(hp["seed"])
@@ -1170,8 +1280,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     train_rows = [r for r in rows if r["split"] == "train"]
     val_rows = [r for r in rows if r["split"] == "val"]
     weights = class_weights(train_rows, questions) if hp["class_weighting"] == "balanced" else None
-    val_items, _ = encode_items(tok, cfg, val_rows, questions)
-    probe, skipped = encode_items(tok, cfg, train_rows, questions)
+    val_items, _ = encode(tok, cfg, val_rows, questions)
+    probe, skipped = encode(tok, cfg, train_rows, questions)
     if not probe:
         raise ValueError("No training decisions fit the model's token budget")
     model, cfg = load_training_model(base_dir, hp)
@@ -1250,9 +1360,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     for epoch in range(1, hp["epochs"] + 1):
         # upstream anneals the exploration noise from 0.4 to 0.1 across epochs
         sigma[0] = 0.4 + (0.1 - 0.4) * ((epoch - 1) / max(1, hp["epochs"] - 1))
-        items, _ = encode_items(
-            tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights
-        )
+        items, _ = encode(tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights)
         batches = make_batches(items, hp["batch_size"], rng)
         accum, count, running = None, 0, []
         for i, indices in enumerate(batches):
@@ -1303,14 +1411,20 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
 
     emit("phase", phase="calibrate", message="Fitting temperatures on validation logits")
     triples = evaluate_logits(model, val_items, tok.pad_token_id)
-    temperature, by_options, fitted = calibrate(triples, cfg)
-    calibration = {
-        "ece_uncalibrated": calibrated_ece(triples, [1.0, 1.0, 1.0], {}),
-        "ece_calibrated": calibrated_ece(triples, temperature, by_options),
-        "temperature": temperature,
-        "temperature_by_options": by_options,
-        "fitted_types": fitted,
-    }
+    if kind == "julia":
+        from . import julia
+
+        calibration = julia.fit_calibration(triples)
+        temperature, by_options = calibration["temperature"], {}
+    else:
+        temperature, by_options, fitted = calibrate(triples, cfg)
+        calibration = {
+            "ece_uncalibrated": calibrated_ece(triples, [1.0, 1.0, 1.0], {}),
+            "ece_calibrated": calibrated_ece(triples, temperature, by_options),
+            "temperature": temperature,
+            "temperature_by_options": by_options,
+            "fitted_types": fitted,
+        }
     emit("calibration", **calibration)
 
     emit("phase", phase="save", message="Merging adapters and writing the checkpoint")
@@ -1318,6 +1432,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "run_id": spec["run_id"],
         "base_model": spec["base_model"],
         "base_model_dir": str(base_dir),
+        "kind": kind,
         "dataset": spec["dataset"],
         "dataset_sha256": meta.get("sha256"),
         "hyperparameters": hp,
@@ -1325,6 +1440,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "total_params": total,
         "train_decisions": len(probe),
         "val_decisions": len(val_items),
+        "skipped_decisions": skipped,
         "updates": step,
         "best_epoch": best["epoch"],
         "best_val_loss": best["loss"],
@@ -1333,8 +1449,13 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
         "peak_memory_gb": round(mx.get_peak_memory() / 2**30, 2),
         "gradient_checkpointing": checkpoint,
         "calibration": calibration,
+        "backend": "mlx",
         "created": now(),
     }
+    if kind == "julia":
+        save_julia_checkpoint(model, base_dir, run_dir / "model", questions, summary)
+        write_json(run_dir / "training.json", summary)
+        return summary
     new_cfg = {**cfg, "temperature": temperature, "temperature_by_options": by_options}
     new_cfg["fine_tuned"] = {
         key: summary[key] for key in ("base_model", "dataset_sha256", "best_epoch", "created")
@@ -1347,12 +1468,17 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
 
 
 def train(spec, emit, workspace=WORKSPACE):
-    from . import runtime
+    from . import kinds, runtime
 
-    hp = {**HYPERPARAMETERS, **spec.get("hyperparameters", {})}
+    kind = model_kind(spec["base_model"], workspace)
+    hp = {**hyperparameters(kind), **spec.get("hyperparameters", {})}
     if spec.get("baseline", True):
         baseline(spec["base_model"], spec["dataset"], emit, workspace)
-    if runtime.backend() == "mlx":
+    if kind == kinds.DECIDER:
+        from .decider_engine import fit as decider_fit
+
+        decider_fit(spec, hp, emit, workspace)
+    elif runtime.backend() == "mlx":
         fit(spec, hp, emit, workspace)
     else:
         from .torch_engine import fit as torch_fit

@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import engine, noulxp_package
+from . import engine, kinds, noulxp_package
 from .account import Account
 from .bootstrap import DEFAULT_MODEL, Bootstrap
 from .examples import catalog
@@ -439,14 +439,15 @@ class Studio:
 
     def noulxp(self, run_id):
         """What the publish dialog needs: the run's package, and whether one can be built."""
-        listing = noulxp_package.listing(
-            self.workspace / "runs" / run_id, lambda p: shown_path(p, self.workspace.parent)
-        )
-        missing = noulxp_package.missing_tooling()
+        run_dir = self.workspace / "runs" / run_id
+        listing = noulxp_package.listing(run_dir, lambda p: shown_path(p, self.workspace.parent))
+        kind = kinds.detect(run_dir / "model") or "laya"
+        missing = noulxp_package.missing_tooling(kind)
         return {
             "package": listing if listing and listing.get("state") == "passed" else None,
             "last": listing,
-            "tooling": noulxp_package.tooling_message(missing) if missing else None,
+            "kind": kind,
+            "tooling": noulxp_package.tooling_message(missing, kind) if missing else None,
             "test_rows": noulxp_package.TEST_ROWS,
         }
 
@@ -501,15 +502,48 @@ class Studio:
         return sorted(out, key=lambda r: r["created"], reverse=True)
 
     def models(self):
+        from . import families
+
+        memory, accelerator = self._fit_inputs()
+        fit = {m["repo"].lower(): m for m in families.trainable(memory, accelerator)}
+
+        def assessed(repo, kind="laya"):
+            known = fit.get(repo.lower()) or {}
+            return {
+                "kind": known.get("kind") or kind,
+                "fit": known.get("fit"),
+                "needed_gb": known.get("needed_gb"),
+                "warnings": known.get("warnings") or [],
+            }
+
         base = [
             {
                 "ref": f"hub:{repo}",
                 "repo": repo,
                 "description": desc,
                 "cached": engine.hub_cached(repo),
+                **assessed(repo),
             }
             for repo, desc in engine.BASE_MODELS.items()
         ]
+        # Every other catalogue model the studio trains (Julia 1, Decider), downloaded or not:
+        # nothing is hidden, and one too big for this machine says so.
+        listed = {repo.lower() for repo in engine.BASE_MODELS}
+        for model in fit.values():
+            if model["repo"].lower() in listed:
+                continue
+            size = model["params_b"]
+            params = f"{size:.1f}B" if size >= 1 else f"{round(size * 1000)}M"
+            base.append(
+                {
+                    "ref": f"hub:{model['repo']}",
+                    "repo": model["repo"],
+                    "description": f"{model['maker']} · {kinds.NAME[model['kind']]} · {params}"
+                    + (f" · {model['note']}" if model.get("note") else ""),
+                    "cached": engine.hub_cached(model["repo"]),
+                    **assessed(model["repo"], model["kind"]),
+                }
+            )
         base += [
             {
                 "ref": f"hub:{repo}",
@@ -530,6 +564,8 @@ class Studio:
                 + ("" if entry.get("trainable") else " · this family trains in a later version"),
                 "cached": bool(entry.get("trainable")),
                 "imported": True,
+                "kind": entry.get("kind") or ("laya" if entry.get("trainable") else None),
+                "warnings": [],
             }
             for entry in families.imports(self.workspace)
         ]
@@ -537,6 +573,7 @@ class Studio:
             {
                 "ref": f"run:{r['id']}",
                 "name": r["name"],
+                "kind": r.get("kind") or "laya",
                 "base_model": r["base_model"],
                 "dataset": r["dataset"],
                 "dataset_name": r.get("dataset_name"),
@@ -565,8 +602,11 @@ class Studio:
                     model["size_bytes"] = dir_size(path)
                 except (FileNotFoundError, ValueError, OSError):
                     pass
+        from .export import KIND_TARGETS
+
         for model in tuned:
             model["size_bytes"] = dir_size(self.workspace / "runs" / model["ref"][4:] / "model")
+            model["targets"] = list(KIND_TARGETS.get(model["kind"], ()))
         return {"base": base, "finetuned": tuned, "exports": self.exports()}
 
     def _fit_inputs(self):
@@ -615,6 +655,7 @@ class Studio:
                 for k, v in self.examples.items()
             ],
             "hyperparameters": engine.HYPERPARAMETERS,
+            "hyperparameters_by_kind": {k: engine.hyperparameters(k) for k in kinds.KINDS},
         }
 
     # --- datasets
@@ -681,7 +722,17 @@ class Studio:
             model_dir = engine.resolve_model_ref(ref, self.workspace)
         except FileNotFoundError as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
-        report = engine.analyze_dataset(dataset_id, model_dir, self.workspace)
+        kind = kinds.detect(model_dir)
+        if kind == kinds.JULIA:
+            from . import julia
+
+            report = julia.analyze(dataset_id, model_dir, self.workspace)
+        elif kind == kinds.DECIDER:
+            from . import decider
+
+            report = decider.analyze(dataset_id, model_dir, self.workspace)
+        else:
+            report = engine.analyze_dataset(dataset_id, model_dir, self.workspace)
         report["model"] = ref
         engine.write_json(self.workspace / "datasets" / dataset_id / "analysis.json", report)
         return report
@@ -710,14 +761,17 @@ class Studio:
         stamp = time.strftime("%m%d-%H%M%S")
         if kind == "train":
             questions, _, meta = engine.load_dataset(body["dataset"], self.workspace)
-            engine.resolve_model_ref(body["base_model"], self.workspace)
-            hp = {
-                k: v
-                for k, v in (body.get("hyperparameters") or {}).items()
-                if k in engine.HYPERPARAMETERS
-            }
+            base_dir = engine.resolve_model_ref(body["base_model"], self.workspace)
+            model_kind = kinds.check(base_dir)
+            self.trainable(body["base_model"])
+            defaults = engine.hyperparameters(model_kind)
+            hp = {k: v for k, v in (body.get("hyperparameters") or {}).items() if k in defaults}
             try:
                 engine.check_lora_variants(hp)
+                if model_kind == kinds.DECIDER:
+                    from .decider_engine import check_hyperparameters
+
+                    check_hyperparameters({**defaults, **hp})
             except ValueError as error:
                 raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
             name = (body.get("name") or f"{meta['name']} · {hp.get('method', 'lora')}").strip()
@@ -737,7 +791,8 @@ class Studio:
                     "dataset": body["dataset"],
                     "dataset_name": meta["name"],
                     "base_model": body["base_model"],
-                    "hyperparameters": {**engine.HYPERPARAMETERS, **hp},
+                    "kind": model_kind,
+                    "hyperparameters": {**defaults, **hp},
                     "created": engine.now(),
                     "questions": list(questions),
                 },
@@ -757,12 +812,18 @@ class Studio:
                 f"Evaluate {body['model']}",
             )
         if kind == "export":
-            engine.resolve_model_ref(body["model"], self.workspace)
-            from .export import PRECISIONS
+            model_dir = engine.resolve_model_ref(body["model"], self.workspace)
+            from .export import PRECISIONS, targets_for
 
             target = body.get("target", "onnx")
             if target not in PRECISIONS:
                 raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown export target {target!r}")
+            allowed = targets_for(model_dir)
+            if target not in allowed:
+                raise ApiError(
+                    HTTPStatus.BAD_REQUEST,
+                    f"This model exports to {', '.join(allowed)}, not {target}",
+                )
             precision = body.get("precision", "float")
             if precision not in PRECISIONS[target]:
                 raise ApiError(
@@ -840,16 +901,32 @@ class Studio:
         """Refuse up front what a NoulXP build would refuse: not a run, a family without a
         NoulXP exporter, or a machine without the tooling."""
         try:
-            _, _, _, run = noulxp_package.locate(ref, self.workspace)
+            _, _, model_dir, run = noulxp_package.locate(ref, self.workspace)
         except ValueError as error:
             raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
-        family, entry = noulxp_package.support(run, self.workspace)
+        family, entry = noulxp_package.support(run, self.workspace, model_dir)
         skip = " Or publish without a NoulXP package." if publishing else ""
         if entry["status"] != "ready":
             raise ApiError(HTTPStatus.BAD_REQUEST, noulxp_package.refusal(family) + skip)
-        missing = noulxp_package.missing_tooling()
+        kind = kinds.detect(model_dir) or "laya"
+        missing = noulxp_package.missing_tooling(kind)
         if missing:
-            raise ApiError(HTTPStatus.CONFLICT, noulxp_package.tooling_message(missing) + skip)
+            raise ApiError(
+                HTTPStatus.CONFLICT, noulxp_package.tooling_message(missing, kind) + skip
+            )
+
+    def trainable(self, ref):
+        """Refuse a base model whose licence does not allow derivatives (families.py)."""
+        from . import families
+
+        repo = (
+            ref.split(":", 1)[1]
+            if ref.startswith("hub:")
+            else noulxp_package.base_model(ref, self.workspace)
+        )
+        known = families.find(repo or "")
+        if known and not families.trainer_status(known)["ready"]:
+            raise ApiError(HTTPStatus.BAD_REQUEST, families.trainer_status(known)["reason"])
 
     # --- runs
 
@@ -2263,21 +2340,40 @@ const PRESETS = {
   head: {title: "Head only", sub: "Freeze the encoder, train the decision head. Fastest, smallest gains.", hp: {method: "head"}},
   full: {title: "Full top layers", sub: "Unfreeze the top 4 encoder layers fully. More memory, lower learning rate.", hp: {method: "full", full_layers: 4, lr: 2.5e-5}},
 };
-async function viewTrain(_, params) {
-  if (!OV.datasets.length) { main.innerHTML = `<h1>Fine-tune</h1><div class="empty">Create a dataset first. <a href="#/datasets">Go to datasets</a></div>`; return; }
-  // Defaults follow the machine the studio is running on, not the one it was written on.
-  const tuned = OV.system.recommended || {};
-  const H = {...OV.hyperparameters, ...(tuned.batch_size ? {batch_size: tuned.batch_size} : {})};
-  const models = OV.models.concat(OV.finetuned.map(f => ({ref: f.ref, repo: f.name + " (fine-tuned)", description: "continue from " + modelName(f.base_model), cached: true})));
-  main.innerHTML = `
-  <h1>Fine-tune</h1>
-  <p class="lead">Adapts Laya to your questions and labels. The run first scores the base model on your test split, trains with early stopping on the validation split, re-fits confidence calibration, then scores the fine-tuned model on the same test split.</p>
-  <section class="card"><div class="grid two">
-    <div><label>Dataset</label><select id="trds">${OV.datasets.map(d => `<option value="${esc(d.id)}" ${params.get("dataset") === d.id ? "selected" : ""}>${esc(d.name)} — ${d.rows.train} train rows</option>`).join("")}</select></div>
-    <div><label>Base model</label><select id="trbase">${models.map(m => `<option value="${esc(m.ref)}" ${m.cached ? (params.get("base") === m.ref ? "selected" : "") : "disabled"}>${esc(m.repo)} ${m.cached ? "" : "(download in Models)"}</option>`).join("")}</select><div class="muted" id="trbasedesc" style="font-size:12px;margin-top:4px"></div></div>
-  </div>
-  <label>Recipe</label><div class="opt" id="presets">${Object.entries(PRESETS).map(([k, p], i) => `<div class="choice ${i ? "" : "on"}" data-p="${k}"><b>${esc(p.title)}</b><span>${esc(p.sub)}</span></div>`).join("")}</div>
-  <details><summary>Advanced settings</summary><div class="grid three" id="adv">
+// Each checkpoint kind trains with its own recipes (kinds.py): Julia 1 with Laya's, plus a full
+// fine-tune of its small encoder; Decider with LoRA on the attention and MLP projections.
+const KIND_PRESETS = {
+  laya: PRESETS,
+  julia: {
+    balanced: PRESETS.balanced,
+    full: {title: "Full fine-tune", sub: "Every encoder layer and the head train (Julia 1 is 144M parameters). Lower learning rate.", hp: {method: "full", full_layers: 22, lr: 3e-5}},
+    head: PRESETS.head,
+  },
+  decider: {
+    lora: {title: "LoRA", sub: "Decider v11's own recipe shape: LoRA on the attention and MLP projections, cross-entropy on the option letters.", hp: {method: "lora"}},
+    loraplus: {title: "LoRA+ ×4", sub: "The B matrices learn 4× faster: often better in few epochs.", hp: {method: "lora", loraplus_ratio: 4}},
+    qlora: {title: "QLoRA (4-bit)", sub: "The frozen base in 4 bits: about half the memory, a little slower. NVIDIA GPUs and Apple silicon.", hp: {method: "lora", quantization: "4bit"}},
+  },
+};
+const KIND_NAMES = {laya: "Laya", julia: "Julia 1", decider: "Decider"};
+function advancedFields(kind, H) {
+  const lora = `<div class="adv-group"><b>LoRA variants</b> <span class="muted">They combine freely, and all of them merge into the weights, so the exported model is the same size and speed.</span></div>
+    ${select("dora", "DoRA", String(H.dora), [["false", "off"], ["true", "on — learn each row's magnitude and direction apart"]])}
+    ${select("rslora", "Scaling", String(H.rslora), [["false", "alpha / rank (LoRA)"], ["true", "alpha / √rank (rsLoRA, for ranks above 16)"]])}
+    ${field("loraplus_ratio", "LoRA+ ratio: B learns this many × faster (1 = off, 2–4 at the default rate)", H.loraplus_ratio)}
+    <div id="lpwarn" style="grid-column:1/-1"></div>`;
+  if (kind === "decider") return `
+    ${field("epochs", "Epochs (max)", H.epochs)}${field("batch_size", "Rows per batch", H.batch_size)}${field("batch_tokens", "Tokens per batch", H.batch_tokens)}
+    ${field("grad_accum", "Gradient accumulation", H.grad_accum)}${field("lr", "LoRA learning rate", H.lr)}${field("patience", "Early-stop patience (epochs)", H.patience)}
+    ${field("lora_rank", "LoRA rank", H.lora_rank)}${field("lora_alpha", "LoRA alpha", H.lora_alpha)}${field("seed", "Seed", H.seed)}
+    ${field("max_train_options", "Options per training row (gold kept; 0 = all)", H.max_train_options)}${field("max_state_tokens", "State tokens read in training", H.max_state_tokens)}${field("lora_dropout", "LoRA dropout", H.lora_dropout)}
+    ${select("objective", "Objective", H.objective, [["ce", "ce — cross-entropy on the letters (Decider's own)"], ["proper", "proper — log + spherical scores"]])}
+    ${select("class_weighting", "Class weighting", H.class_weighting, [["none", "none"], ["balanced", "balanced (rare labels count more)"]])}
+    ${select("precision", "Frozen weights precision", H.precision, [["bfloat16", "bfloat16 (less memory)"], ["float32", "float32"]])}
+    ${select("quantization", "Frozen weights in 4 bits", H.quantization, [["none", "no (LoRA)"], ["4bit", "yes (QLoRA: NVIDIA or Apple silicon)"]])}
+    ${select("shuffle_options", "Shuffle choice options", String(H.shuffle_options), [["true", "yes — learn labels, not positions"], ["false", "no"]])}
+    ${lora}`;
+  return `
     ${field("epochs", "Epochs (max)", H.epochs)}${field("batch_size", "Batch size", H.batch_size)}${field("grad_accum", "Gradient accumulation", H.grad_accum)}
     ${field("lr", "Encoder / LoRA learning rate", H.lr)}${field("head_lr", "Head learning rate", H.head_lr)}${field("patience", "Early-stop patience (epochs)", H.patience)}
     ${field("lora_rank", "LoRA rank", H.lora_rank)}${field("lora_alpha", "LoRA alpha", H.lora_alpha)}${field("seed", "Seed", H.seed)}
@@ -2285,20 +2381,34 @@ async function viewTrain(_, params) {
     ${select("class_weighting", "Class weighting", H.class_weighting, [["none", "none"], ["balanced", "balanced (rare labels count more)"]])}
     ${select("precision", "Frozen weights precision", H.precision, [["bfloat16", "bfloat16 (less memory)"], ["float32", "float32"]])}
     ${select("shuffle_options", "Shuffle choice options", String(H.shuffle_options), [["true", "yes — learn labels, not positions"], ["false", "no"]])}
-    <div class="adv-group"><b>LoRA variants</b> <span class="muted">Used by the Balanced and Fast recipes. They combine freely, and all of them merge into the weights, so the exported model is the same size and speed.</span></div>
-    ${select("dora", "DoRA", String(H.dora), [["false", "off"], ["true", "on — learn each row's magnitude and direction apart"]])}
-    ${select("rslora", "Scaling", String(H.rslora), [["false", "alpha / rank (LoRA)"], ["true", "alpha / √rank (rsLoRA, for ranks above 16)"]])}
-    ${field("loraplus_ratio", "LoRA+ ratio: B learns this many × faster (1 = off, 2–4 at the default rate)", H.loraplus_ratio)}
-    <div id="lpwarn" style="grid-column:1/-1"></div>
-  </div></details>
+    ${lora}`;
+}
+async function viewTrain(_, params) {
+  if (!OV.datasets.length) { main.innerHTML = `<h1>Fine-tune</h1><div class="empty">Create a dataset first. <a href="#/datasets">Go to datasets</a></div>`; return; }
+  // Defaults follow the machine the studio is running on, not the one it was written on.
+  const tuned = OV.system.recommended || {};
+  const byKind = OV.hyperparameters_by_kind || {laya: OV.hyperparameters};
+  const defaults = kind => ({...(byKind[kind] || OV.hyperparameters), ...(kind !== "decider" && tuned.batch_size ? {batch_size: tuned.batch_size} : {})});
+  // Every base the studio trains, downloaded or not, too big or not: nothing is hidden.
+  const models = OV.models.filter(m => m.kind).concat(OV.finetuned.map(f => ({ref: f.ref, repo: f.name + " (fine-tuned)", description: "continue from " + modelName(f.base_model), cached: true, kind: f.kind || "laya", warnings: []})));
+  const wanted = params.get("base");
+  const first = models.find(m => m.ref === wanted && m.cached) || models.find(m => m.cached) || models[0];
+  const fitTag = m => m.fit === "too-big" ? " · too big here" : m.fit === "qlora" ? " · 4-bit QLoRA here" : "";
+  main.innerHTML = `
+  <h1>Fine-tune</h1>
+  <p class="lead">Adapts a System One model (Laya, Julia 1 or Decider) to your questions and labels, in its own prompt format. The run first scores the base model on your test split, trains with early stopping on the validation split, re-fits confidence calibration, then scores the fine-tuned model on the same test split.</p>
+  <section class="card"><div class="grid two">
+    <div><label>Dataset</label><select id="trds">${OV.datasets.map(d => `<option value="${esc(d.id)}" ${params.get("dataset") === d.id ? "selected" : ""}>${esc(d.name)} — ${d.rows.train} train rows</option>`).join("")}</select></div>
+    <div><label>Base model</label><select id="trbase">${models.map(m => `<option value="${esc(m.ref)}" ${m.cached ? "" : "disabled"} ${first && m.ref === first.ref ? "selected" : ""}>${esc(m.repo)}${m.kind ? " · " + esc(KIND_NAMES[m.kind] || m.kind) : ""}${esc(fitTag(m))}${m.cached ? "" : " (download in Models)"}</option>`).join("")}</select><div class="muted" id="trbasedesc" style="font-size:12px;margin-top:4px"></div><div id="trbasewarn"></div></div>
+  </div>
+  <label>Recipe</label><div class="opt" id="presets"></div>
+  <details><summary>Advanced settings</summary><div class="grid three" id="adv"></div></details>
   <div class="grid two" style="margin-top:6px"><div><label>Run name (optional)</label><input type="text" id="trname" placeholder="auto"></div>
   <div><label>&nbsp;</label><label style="display:flex;gap:8px;align-items:center;color:var(--ink);font-weight:450"><input type="checkbox" id="trbl" checked> Evaluate the base model first (cached after the first run)</label></div></div>
   <div class="row" style="margin-top:16px"><button class="btn primary" id="trgo">Start fine-tuning</button><span class="muted" id="trmsg"></span></div>
   </section>
-  <section class="card"><h2>What to expect on this machine</h2><p class="muted" style="margin:0">${esc(machineName(OV.system))}, training with ${esc(trainsOn(OV.system))}.${tuned.note ? " " + esc(tuned.note) : ""}${OV.system.note ? " " + esc(OV.system.note) : ""} For scale: on a 16 GB Apple M4 with MLX, the balanced recipe trains the 421M English model at about 7 decisions per second (roughly 10 minutes for 1,000 examples × 4 epochs) with a peak under 3 GB of GPU memory, and the 322M multilingual model is lighter. Training pauses the playground and the arena so the job has the machine to itself.</p></section>`;
-  let preset = "balanced";
-  $$("#presets .choice").forEach(c => c.onclick = () => { $$("#presets .choice").forEach(x => x.classList.remove("on")); c.classList.add("on"); preset = c.dataset.p;
-    const lr = PRESETS[preset].hp.lr; $("#hp-lr").value = lr ?? H.lr; loraWarnings(); });
+  <section class="card"><h2>What to expect on this machine</h2><p class="muted" style="margin:0">${esc(machineName(OV.system))}, training with ${esc(trainsOn(OV.system))}.${tuned.note ? " " + esc(tuned.note) : ""}${OV.system.note ? " " + esc(OV.system.note) : ""} For scale: on a 16 GB Apple M4 with MLX, the balanced recipe trains the 421M English Laya at about 7 decisions per second (roughly 10 minutes for 1,000 examples × 4 epochs) with a peak under 3 GB of GPU memory. Julia 1 (144M) is lighter still. Decider (1.9B) wants a GPU with about 10 GB for LoRA, or 4-bit QLoRA below that. Training pauses the playground and the arena so the job has the machine to itself.</p></section>`;
+  let preset = null, kind = null, H = null;
   // Measured on Laya: LoRA+ with B at 8e-4 trained well; at 3.2e-3 it collapsed to chance.
   const loraWarnings = () => {
     const rate = Number($("#hp-lr").value), ratio = Number($("#hp-loraplus_ratio").value || 1);
@@ -2308,16 +2418,38 @@ async function viewTrain(_, params) {
     if ($("#hp-rslora").value === "true" && rank <= 16) notes.push(`rsLoRA makes the update √${rank} = ${Math.sqrt(rank).toFixed(1)}× stronger at rank ${rank}. It is for higher ranks; at rank ${rank}, alpha ${Math.round(alpha / Math.sqrt(rank))} gives the same strength as plain LoRA.`);
     $("#lpwarn").innerHTML = notes.map(n => `<div class="notice warn">${esc(n)}</div>`).join("");
   };
-  ["lr", "loraplus_ratio", "rslora", "lora_rank", "lora_alpha"].forEach(k => { const el = $("#hp-" + k); el.oninput = el.onchange = loraWarnings; });
-  loraWarnings();
-  const desc = () => { const m = models.find(x => x.ref === $("#trbase").value); $("#trbasedesc").textContent = m ? m.description : ""; };
+  const choose = key => {
+    preset = key;
+    $$("#presets .choice").forEach(x => x.classList.toggle("on", x.dataset.p === key));
+    const recipe = KIND_PRESETS[kind][key].hp;
+    $("#hp-lr").value = recipe.lr ?? H.lr;
+    if ($("#hp-loraplus_ratio")) $("#hp-loraplus_ratio").value = recipe.loraplus_ratio ?? H.loraplus_ratio;
+    if ($("#hp-quantization")) $("#hp-quantization").value = recipe.quantization ?? H.quantization;
+    loraWarnings();
+  };
+  const setKind = next => {
+    if (next === kind) return;
+    kind = next; H = defaults(kind);
+    const presets = KIND_PRESETS[kind] || PRESETS;
+    $("#presets").innerHTML = Object.entries(presets).map(([k, p]) => `<div class="choice" data-p="${k}"><b>${esc(p.title)}</b><span>${esc(p.sub)}</span></div>`).join("");
+    $("#adv").innerHTML = advancedFields(kind, H);
+    $$("#presets .choice").forEach(c => c.onclick = () => choose(c.dataset.p));
+    ["lr", "loraplus_ratio", "rslora", "lora_rank", "lora_alpha"].forEach(k => { const el = $("#hp-" + k); if (el) el.oninput = el.onchange = loraWarnings; });
+    choose(Object.keys(presets)[0]);
+  };
+  const desc = () => {
+    const m = models.find(x => x.ref === $("#trbase").value);
+    $("#trbasedesc").textContent = m ? m.description : "";
+    $("#trbasewarn").innerHTML = m && m.warnings && m.warnings.length ? `<ul class="warnlist">${m.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : "";
+    setKind((m && m.kind) || "laya");
+  };
   $("#trbase").onchange = desc; desc();
   $("#trgo").onclick = async () => {
     // Advanced fields hold every value (the recipe mirrors its learning rate into them);
     // the recipe then fixes the method and which layers adapt.
     const hp = {};
     $$("#adv [data-hp]").forEach(i => { let v = i.value; if (i.type === "number") v = Number(v); if (v === "true") v = true; if (v === "false") v = false; hp[i.dataset.hp] = v; });
-    const {lr, ...fixed} = PRESETS[preset].hp; Object.assign(hp, fixed);
+    const {lr, loraplus_ratio, quantization, ...fixed} = KIND_PRESETS[kind][preset].hp; Object.assign(hp, fixed);
     $("#trgo").disabled = true; $("#trmsg").textContent = "Starting…";
     try {
       const r = await api("/api/jobs", {method: "POST", body: {kind: "train", dataset: $("#trds").value, base_model: $("#trbase").value, name: $("#trname").value, baseline: $("#trbl").checked, hyperparameters: hp}});
@@ -2649,8 +2781,9 @@ function answerCard(q, a, def) {
 }
 
 // ------------------------------------------------------------------ models
-const EXPORT_FORMATS = [["onnx:float", "ONNX · float"], ["onnx:int8", "ONNX · int8"], ["onnx:int4", "ONNX · int4"], ["coreml:float", "Core ML · float"], ["coreml:int8", "Core ML · int8"], ["coreml:int4", "Core ML · int4"], ["noulxp:float", "NoulXP package · checked"]];
-function exportOptions() { return EXPORT_FORMATS.map(([v, t]) => `<option value="${v}">${t}</option>`).join(""); }
+const EXPORT_FORMATS = [["onnx:float", "ONNX · float"], ["onnx:int8", "ONNX · int8"], ["onnx:int4", "ONNX · int4"], ["coreml:float", "Core ML · float"], ["coreml:int8", "Core ML · int8"], ["coreml:int4", "Core ML · int4"], ["gguf:bf16", "GGUF · bf16 (llama.cpp)"], ["gguf:q8_0", "GGUF · q8_0 (llama.cpp)"], ["mlx:int4", "MLX-LM · int4"], ["mlx:int8", "MLX-LM · int8"], ["noulxp:float", "NoulXP package · checked"]];
+// The formats a model's kind exports to (server: export.KIND_TARGETS).
+function exportOptions(targets) { return EXPORT_FORMATS.filter(([v]) => !targets || targets.includes(v.split(":")[0])).map(([v, t]) => `<option value="${v}">${t}</option>`).join(""); }
 async function startExport(ref, format) {
   const [target, precision] = format.split(":");
   try { const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: ref, target, precision}}); location.hash = "#/jobs/" + job.id; }
@@ -2687,7 +2820,7 @@ function startPublish(ref) {
   });
 }
 function exportLabel(x) {
-  return ({onnx: "ONNX", coreml: "Core ML", noulxp: "NoulXP"}[x.target] || String(x.target).toUpperCase()) + (x.precision && x.precision !== "float" ? " · " + x.precision : "");
+  return ({onnx: "ONNX", coreml: "Core ML", noulxp: "NoulXP", gguf: "GGUF", mlx: "MLX-LM"}[x.target] || String(x.target).toUpperCase()) + (x.precision && x.precision !== "float" ? " · " + x.precision : "");
 }
 function dpText(v) { return v == null ? "–" : Number(v).toExponential(1); }
 function leftOut(x) {
@@ -2733,7 +2866,7 @@ async function viewModels(_, __, token) {
     "not-trainable": pill("", "no weights"),
     "unknown": pill("", "unknown"),
   }[m.fit] || "");
-  const trainerPill = t => t === "ready" ? pill("done", "trains here") : t === "next" ? pill("running", "trainer coming next") : pill("", "trainer planned");
+  const trainerPill = t => t === "ready" ? pill("done", "trains here") : t === "partial" ? pill("done", "some train here") : t === "next" ? pill("running", "trainer coming next") : pill("", "trainer planned");
   const noulxpPill = n => !n ? "" : n.status === "ready" ? pill("done", "NoulXP: " + n.profile) : n.status === "trainer" ? pill("", "NoulXP with its trainer") : pill("", "no NoulXP profile yet");
   const gb = n => n == null ? "–" : `${n} GB`;
   const params = b => b >= 1 ? `${b.toFixed(b >= 10 ? 0 : 1)}B` : b >= 0.001 ? `${Math.round(b * 1000)}M` : `${Math.round(b * 1e6)}K`;
@@ -2759,7 +2892,7 @@ async function viewModels(_, __, token) {
   </section>
   <section class="section">
     <div class="section-head"><h2>Format and portability</h2></div>
-    <p class="hint">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. Exports add ONNX and Core ML in float, int8 or int4, and a NoulXP package: the open standard's ONNX package with a conformance file of the fine-tune's own answers, checked on the CPU and kept with the run, which publishes it so systemonemodels.tech can check it for NoulXP compatibility.</p>
+    <p class="hint">Every fine-tune keeps its maker's own files, so it loads where the base model loads. A <b>Laya</b> checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance); it loads in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package everywhere else, and exports to ONNX and Core ML in float, int8 or int4. A <b>Julia 1</b> checkpoint is Supersonic Labs' layout (<code>julia_config.json</code>, <code>inference-policy.json</code>, float32 weights with the fitted temperature folded into the scorer). A <b>Decider</b> checkpoint is Mapika's (merged bfloat16 safetensors, <code>decider_config.json</code> with the fitted temperatures, <code>decider/</code> code) and exports to GGUF through a pinned llama.cpp and to MLX-LM in int4 or int8. All three get a NoulXP package: the open standard's package with a conformance file of the fine-tune's own answers, checked on the CPU and kept with the run, which publishes it so systemonemodels.tech can check it for NoulXP compatibility.</p>
   </section>`;
 
   const bindDownloads = root => $$("[data-dl]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
@@ -2792,7 +2925,7 @@ async function viewModels(_, __, token) {
         <div class="mrow-score">${f.accuracy != null ? `<b>${pct(f.accuracy)}</b> ${delta(f.baseline_accuracy, f.accuracy)}<span class="faint">test accuracy${f.baseline_accuracy != null ? ", base " + pct(f.baseline_accuracy) : ""}</span>` : `<span class="faint">not measured</span>`}</div>
         <div class="mrow-actions">
           <a class="btn small" href="#/playground?run=${esc(encodeURIComponent(id))}">Try in playground</a>
-          <span class="joined"><select aria-label="Export format" data-fmt="${esc(f.ref)}">${exportOptions()}</select><button class="btn small" type="button" data-export="${esc(f.ref)}">Export</button></span>
+          <span class="joined"><select aria-label="Export format" data-fmt="${esc(f.ref)}">${exportOptions(f.targets)}</select><button class="btn small" type="button" data-export="${esc(f.ref)}">Export</button></span>
           <button class="btn small" type="button" data-publish="${esc(f.ref)}" title="Push this checkpoint and its measured numbers to systemonemodels.tech">Publish to System One</button>
         </div>
         ${exportsOf(f.ref)}
@@ -2814,8 +2947,9 @@ async function viewModels(_, __, token) {
         <div class="rowi-main">
           <span class="rowi-name">${hub ? `<a class="mono-name" href="https://huggingface.co/${esc(repo)}" target="_blank" rel="noreferrer">${esc(repo)}</a>` : `<span class="mono-name">${esc(repo)}</span>`} ${tag}</span>
           <span class="rowi-sub">${esc(m.description)}</span>
+          ${warnings(m.warnings)}
         </div>
-        <div class="mrow-score">${m.cached ? `${pill("done", m.imported ? "ready" : "downloaded")}<span class="faint">${m.size_bytes ? bytes(m.size_bytes) + " on disk" : ""}</span>` : pill("", m.imported ? "not trainable yet" : "not downloaded")}</div>
+        <div class="mrow-score">${m.cached ? `${pill("done", m.imported ? "ready" : "downloaded")}<span class="faint">${m.size_bytes ? bytes(m.size_bytes) + " on disk" : ""}</span>` : pill("", m.imported ? "not trainable yet" : "not downloaded")}${m.fit && m.fit !== "fits" ? fitPill(m) : ""}</div>
         <div class="mrow-actions">${m.cached
           ? `<a class="btn small" href="#/playground?models=${esc(encodeURIComponent(m.ref))}">Try in playground</a><a class="btn small" href="#/train?base=${esc(encodeURIComponent(m.ref))}">Fine-tune from it</a>`
           : !m.demo && !m.imported ? `<button class="btn small primary" type="button" data-dl="${esc(repo)}">Download</button>` : ""}</div>
@@ -2842,7 +2976,7 @@ async function viewModels(_, __, token) {
         ${f.models.map(x => `<tr><td><a class="mono" href="https://huggingface.co/${esc(x.repo)}" target="_blank" rel="noreferrer">${esc(x.repo)}</a>${x.note ? `<div class="faint small">${esc(x.note)}</div>` : ""}${warnings(x.warnings)}</td>
           <td>${esc(x.maker)}</td><td>${x.params_b ? params(x.params_b) : "–"}</td><td>${esc(x.licence)}</td>
           <td>${gb(x.needed_gb && x.needed_gb.lora)}${x.needed_gb && x.needed_gb.qlora ? `<div class="faint small">${gb(x.needed_gb.qlora)} QLoRA</div>` : ""}</td>
-          <td>${fitPill(x)}</td>
+          <td>${fitPill(x)}${x.trains_here ? `<div style="margin-top:4px">${pill("done", "trains here")}</div>` : ""}</td>
           <td>${x.fit === "not-trainable" ? "" : x.downloaded ? pill("done", "downloaded") : `<button class="btn small" type="button" data-dl="${esc(x.repo)}">Download</button>`}</td></tr>`).join("")}
         </table></div></div></details>`;
       }).join("") +

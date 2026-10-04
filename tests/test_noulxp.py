@@ -149,24 +149,31 @@ def fake_systemone(tmp_path):
 def test_every_family_says_where_noulxp_stands():
     assert set(families.NOULXP) == set(families.FAMILIES)
     ready = [k for k, v in families.NOULXP.items() if v["status"] == "ready"]
-    assert ready == ["laya"] and families.NOULXP["laya"]["profile"] == "encoder-markers"
+    assert ready == ["laya", "letter"]
+    assert families.NOULXP["laya"]["profile"] == "encoder-markers"
     assert families.NOULXP["letter"]["profile"] == "causal-letters"
     assert families.NOULXP["crossenc"]["profile"] == "encoder-pairs"
     for key in ("head", "gliner", "embedder", "tiny"):
         assert families.NOULXP[key]["profile"] is None
         assert "profile first" in noulxp_package.refusal(key)
-    for key in ("letter", "crossenc"):
-        assert "arrives with the trainer" in noulxp_package.refusal(key)
+    assert "arrives with the trainer" in noulxp_package.refusal("crossenc")
     assert all("noulxp" in f for f in families.catalogue()["families"])
 
 
-def test_a_family_without_noulxp_export_is_refused(tmp_path):
+def test_a_run_is_packaged_as_what_its_checkpoint_is(tmp_path):
+    """The checkpoint's own files decide the profile, not the catalogue entry of its base:
+    a Laya checkpoint is encoder-markers whatever its run.json says."""
     workspace = make_workspace(tmp_path, base_model="hub:Mapika/decider-2b")
-    with pytest.raises(ValueError, match="arrives with the trainer"):
-        export(f"run:{RUN}", "noulxp", workspace)
-    assert not (workspace / "runs" / RUN / noulxp_package.PACKAGE).exists()
+    run_dir = workspace / "runs" / RUN
+    run = engine.read_json(run_dir / "run.json")
+    assert noulxp_package.support(run, workspace, run_dir / "model") == (
+        "laya",
+        {**families.NOULXP["laya"], "profile": "encoder-markers", "status": "ready"},
+    )
+    # Without a checkpoint to read, the catalogue decides (Decider: causal-letters).
+    assert noulxp_package.support(run, workspace)[1]["profile"] == "causal-letters"
     with pytest.raises(ValueError, match="fine-tuned runs"):
-        export(f"path:{workspace / 'runs' / RUN / 'model'}", "noulxp", workspace)
+        export(f"path:{run_dir / 'model'}", "noulxp", workspace)
 
 
 def test_own_requests_follow_the_package_limits():
@@ -288,7 +295,7 @@ def test_a_failing_package_is_kept_apart_and_never_published(built, tmp_path, mo
     passing = source / "runs" / RUN / noulxp_package.PACKAGE
 
     # Skip the slow graph export: the files it wrote last time are the same files.
-    def export_package(model_dir, out_dir, name, src, emit):
+    def export_package(model_dir, out_dir, name, src, emit, *_, **__):
         out_dir.mkdir()
         for path in passing.iterdir():
             if path.name not in ("conformance.jsonl", "check-cpu.json"):
@@ -297,8 +304,8 @@ def test_a_failing_package_is_kept_apart_and_never_published(built, tmp_path, mo
     # Record the conformance file for real, then falsify one expected answer, hash and all.
     real_record = noulxp_package.record_conformance
 
-    def record_conformance(package_dir, checkpoint, requests, emit):
-        real_record(package_dir, checkpoint, requests, emit)
+    def record_conformance(package_dir, checkpoint, requests, emit, **kwargs):
+        real_record(package_dir, checkpoint, requests, emit, **kwargs)
         path = package_dir / "conformance.jsonl"
         cases = [json.loads(line) for line in path.read_text().splitlines()]
         expected = next(iter(cases[0]["expected"].values()))["probabilities"]
@@ -403,7 +410,9 @@ def test_paths_in_the_package_stay_inside_it():
 
 @pytest.fixture
 def no_tooling(monkeypatch):
-    monkeypatch.setattr(noulxp_package, "missing_tooling", lambda: "noulxp is not installed")
+    monkeypatch.setattr(
+        noulxp_package, "missing_tooling", lambda kind="laya": "noulxp is not installed"
+    )
 
 
 def test_missing_tooling_is_explained(tmp_path, no_tooling):
@@ -468,7 +477,9 @@ def test_the_api_explains_noulxp_before_starting_a_job(studio, tmp_path, monkeyp
     )
     assert status == 400 and "float" in body["error"]
 
-    monkeypatch.setattr(noulxp_package, "missing_tooling", lambda: "noulxp is not installed")
+    monkeypatch.setattr(
+        noulxp_package, "missing_tooling", lambda kind="laya": "noulxp is not installed"
+    )
     status, body = call(
         base, "/api/jobs", {"kind": "export", "model": f"run:{RUN}", "target": "noulxp"}
     )
@@ -479,11 +490,16 @@ def test_the_api_explains_noulxp_before_starting_a_job(studio, tmp_path, monkeyp
     assert call(base, "/api/jobs")[1]["count"] == 0  # nothing was started
 
 
-def test_the_api_refuses_noulxp_for_a_family_without_it(studio, tmp_path, monkeypatch):  # noqa: F811
+def test_the_api_refuses_exports_a_kind_does_not_have(studio, tmp_path, monkeypatch):  # noqa: F811
+    """A Laya fine-tune has no GGUF; the API says which exports it has, and starts nothing."""
     base, app = studio
     no_jobs(app, monkeypatch)
-    make_workspace(tmp_path, base_model="hub:Mapika/decider-2b")
+    make_workspace(tmp_path)
     status, body = call(
-        base, "/api/jobs", {"kind": "export", "model": f"run:{RUN}", "target": "noulxp"}
+        base,
+        "/api/jobs",
+        {"kind": "export", "model": f"run:{RUN}", "target": "gguf", "precision": "bf16"},
     )
-    assert status == 400 and "arrives with the trainer" in body["error"]
+    assert status == 400 and "onnx, coreml, noulxp" in body["error"]
+    status, library = call(base, "/api/models")
+    assert library["finetuned"] == [] or library["finetuned"][0]["targets"]

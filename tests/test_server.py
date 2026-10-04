@@ -54,7 +54,14 @@ def test_page_and_state(studio):
     assert "@import" not in page and "fonts.googleapis" not in page
     status, state = call(base, "/api/state")
     assert status == 200 and state["datasets"] == []
-    assert len([m for m in state["models"] if not m.get("demo")]) == len(engine.BASE_MODELS)
+    # The base models: Laya's own, and every other catalogue model the studio trains.
+    from layastudio import families
+
+    others = [m for m in families.trainable() if m["repo"] not in engine.BASE_MODELS]
+    bases = [m for m in state["models"] if not m.get("demo")]
+    assert len(bases) == len(engine.BASE_MODELS) + len(others)
+    assert {m["kind"] for m in bases} == {"laya", "julia", "decider"}
+    assert set(state["hyperparameters_by_kind"]) == {"laya", "julia", "decider"}
     assert state["system"]["setup"]["state"] in ("ready", "failed")
     assert state["system"]["chip"]
 

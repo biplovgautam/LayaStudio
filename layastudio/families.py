@@ -10,27 +10,36 @@ Nothing is hidden. A model that will not fit gets a warning that says so and wha
 do — a bigger GPU, 4-bit QLoRA, or the cloud studio — and a model whose licence limits
 what may be done with a fine-tune says that too.
 
-Sources: each model's Hugging Face card and API record, surveyed 2026-09-26.
+A family is a way of building a model; whether one model trains here depends on whether the
+studio has a trainer for its checkpoint format (its `kind`, kinds.py) and whether its licence
+allows derivatives. Today: Laya and Julia 1 (laya family), and Decider (letter family).
+
+Sources: each model's Hugging Face card and API record, surveyed 2026-09-26; Julia 1 and the
+Decider sizes re-read on 2026-10-04.
 """
 
 from dataclasses import asdict, dataclass, field
 
 CLOUD_STUDIO = "https://studio.systemonemodels.tech"
 
-# trainer: ready (train it here today) | next (being built) | planned (import works; training later)
+# trainer: ready (every model with weights and a licence that allows it trains here) |
+# partial (some models train here today, the others' trainers come later) |
+# next (being built) | planned (import works; training later)
 FAMILIES = {
     "laya": {
         "name": "Encoder + option-marker head (Laya style)",
         "how": "One [MASK] per option in a bidirectional encoder; a small head scores the markers. "
-        "LoRA on the encoder (optionally DoRA, rsLoRA or LoRA+), the head trained in full.",
-        "trainer": "ready",
+        "LoRA on the encoder (optionally DoRA, rsLoRA or LoRA+), the head trained in full. Laya "
+        "and Julia 1 train here, each in its own prompt and checkpoint format.",
+        "trainer": "partial",
         "backends": "MLX on Apple silicon; PyTorch on NVIDIA, AMD, Intel or CPU",
     },
     "letter": {
         "name": "Decoder, letter readout (Jev / SemIf style)",
         "how": "Options are lettered in the prompt; the answer is the softmax over the next-token "
-        "logits of those letters. LoRA (or 4-bit QLoRA) with cross-entropy over the letters.",
-        "trainer": "next",
+        "logits of those letters. LoRA with cross-entropy over the letters. Decider trains here "
+        "in its own prompt; the other models' prompt formats come next.",
+        "trainer": "partial",
         "backends": "PyTorch + PEFT on NVIDIA, AMD, Intel or CPU; MLX-LM on Apple silicon",
     },
     "crossenc": {
@@ -77,14 +86,15 @@ NOULXP = {
     "laya": {
         "profile": "encoder-markers",
         "status": "ready",
-        "note": "Every fine-tune is exported with noulxp export laya (noulxp 0.4), checked on "
-        "the CPU and published with its package.",
+        "note": "Laya and Julia 1 fine-tunes are exported with noulxp export laya or julia "
+        "(noulxp 0.4), checked on the CPU and published with their package.",
     },
     "letter": {
         "profile": "causal-letters",
-        "status": "trainer",
-        "note": "noulxp 0.4 exports Decider and AnyJev checkpoints; the exporters for this "
-        "family's fine-tunes come with its trainer.",
+        "status": "ready",
+        "note": "Decider fine-tunes are exported with noulxp export decider (noulxp 0.4) from a "
+        "GGUF the studio converts with a pinned llama.cpp, checked on the CPU and published with "
+        "their package. The other letter models' exporters come with their trainers.",
     },
     "crossenc": {
         "profile": "encoder-pairs",
@@ -123,6 +133,23 @@ LICENCE_NOTE = {
     "closed": "No weights are published: this model can only be called through its API.",
 }
 
+# What each licence kind lets the studio do with a fine-tune. A model trains here only when its
+# licence allows derivatives, and a fine-tune is offered for publishing only when its licence
+# allows sharing them. Non-commercial fine-tunes stay private: systemonemodels.tech also sells
+# hosted inference, and publishing there is not clearly non-commercial use.
+LICENCE_POLICY = {
+    "open": {"train": True, "publish": True},
+    "sharealike": {"train": True, "publish": True},
+    "noncommercial": {"train": True, "publish": False},
+    "none": {"train": False, "publish": False},
+    "closed": {"train": False, "publish": False},
+}
+
+
+def licence_allows(licence_kind, action):
+    """Whether a licence kind allows `action` ("train" or "publish") on a derivative."""
+    return bool(LICENCE_POLICY.get(licence_kind, {}).get(action))
+
 
 @dataclass
 class CatalogModel:
@@ -135,6 +162,8 @@ class CatalogModel:
     registry: str | None = None  # namespace/name on systemonemodels.tech
     note: str = ""
     aliases: list[str] = field(default_factory=list)
+    # The checkpoint format the studio trains (kinds.py), or None while its trainer is missing.
+    kind: str | None = None
 
 
 CATALOG = [
@@ -148,6 +177,7 @@ CATALOG = [
         "open",
         "convai-innovations/laya",
         "English base; the multilingual (322M) and typed-decisions checkpoints are subfolders.",
+        kind="laya",
     ),
     CatalogModel(
         "aac6fef/laya-mlx",
@@ -158,6 +188,7 @@ CATALOG = [
         "open",
         "aac6fef/laya-mlx",
         "MLX port of Laya.",
+        kind="laya",
     ),
     CatalogModel(
         "aac6fef/laya-multilingual-mlx",
@@ -168,6 +199,7 @@ CATALOG = [
         "open",
         "aac6fef/laya-multilingual-mlx",
         "MLX port of the multilingual checkpoint.",
+        kind="laya",
     ),
     CatalogModel(
         "aac6fef/laya-typed-decisions-mlx",
@@ -178,6 +210,20 @@ CATALOG = [
         "open",
         None,
         "MLX port of the typed-decisions checkpoint.",
+        kind="laya",
+    ),
+    CatalogModel(
+        "SupersonicLabs/Julia-1",
+        "Supersonic Labs",
+        "laya",
+        0.144,
+        "apache-2.0",
+        "open",
+        "supersonic-labs/julia-1",
+        "mmBERT-small with Laya's decision head; its own prompt (options are their descriptions), "
+        "8,192 tokens, float32 weights. Trains here; the maker publishes no trainer.",
+        ["supersoniclabs/julia-1"],
+        kind="julia",
     ),
     CatalogModel(
         "wfzyx/von",
@@ -227,11 +273,17 @@ CATALOG = [
         "apache-2.0",
         "open",
         "mapika/decider",
-        "Several answer slots per prompt.",
+        "Qwen3.5-2B with letter readout, isolated score levels; trains here with LoRA in its own "
+        "plain layout.",
         ["mapika/decider-2b"],
+        kind="decider",
     ),
-    CatalogModel("Mapika/decider-0.8b", "mapika", "letter", 0.8, "apache-2.0", "open"),
-    CatalogModel("Mapika/decider-4b", "mapika", "letter", 4.0, "apache-2.0", "open"),
+    CatalogModel(
+        "Mapika/decider-0.8b", "mapika", "letter", 0.8, "apache-2.0", "open", kind="decider"
+    ),
+    CatalogModel(
+        "Mapika/decider-4b", "mapika", "letter", 4.0, "apache-2.0", "open", kind="decider"
+    ),
     CatalogModel(
         "alibiserikbay/JevK5",
         "alibi-serikbay",
@@ -435,26 +487,58 @@ def memory_needed_gb(model: CatalogModel) -> dict:
     return {"lora": round(p * 2.2 + 6, 1), "qlora": round(p * 0.75 + 5, 1)}
 
 
+# The checkpoint kinds whose trainer can hold the frozen base in 4 bits (QLoRA, CUDA only).
+QLORA_KINDS = {"decider"}
+
+
+def trainer_status(model: CatalogModel) -> dict:
+    """Whether the studio trains this model today, and if not, why: {"ready", "reason"}."""
+    if model.licence_kind == "closed":
+        return {"ready": False, "reason": "No weights are published."}
+    if not licence_allows(model.licence_kind, "train"):
+        return {
+            "ready": False,
+            "reason": "Its licence does not allow derivatives, so the studio does not train it.",
+        }
+    if model.kind is None:
+        family = FAMILIES[model.family]["trainer"]
+        when = "being built next" if family in ("next", "partial") else "planned"
+        return {
+            "ready": False,
+            "reason": f"Import works now; a trainer for this model's own format is {when}.",
+        }
+    return {"ready": True, "reason": ""}
+
+
 def assess(model: CatalogModel, training_memory_gb: float | None, accelerator: str | None) -> dict:
     """What this machine can do with this model: fits, tight, too-big, or not-trainable, and why."""
-    family = FAMILIES[model.family]
     needed = memory_needed_gb(model)
+    status = trainer_status(model)
     warnings = []
     if model.licence_kind in LICENCE_NOTE:
         warnings.append(LICENCE_NOTE[model.licence_kind])
     if model.licence_kind == "closed":
-        return {"fit": "not-trainable", "needed_gb": needed, "warnings": warnings}
+        return {
+            "fit": "not-trainable",
+            "needed_gb": needed,
+            "warnings": warnings,
+            "trains_here": False,
+            "publishable": False,
+        }
+    # 4-bit QLoRA is offered where the model's trainer has it; a model without a trainer yet
+    # keeps the estimate, for the day it gets one.
+    qlora = needed["qlora"] if model.kind is None or model.kind in QLORA_KINDS else None
     have = training_memory_gb or 0.0
-    best = needed["lora"] if have >= needed["lora"] or needed["qlora"] is None else needed["qlora"]
+    best = needed["lora"] if have >= needed["lora"] or qlora is None else qlora
     if not have:
         fit = "unknown"
     elif have >= needed["lora"]:
         fit = "fits"
-    elif needed["qlora"] is not None and have >= needed["qlora"]:
+    elif qlora is not None and have >= qlora:
         fit = "qlora"
         warnings.append(
             f"Needs about {needed['lora']:g} GB for LoRA; this machine has {have:g} GB, so it trains in "
-            f"4-bit QLoRA (about {needed['qlora']:g} GB), which is slower and slightly less accurate."
+            f"4-bit QLoRA (about {qlora:g} GB), which is slower and slightly less accurate."
         )
     else:
         fit = "too-big"
@@ -464,12 +548,15 @@ def assess(model: CatalogModel, training_memory_gb: float | None, accelerator: s
         )
     if accelerator == "cpu" and model.params_b >= 1.0 and fit != "too-big":
         warnings.append("No GPU was found: a model this size trains very slowly on the CPU.")
-    if family["trainer"] != "ready":
-        warnings.append(
-            "Import works now; training for this family is "
-            + ("being built next." if family["trainer"] == "next" else "planned.")
-        )
-    return {"fit": fit, "needed_gb": needed, "warnings": warnings}
+    if not status["ready"]:
+        warnings.append(status["reason"])
+    return {
+        "fit": fit,
+        "needed_gb": {**needed, "qlora": qlora},
+        "warnings": warnings,
+        "trains_here": status["ready"],
+        "publishable": status["ready"] and licence_allows(model.licence_kind, "publish"),
+    }
 
 
 def catalogue(training_memory_gb: float | None = None, accelerator: str | None = None) -> dict:
@@ -490,6 +577,16 @@ def catalogue(training_memory_gb: float | None = None, accelerator: str | None =
             for key, meta in FAMILIES.items()
         ],
     }
+
+
+def trainable(training_memory_gb: float | None = None, accelerator: str | None = None) -> list:
+    """Every catalogue model the studio trains today, assessed for this machine: what the
+    Fine-tune page offers as a base, too-big ones included (with their warning)."""
+    return [
+        {**asdict(m), **assess(m, training_memory_gb, accelerator)}
+        for m in CATALOG
+        if trainer_status(m)["ready"]
+    ]
 
 
 def find(repo: str) -> CatalogModel | None:
@@ -515,13 +612,22 @@ def family_of(item: dict) -> str | None:
         if key and (known := find(key)):
             return known.family
     architecture = (item.get("architecture") or "").lower()
-    if architecture in LAYA_ARCHITECTURES:
+    if architecture in LAYA_ARCHITECTURES or architecture == "julia":
         return "laya"
     if "gliner" in architecture:
         return "gliner"
     if architecture in ("jev", "qwen", "qwen3", "qwen3.5", "decider", "tev1", "jevk5", "nimble"):
         return "letter"
     return None
+
+
+def kind_of_architecture(architecture):
+    """The checkpoint kind a registry manifest's architecture name implies, if the studio
+    trains it; the files decide once the model is imported (kinds.check)."""
+    architecture = (architecture or "").lower()
+    if architecture in LAYA_ARCHITECTURES and architecture != "von":
+        return "laya"
+    return {"julia": "julia", "decider": "decider"}.get(architecture)
 
 
 def registry_search(
@@ -554,6 +660,7 @@ def registry_search(
             known.licence_kind
             if known
             else ("none" if item.get("license") in (None, "other") else "open"),
+            kind=known.kind if known else kind_of_architecture(item.get("architecture")),
         )
         assessed = (
             assess(model, training_memory_gb, accelerator)
@@ -589,25 +696,22 @@ def import_from_registry(repo, emit, workspace, version=None):
     as a base the studio can train from."""
     from systemone.transfer import snapshot_download
 
+    from . import kinds
     from .engine import now, write_json
 
     emit("phase", phase="download", message=f"Downloading {repo} from systemonemodels.tech")
     root = snapshot_download(repo, version=version)
-    laya_ready = all(
-        (root / name).is_file()
-        for name in (
-            "model.safetensors",
-            "rl_agent_config.json",
-            "encoder/config.json",
-            "tokenizer/tokenizer.json",
-        )
-    )
+    try:
+        kind = kinds.check(root)
+    except FileNotFoundError:
+        kind = None
     entry = {
         "ref": f"path:{root}",
         "repo": repo,
         "source": "systemonemodels.tech",
-        "family": "laya" if laya_ready else None,
-        "trainable": laya_ready,
+        "family": kinds.FAMILY[kind] if kind else None,
+        "kind": kind,
+        "trainable": kind is not None,
         "path": str(root),
         "created": now(),
     }

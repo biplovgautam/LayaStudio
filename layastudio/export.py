@@ -1,4 +1,4 @@
-"""Take a fine-tuned checkpoint off this Mac: ONNX, Core ML, and a NoulXP package.
+"""Take a fine-tuned checkpoint off this machine: ONNX, Core ML, GGUF, MLX and NoulXP.
 
 A System One Studio checkpoint is already a standard Laya checkpoint, so the upstream PyTorch
 runtime loads it as-is on Linux and NVIDIA. This module goes one step further and writes a
@@ -12,9 +12,15 @@ probability difference. Needs the optional extra:  uv sync --extra export
 
     python -m layastudio.export run:<id> --target noulxp
 
-builds the run's NoulXP package: the open standard's ONNX package, with a conformance file of
-the fine-tune's own answers, checked on the CPU and kept with the run, which publishes it.
-noulxp_package.py has the details.
+builds the run's NoulXP package: the open standard's package (ONNX for Laya and Julia 1, GGUF
+for Decider), with a conformance file of the fine-tune's own answers, checked on the CPU and
+kept with the run, which publishes it. noulxp_package.py has the details.
+
+    python -m layastudio.export run:<id> --target gguf --precision bf16    # Decider: gguf.py
+    python -m layastudio.export run:<id> --target mlx --precision int4     # Decider, Apple silicon
+
+Which targets a model takes depends on its kind (KIND_TARGETS): a Decider fine-tune is already
+merged safetensors, and adds GGUF and MLX-LM files.
 """
 
 import argparse
@@ -27,15 +33,34 @@ from pathlib import Path
 from .engine import WORKSPACE, now, read_json, resolve_model_ref, write_json
 from .laya_mlx_free import laya_mlx_module
 
-TARGETS = ("onnx", "coreml", "noulxp")
+TARGETS = ("onnx", "coreml", "noulxp", "gguf", "mlx")
 # What each target can be squeezed to. "float" is the plain export; the rest trade a little
 # accuracy for size and speed, and the studio measures how much on your own test rows. A NoulXP
-# package runs the checkpoint's own weights, as they are.
+# package runs the checkpoint's own weights, as they are (a Decider package, its GGUF).
 PRECISIONS = {
     "onnx": ("float", "int8", "int4"),
     "coreml": ("float", "int8", "int4"),
     "noulxp": ("float",),
+    "gguf": ("bf16", "q8_0", "f16"),
+    "mlx": ("int4", "int8"),
 }
+# The exports each checkpoint kind (kinds.py) has. A Decider fine-tune is already merged
+# safetensors (the run's model/ folder); GGUF goes through a pinned llama.cpp (gguf.py) and
+# MLX through MLX-LM (Apple silicon). Julia 1's ONNX graph is its NoulXP package's.
+KIND_TARGETS = {
+    "laya": ("onnx", "coreml", "noulxp"),
+    "julia": ("noulxp",),
+    "decider": ("gguf", "mlx", "noulxp"),
+}
+
+
+def targets_for(model_dir):
+    """The export targets a checkpoint folder can take, by its kind."""
+    from . import kinds
+
+    return KIND_TARGETS.get(kinds.detect(model_dir) or "laya", ())
+
+
 INPUTS = ("input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype")
 SAMPLE_STATES = [  # a spread of lengths and topics, to check the export on real prompts
     "I was charged twice this month and support never replied.",
@@ -476,6 +501,7 @@ def export(
     out_dir=None,
     precision="float",
     test_rows=None,
+    gguf=None,
 ):
     emit = emit or (lambda *a, **k: None)
     if target not in TARGETS:
@@ -488,8 +514,22 @@ def export(
         if out_dir:
             raise ValueError("A NoulXP package is kept with its run (runs/<id>/noulxp)")
         rows = noulxp_package.TEST_ROWS if test_rows is None else int(test_rows)
-        return noulxp_package.build(model_ref, workspace, emit, test_rows=rows)
+        extra = {"gguf": gguf} if gguf else {}
+        return noulxp_package.build(model_ref, workspace, emit, test_rows=rows, **extra)
     model_dir = resolve_model_ref(model_ref, workspace)
+    allowed = targets_for(model_dir)
+    if target not in allowed:
+        raise ValueError(
+            f"{target} is not an export of this model's kind; it has {', '.join(allowed)}"
+        )
+    if target == "gguf":
+        from . import gguf as gguf_export
+
+        return gguf_export.export(model_ref, workspace, emit, precision=precision)
+    if target == "mlx":
+        from . import decider_mlx
+
+        return decider_mlx.export(model_ref, workspace, emit, precision=precision)
     name = model_ref.split(":", 1)[1].replace("/", "-")
     suffix = target if precision == "float" else f"{target}-{precision}"
     out_dir = Path(out_dir) if out_dir else workspace / "exports" / f"{name}-{suffix}"
@@ -765,18 +805,29 @@ def main(argv=None):
         help="noulxp: rows of the run's test split to record in the conformance file too, next "
         "to NoulXP's own requests (default 0: they would be published with the package)",
     )
+    parser.add_argument(
+        "--gguf",
+        choices=("q8_0", "bf16", "f16"),
+        help="noulxp, Decider: the GGUF the package carries (default q8_0, as Decider's own)",
+    )
     args = parser.parse_args(argv)
+    precision = args.precision
+    if args.target == "gguf" and precision == "float":
+        precision = "bf16"
+    elif args.target == "mlx" and precision == "float":
+        precision = "int4"
     try:
         report = export(
             args.model,
             args.target,
             emit=_print,
             out_dir=args.out,
-            precision=args.precision,
+            precision=precision,
             test_rows=args.test_rows,
+            gguf=args.gguf,
         )
     except (RuntimeError, ValueError) as error:
-        if args.target != "noulxp":
+        if args.target not in ("noulxp", "gguf", "mlx"):
             raise
         sys.exit(f"{type(error).__name__}: {error}")  # the steps' own output is printed above
     print(json.dumps(report, indent=2, ensure_ascii=False))
