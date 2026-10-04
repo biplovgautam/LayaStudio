@@ -251,6 +251,7 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE):
 
     check_hyperparameters(hp)
     device = runtime.torch_device()
+    decider.portable_kernels(device)
     run_dir = workspace / "runs" / check_id(spec["run_id"])
     questions, rows, meta = load_dataset(spec["dataset"], workspace)
     base_dir = resolve_model_ref(spec["base_model"], workspace)

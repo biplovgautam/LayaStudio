@@ -11,7 +11,8 @@ its own with that commit's gguf-py.
 
 Every export is measured, not assumed: the fine-tune's test rows go through the GGUF on the CPU
 (llama.cpp, every row decoded from empty memory) and through the merged safetensors in
-PyTorch, and the report records the same-answer rate and the largest probability difference.
+PyTorch in float32, and the report records the same-answer rate and the largest probability
+difference.
 bf16 holds the merged weights exactly; q8_0 is half the size and a little further off.
 """
 
@@ -286,12 +287,18 @@ def export(model_ref, workspace=WORKSPACE, emit=None, precision="bf16", rows=60)
             ms = (time.perf_counter() - timed) * 1000 / len(items)
         finally:
             reader.close()
-        agent = decider.Agent(model_dir, backend="torch", device=torch_device())
+        import torch
+
+        # The reference is the merged weights in float32: what a GGUF should hold, without
+        # bfloat16's own rounding (which alone moves Decider's answers by up to 0.03).
+        agent = decider.Agent(
+            model_dir, backend="torch", device=torch_device(), dtype=torch.float32
+        )
         reference = agent.row_logits([(it["ids"], it["n"]) for it in items])
         del agent
         report["verification"] = {
             **compare(reference, exported, items),
-            "reference": "the merged safetensors in PyTorch on "
+            "reference": "the merged safetensors in float32, PyTorch on "
             + str(getattr(torch_device(), "type", "cpu")),
             "ms_per_row_cpu": round(ms, 1),
         }

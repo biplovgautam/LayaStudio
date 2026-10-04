@@ -527,6 +527,7 @@ class Agent:
             if dtype is None:
                 bf16 = kind == "cuda" and torch.cuda.is_bf16_supported()
                 dtype = torch.bfloat16 if bf16 else torch.float32
+            portable_kernels(self.device)
             self.model = AutoModelForCausalLM.from_pretrained(str(self.model_dir), dtype=dtype)
             self.model.to(self.device).eval()
 
@@ -563,6 +564,35 @@ class Agent:
             probs = [softmax(z, T) for z in logits[first : first + count]]
             answers[qid] = assemble(qdef, kind, probs)
         return {"answers": answers, "usage": {"input_tokens": used, "output_tokens": 0}}
+
+
+# transformers binds flash-linear-attention's Triton kernels for Qwen3.5's linear attention when
+# the package is installed, whatever device a model is on, and Triton takes only CUDA tensors.
+PORTABLE = (
+    "torch_chunk_gated_delta_rule",
+    "torch_recurrent_gated_delta_rule",
+    "causal_conv1d_fn",
+    "causal_conv1d_update",
+)
+
+
+def portable_kernels(device):
+    """On any device but CUDA, Qwen3.5's linear attention through transformers' own PyTorch
+    functions (the kernels it would otherwise call need CUDA tensors). Process-wide: a studio
+    job runs on one device."""
+    if getattr(device, "type", str(device)) == "cuda":
+        return
+    import importlib
+    import inspect
+
+    try:
+        module = importlib.import_module("transformers.models.qwen3_5.modeling_qwen3_5")
+    except ImportError:
+        return
+    for name in PORTABLE:
+        found = getattr(module, name, None)
+        if found is not None:
+            setattr(module, name, inspect.unwrap(found))
 
 
 def slot_letter_logits(model, rows, label_ids, pad_id, device):
