@@ -7,6 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("laya")
+pytest.importorskip("mlx.core")  # the parity tests compare against MLX
 
 from test_engine import QUESTIONS, checkpoint, make_rows  # noqa: E402, F401 - fixture
 

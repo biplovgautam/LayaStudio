@@ -1,22 +1,18 @@
 import json
 import math
 
-import laya_mlx
-import mlx.core as mx
-import numpy as np
 import pytest
-from laya_mlx.model import DecisionModel, EncoderConfig, sanitize_weights
-from mlx.utils import tree_flatten
-from tokenizers import Tokenizer, models, pre_tokenizers
 
-from layastudio import engine
+pytest.importorskip("mlx.core")  # these tests build their models with MLX (Apple silicon)
+import laya_mlx  # noqa: E402
+import mlx.core as mx  # noqa: E402
+import numpy as np  # noqa: E402
+from common import QUESTIONS, WORDS, make_rows  # noqa: E402, F401 - shared with other tests
+from laya_mlx.model import DecisionModel, EncoderConfig, sanitize_weights  # noqa: E402
+from mlx.utils import tree_flatten  # noqa: E402
+from tokenizers import Tokenizer, models, pre_tokenizers  # noqa: E402
 
-QUESTIONS = {
-    "topic": {"type": "choice", "instructions": "Choose", "criteria": ["alpha", "beta", "gamma"]},
-    "level": {"type": "score", "instructions": "Level", "criteria": ["low", "mid", "high"]},
-    "flag": {"type": "noul", "instructions": "Is this flagged?"},
-}
-WORDS = ["alpha", "beta", "gamma", "low", "mid", "high", "red", "green", "blue", "yes", "no"]
+from layastudio import engine  # noqa: E402
 
 
 @pytest.fixture
@@ -60,22 +56,6 @@ def checkpoint(tmp_path):
     upstream = {engine.upstream_name(k): v for k, v in tree_flatten(model.parameters())}
     mx.save_safetensors(str(path / "model.safetensors"), upstream)
     return path
-
-
-def make_rows(n=60, seed=0):
-    rng = np.random.default_rng(seed)
-    rows = []
-    for i in range(n):
-        label = ["alpha", "beta", "gamma"][i % 3]
-        color = ["red", "green", "blue"][i % 3]
-        noise = " ".join(rng.choice(WORDS, 3))
-        rows.append(
-            {
-                "state": f"{color} {noise}",
-                "answers": {"topic": label, "level": i % 3, "flag": i % 2 == 0},
-            }
-        )
-    return rows
 
 
 def test_upstream_names_round_trip(checkpoint):

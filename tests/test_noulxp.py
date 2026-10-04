@@ -7,13 +7,13 @@ nothing is downloaded and no real model runs.
 import hashlib
 import json
 import shutil
-import sys
-import textwrap
 from pathlib import Path
 
 import pytest
-from test_engine import QUESTIONS, WORDS, make_rows
-from test_server import call, studio  # noqa: F401 - studio is a fixture
+
+pytest.importorskip("mlx.core")  # the tiny Laya run is built with MLX
+from common import QUESTIONS, WORDS, fake_systemone, make_rows  # noqa: E402
+from test_server import call, studio  # noqa: E402, F401 - studio is a fixture
 
 from layastudio import engine, families, noulxp_package, publish_systemone
 from layastudio.export import export
@@ -122,25 +122,6 @@ def built(tmp_path_factory):
         test_rows=TEST_ROWS,
     )
     return workspace, report, events, before
-
-
-def fake_systemone(tmp_path):
-    """A stand-in for `systemone push` that writes down every file it was asked to upload."""
-    seen = tmp_path / "pushed.json"
-    script = tmp_path / "systemone.py"
-    script.write_text(
-        textwrap.dedent(
-            f"""
-            import json, sys
-            from pathlib import Path
-            folder = Path(sys.argv[2])
-            files = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
-            Path({str(seen)!r}).write_text(json.dumps({{"args": sys.argv[1:], "files": files}}))
-            print("Published (pretend)")
-            """
-        )
-    )
-    return [sys.executable, str(script)], seen
 
 
 # ----------------------------------------------------------------------------- families

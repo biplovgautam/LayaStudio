@@ -19,7 +19,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 import tiny  # noqa: E402
-from test_engine import QUESTIONS, make_rows  # noqa: E402
+from common import QUESTIONS, make_rows  # noqa: E402
 
 from layastudio import decider, engine, kinds, noulxp_package  # noqa: E402
 from layastudio.export import export  # noqa: E402
@@ -325,6 +325,23 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(real_tokenizer_ch
     assert calibration["temperature"]["noul"] == pytest.approx(1.5)
     info = noulxp_package.passing_package(run_dir, run_dir / "model")
     assert info and "GGUF readout" in noulxp_package.card_line(info)
+
+    # A publish dry run carries Decider's own files, the package (its GGUF) and a Decider card.
+    from common import fake_systemone
+
+    from layastudio import publish_systemone
+
+    command, seen = fake_systemone(tmp_path)
+    publish_systemone.cli_command, saved = (lambda: command), publish_systemone.cli_command
+    try:
+        publish_systemone.publish("run:dn", "me/decider-tiny", workspace, dry_run=True)
+    finally:
+        publish_systemone.cli_command = saved
+    pushed = json.loads(seen.read_text())
+    for name in ("decider_config.json", "config.json", "model.safetensors", "noulxp/model.gguf"):
+        assert name in pushed["files"], name
+    card = (run_dir / "model/README.md").read_text()
+    assert "Mapika" in card and "base_model: Mapika/decider-2b" in card
     # The package is the run's own GGUF, converted from these weights: change them, and it
     # no longer counts.
     weights = run_dir / "model/model.safetensors"

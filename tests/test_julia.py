@@ -15,7 +15,7 @@ pytest.importorskip("transformers")
 pytest.importorskip("laya")
 
 import tiny  # noqa: E402
-from test_engine import QUESTIONS, make_rows  # noqa: E402
+from common import QUESTIONS, make_rows  # noqa: E402
 
 from layastudio import engine, julia, kinds, noulxp_package, torch_engine  # noqa: E402
 from layastudio.export import export  # noqa: E402
@@ -270,3 +270,27 @@ def test_a_julia_fine_tune_gets_a_noulxp_package_that_passes(checkpoint, tmp_pat
     assert (template["budgets"]["total"], template["budgets"]["head"]) == (128, 48)
     info = noulxp_package.passing_package(run_dir, run_dir / "model")
     assert info and "Julia 1's own inference" in noulxp_package.card_line(info)
+
+    # A publish dry run carries Julia's own files, the package and a Julia card.
+    from common import fake_systemone
+
+    from layastudio import publish_systemone
+
+    command, seen = fake_systemone(tmp_path)
+    publish_systemone.cli_command, saved = (lambda: command), publish_systemone.cli_command
+    try:
+        publish_systemone.publish("run:jn", "me/julia-tiny", workspace, dry_run=True)
+    finally:
+        publish_systemone.cli_command = saved
+    pushed = json.loads(seen.read_text())
+    assert "--dry-run" in pushed["args"]
+    for name in (
+        "julia_config.json",
+        "inference-policy.json",
+        "model.safetensors",
+        "noulxp/model.onnx",
+    ):
+        assert name in pushed["files"], name
+    card = (run_dir / "model/README.md").read_text()
+    assert "Supersonic Labs" in card and "base_model: SupersonicLabs/Julia-1" in card
+    assert "**NoulXP:** this version carries a NoulXP package" in card
