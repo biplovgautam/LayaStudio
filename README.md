@@ -158,7 +158,11 @@ uv run python -m layastudio.publish_systemone run:<run-id>   # --repo <you>/<nam
 ```
 
 Or open the run in the studio and press **Publish to System One**. Both write a card from
-the run's measurements, then hand the checkpoint to `systemone push`.
+the run's measurements, then hand the checkpoint to `systemone push`, together with the run's
+[NoulXP package](docs/noulxp.md) as the version's `noulxp/` folder, so the registry can check
+it and show the model as NoulXP compatible. A run without a package that passed its check gets
+one built and checked first, and nothing goes up if it fails; `--skip-noulxp` (or unticking
+*Include a NoulXP package*) publishes the checkpoint alone.
 
 The card carries the before/after table, the significance test, the calibration
 temperatures, the hyperparameters and the dataset hash from that run, so what the Hub
@@ -401,6 +405,18 @@ python -m layastudio.export run:<id> --target onnx --precision int8    # smaller
 
 The export writes `model.onnx` (opset 18, dynamic batch, tokens and options) next to the tokenizer, the calibration temperatures and the questions the model was trained for — everything a server needs, with no Laya code required to run it. It goes wherever onnxruntime goes: Linux and Windows CPUs, NVIDIA CUDA, DirectML.
 
+**NoulXP**, the open standard any NoulXP engine runs without Laya code:
+
+```bash
+python -m layastudio.export run:<id> --target noulxp    # or Export → NoulXP package
+```
+
+`noulxp export laya` writes the package from the checkpoint, the `laya` package records the
+fine-tune's own answers (float32, CPU) to NoulXP's 52 requests and up to 100 rows of the run's
+test split, which are published with the package, and `noulxp check` has to reproduce every
+one on the CPU. The package is kept with the run as `runs/<id>/noulxp/` and published with it.
+[docs/noulxp.md](docs/noulxp.md) has the details and where every other family stands.
+
 **Core ML**, for the Apple Neural Engine:
 
 ```bash
@@ -466,6 +482,7 @@ upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime
 | [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
 | [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
 | [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
+| [`layastudio/noulxp_package.py`](layastudio/noulxp_package.py) | NoulXP packages: built, checked on the CPU, kept with the run, published with it |
 | [`layastudio/publish.py`](layastudio/publish.py) | Publishes a run to Hugging Face with a card built from its own numbers |
 | [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup |
 | `tests/` | Unit and end-to-end tests against a tiny random model |

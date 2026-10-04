@@ -1,0 +1,58 @@
+# NoulXP packages from System One Studio
+
+[NoulXP](https://github.com/systemonemodels/noulxp) is the open standard that lets any engine run a
+System One model from a package of files, with no code written for that model. A model version on
+systemonemodels.tech that carries a package in a `noulxp/` folder is checked by the registry's
+engine against the package's own conformance file, on the CPU; a pass shows the model as
+**NoulXP compatible**.
+
+The studio builds that package with **noulxp 0.4** (the release the registry checks with; the
+`export` extra installs it) for every fine-tune of a family that has both a trainer here and a
+NoulXP exporter. Today that is the Laya family.
+
+## What a fine-tune gets
+
+```bash
+uv sync --extra export
+python -m layastudio.export run:<id> --target noulxp     # or Export → NoulXP package
+python -m layastudio.publish_systemone run:<id>          # or Publish to System One
+```
+
+1. `noulxp export laya` writes the package from the run's checkpoint: an ONNX graph whose weights
+   are the checkpoint's own `model.safetensors`, the tokenizer, `template.json` and
+   `calibration.json`.
+2. `noulxp conformance generate` records the fine-tune's own answers, from the `laya` package in
+   float32 on the CPU, to NoulXP's request set (52 requests, 11 languages: the coverage SPEC.md 9.2
+   asks for) and to up to 100 rows of the run's test split, asked the run's own questions
+   (`--test-rows N`; 0 leaves them out). **Those rows are published inside the package**, in
+   `conformance.jsonl`. A question over NoulXP's limits (20 options, 10 levels) cannot be asked
+   through a package; it is left out of the file and the export says so.
+3. `noulxp validate`, then `noulxp check` on the CPU. The package passes only when the reference
+   runtime reproduces every case (each probability within 0.01, the same leading option) and the
+   file covers what the standard asks.
+
+A package that passes is kept as `runs/<id>/noulxp/`, with the check's report inside it
+(`check-cpu.json`). One that fails is kept as `runs/<id>/noulxp-failed/` for reading and never
+replaces the run's package. `runs/<id>/noulxp-report.json` describes the last attempt.
+
+Publishing uploads the passing package as the version's `noulxp/` folder (the weights file is the
+checkpoint's own, so the registry stores it once), and the model card gets one line saying how it
+was checked. A run without a passing package gets one built and checked first; if it does not pass,
+nothing is uploaded. `--skip-noulxp` (in the studio, untick *Include a NoulXP package*) publishes
+the checkpoint alone, and its card says it carries no package.
+
+## Every family, and the profile it needs
+
+| Family | NoulXP profile | Where the exporter stands | In the studio |
+|---|---|---|---|
+| Encoder + option-marker head (Laya style) | `encoder-markers` (ONNX) | `noulxp export laya`, released in noulxp 0.4 | built, checked and published with every fine-tune the studio writes (a standard Laya checkpoint); the check decides |
+| Decoder, letter readout (Jev / SemIf style: Nimble, Decider, JevK5, Tev1, cua-s1, Eikos, …) | `causal-letters` (GGUF) | noulxp 0.4 exports Decider (`noulxp export decider`) and AnyJev (`noulxp export anyjev`) only | arrives with this family's trainer, with an exporter for its fine-tunes |
+| Per-option cross-encoder | `encoder-pairs` | exists only on an unreleased noulxp branch (`encoder-pairs`, NoulXP 0.3 draft: Mira) | arrives with this family's trainer and a noulxp release that has the profile |
+| Decoder + learned pointer or slot head (Kev, OpenThai, Jev-Omni, NanoJev) | none yet | — | needs a profile first |
+| GLiNER2 / GLiClass extractor | none yet | — | needs a profile first |
+| Frozen embedder + small heads (CLM) | none yet | — | needs a profile first |
+| Tiny scorer from scratch (cua-s1-forms, cua-s1-nano) | none yet | — | needs a profile first |
+
+Only the Laya family trains here today, so every run gets a package. The Models page shows each
+family's NoulXP state, and an export or publish asked of another family says that NoulXP export
+arrives with that family's trainer instead of claiming a badge.
