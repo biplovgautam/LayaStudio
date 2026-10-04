@@ -2442,6 +2442,8 @@ async function viewTrain(_, params) {
     $("#trbasedesc").textContent = m ? m.description : "";
     $("#trbasewarn").innerHTML = m && m.warnings && m.warnings.length ? `<ul class="warnlist">${m.warnings.map(w => `<li>${esc(w)}</li>`).join("")}</ul>` : "";
     setKind((m && m.kind) || "laya");
+    // A model that fits this machine only in 4 bits starts on the 4-bit recipe.
+    if (m && m.fit === "qlora" && KIND_PRESETS[kind].qlora) choose("qlora");
   };
   $("#trbase").onchange = desc; desc();
   $("#trgo").onclick = async () => {

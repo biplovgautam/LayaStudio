@@ -14,4 +14,23 @@ This product includes software developed as an independent application on top of
   validation (Agent._to_internal) is adapted in layastudio/engine.py (internal_question)
   so that datasets can be made on machines without MLX.
 
-System One Studio is not affiliated with or endorsed by Convai Innovations.
+* Julia 1 (https://huggingface.co/SupersonicLabs/Julia-1), Copyright Supersonic Labs,
+  licensed under the Apache License 2.0. Its prompt construction (julia/data.py sequence),
+  its typed-question adapter (julia/typed.py) and its decision model (julia/model.py), at
+  revision a85b127, are adapted in layastudio/julia.py so Julia checkpoints can be
+  fine-tuned in their own format; its weights are downloaded at runtime.
+
+* Decider and decider-ai (https://github.com/Mapika/decider,
+  https://huggingface.co/Mapika/decider-2b), Copyright Mark Marosi, licensed under the
+  Apache License 2.0. Its prompt layout (decider/prompt.py), its System One adapter
+  (decider/systemone.py), its temperature rules (decider/temperature.py) and its training
+  loss (decider/train.py, decider/model.py), at commit 45024082, are adapted in
+  layastudio/decider.py and layastudio/decider_engine.py; a fine-tune carries the base
+  repository's decider/ inference code unchanged. Its weights are downloaded at runtime.
+
+* llama.cpp (https://github.com/ggml-org/llama.cpp), Copyright the ggml authors, licensed
+  under the MIT License. Its converter (convert_hf_to_gguf.py and gguf-py) at commit
+  4df29be is downloaded at runtime by layastudio/gguf.py and is not redistributed here.
+
+System One Studio is not affiliated with or endorsed by Convai Innovations, Supersonic Labs,
+Mapika or the ggml authors.
