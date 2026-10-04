@@ -33,7 +33,18 @@ dev = ["pytest>=8", "ruff>=0.12", "build>=1"]
 # Training on NVIDIA, AMD, Intel or the CPU. `systemone run studio` installs the PyTorch build
 # the machine needs (CUDA, ROCm, XPU or CPU) before this extra, so it only adds the rest.
 torch = ["laya>=0.3.5", "torch>=2.4", "transformers>=4.48", "safetensors>=0.4"]
-export = ["laya>=0.1.6", "torch>=2.4", "onnx>=1.16", "onnxruntime>=1.18", "onnxscript>=0.2", "safetensors>=0.4"]
+# ONNX and Core ML exports, and NoulXP packages. noulxp 0.4.x is the release systemonemodels.tech
+# checks packages with; its extras bring `noulxp export laya` (torch, transformers 5.2+, onnx,
+# onnxscript), the `laya` package that records the conformance file, and onnxruntime for the check.
+export = [
+  "laya>=0.1.6",
+  "torch>=2.4",
+  "onnx>=1.16",
+  "onnxruntime>=1.18",
+  "onnxscript>=0.2",
+  "safetensors>=0.4",
+  "noulxp[export,laya,onnx]>=0.4,<0.5",
+]
 coreml = ["laya>=0.1.6", "torch>=2.4", "coremltools>=8.0", "scikit-learn>=1.4"]
 shots = ["Pillow>=11"]
 systemone = ["systemonemodels>=0.2.4"]
