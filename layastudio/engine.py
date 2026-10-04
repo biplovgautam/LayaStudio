@@ -1653,6 +1653,7 @@ def run_job(job_dir):
                 workspace,
                 emit,
                 precision=spec.get("precision", "float"),
+                test_rows=spec.get("test_rows"),
             )
         elif kind == "import":
             from .families import import_from_registry
@@ -1668,6 +1669,7 @@ def run_job(job_dir):
                 workspace,
                 emit,
                 private=bool(spec.get("private")),
+                noulxp=bool(spec.get("noulxp", True)),
             )
         else:
             raise ValueError(f"Unknown job kind {kind!r}")

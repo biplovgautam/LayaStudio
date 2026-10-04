@@ -1,4 +1,4 @@
-"""Take a fine-tuned checkpoint off this Mac: ONNX today, Core ML next to it.
+"""Take a fine-tuned checkpoint off this Mac: ONNX, Core ML, and a NoulXP package.
 
 A System One Studio checkpoint is already a standard Laya checkpoint, so the upstream PyTorch
 runtime loads it as-is on Linux and NVIDIA. This module goes one step further and writes a
@@ -9,6 +9,12 @@ graph other runtimes can execute without any Laya code at all:
 Every export is verified, not assumed: the exported graph answers the same questions as
 this machine's MLX runtime, and the report records the agreement and the largest
 probability difference. Needs the optional extra:  uv sync --extra export
+
+    python -m layastudio.export run:<id> --target noulxp
+
+builds the run's NoulXP package: the open standard's ONNX package, with a conformance file of
+the fine-tune's own answers, checked on the CPU and kept with the run, which publishes it.
+noulxp_package.py has the details.
 """
 
 import argparse
@@ -20,12 +26,14 @@ from pathlib import Path
 
 from .engine import WORKSPACE, now, read_json, resolve_model_ref, write_json
 
-TARGETS = ("onnx", "coreml")
+TARGETS = ("onnx", "coreml", "noulxp")
 # What each target can be squeezed to. "float" is the plain export; the rest trade a little
-# accuracy for size and speed, and the studio measures how much on your own test rows.
+# accuracy for size and speed, and the studio measures how much on your own test rows. A NoulXP
+# package runs the checkpoint's own weights, as they are.
 PRECISIONS = {
     "onnx": ("float", "int8", "int4"),
     "coreml": ("float", "int8", "int4"),
+    "noulxp": ("float",),
 }
 INPUTS = ("input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype")
 SAMPLE_STATES = [  # a spread of lengths and topics, to check the export on real prompts
@@ -455,12 +463,27 @@ def coreml_test_score(converted, model_dir, items, dataset, tokens, options, emi
     }
 
 
-def export(model_ref, target, workspace=WORKSPACE, emit=None, out_dir=None, precision="float"):
+def export(
+    model_ref,
+    target,
+    workspace=WORKSPACE,
+    emit=None,
+    out_dir=None,
+    precision="float",
+    test_rows=None,
+):
     emit = emit or (lambda *a, **k: None)
     if target not in TARGETS:
         raise ValueError(f"Unknown export target {target!r}; expected one of {TARGETS}")
     if precision not in PRECISIONS[target]:
         raise ValueError(f"{target} supports {PRECISIONS[target]}, not {precision!r}")
+    if target == "noulxp":
+        from . import noulxp_package
+
+        if out_dir:
+            raise ValueError("A NoulXP package is kept with its run (runs/<id>/noulxp)")
+        rows = noulxp_package.TEST_ROWS if test_rows is None else int(test_rows)
+        return noulxp_package.build(model_ref, workspace, emit, test_rows=rows)
     model_dir = resolve_model_ref(model_ref, workspace)
     name = model_ref.split(":", 1)[1].replace("/", "-")
     suffix = target if precision == "float" else f"{target}-{precision}"
@@ -731,15 +754,34 @@ def main(argv=None):
         help="float keeps the exported weights; int8 and int4 compress them",
     )
     parser.add_argument("--out", help="Where to write the export")
-    args = parser.parse_args(argv)
-    report = export(
-        args.model,
-        args.target,
-        emit=lambda kind, **d: print(kind, d.get("message", "")),
-        out_dir=args.out,
-        precision=args.precision,
+    parser.add_argument(
+        "--test-rows",
+        type=int,
+        help="noulxp: rows of the run's test split recorded in the conformance file, next to "
+        "NoulXP's own requests (default 100; they are published with the package; 0 leaves "
+        "them out)",
     )
-    print(json.dumps(report, indent=2))
+    args = parser.parse_args(argv)
+    try:
+        report = export(
+            args.model,
+            args.target,
+            emit=_print,
+            out_dir=args.out,
+            precision=args.precision,
+            test_rows=args.test_rows,
+        )
+    except (RuntimeError, ValueError) as error:
+        if args.target != "noulxp":
+            raise
+        sys.exit(f"{type(error).__name__}: {error}")  # the steps' own output is printed above
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
+def _print(kind, **data):
+    if kind == "progress":
+        return
+    print(kind, data.get("message", ""))
 
 
 if __name__ == "__main__":

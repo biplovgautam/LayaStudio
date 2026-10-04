@@ -68,6 +68,52 @@ FAMILIES = {
     },
 }
 
+# The NoulXP profile each family's fine-tunes need (github.com/systemonemodels/noulxp), and
+# where its exporter stands; docs/noulxp.md has the detail. A fine-tune gets a NoulXP package,
+# and with it a chance at systemonemodels.tech's "NoulXP compatible", only when its family
+# trains here and noulxp exports that profile. status: ready | trainer (the profile exists, the
+# fine-tunes wait for this family's trainer) | none (no profile yet).
+NOULXP = {
+    "laya": {
+        "profile": "encoder-markers",
+        "status": "ready",
+        "note": "Every fine-tune is exported with noulxp export laya (noulxp 0.4), checked on "
+        "the CPU and published with its package.",
+    },
+    "letter": {
+        "profile": "causal-letters",
+        "status": "trainer",
+        "note": "noulxp 0.4 exports Decider and AnyJev checkpoints; the exporters for this "
+        "family's fine-tunes come with its trainer.",
+    },
+    "crossenc": {
+        "profile": "encoder-pairs",
+        "status": "trainer",
+        "note": "The encoder-pairs profile is not in a released noulxp yet; it and the trainer "
+        "come together.",
+    },
+    "head": {
+        "profile": None,
+        "status": "none",
+        "note": "No NoulXP profile reads a learned pointer or slot head yet.",
+    },
+    "gliner": {
+        "profile": None,
+        "status": "none",
+        "note": "No NoulXP profile reads a label-conditioned span extractor yet.",
+    },
+    "embedder": {
+        "profile": None,
+        "status": "none",
+        "note": "No NoulXP profile covers a frozen embedder with small heads yet.",
+    },
+    "tiny": {
+        "profile": None,
+        "status": "none",
+        "note": "No NoulXP profile covers a byte-level scorer trained from scratch yet.",
+    },
+}
+
 # licence kinds: open | sharealike | noncommercial | none (no licence: all rights reserved) | closed (no weights)
 LICENCE_NOTE = {
     "sharealike": "Share-alike licence: fine-tunes must be published under the same licence.",
@@ -434,6 +480,7 @@ def catalogue(training_memory_gb: float | None = None, accelerator: str | None =
             {
                 "key": key,
                 **meta,
+                "noulxp": NOULXP[key],
                 "models": [
                     {**asdict(m), **assess(m, training_memory_gb, accelerator)}
                     for m in CATALOG

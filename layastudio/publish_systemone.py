@@ -10,6 +10,11 @@ numbers, so the page on the registry shows what the studio recorded. The
 registry's CLI reads the run's eval.json for accuracy, calibration and latency,
 and records the base model with a link back to Hugging Face.
 
+The version also carries the run's NoulXP package as its `noulxp/` folder, which the
+registry checks to show the model as NoulXP compatible: the package the run keeps when it
+passed its check, or one built and checked first (noulxp_package.py). When none passes,
+nothing is uploaded; --skip-noulxp publishes the checkpoint without one.
+
 Nothing here handles a token: the `systemone` CLI keeps its own login.
 """
 
@@ -19,10 +24,12 @@ import shutil
 import subprocess
 import sys
 
+from . import noulxp_package
 from .engine import WORKSPACE, check_id, read_json, resolve_model_ref
 from .publish import build_card
 
 USE_IT_MARK = "## Use it"
+PROVENANCE_MARK = "\n## Provenance"
 QUESTIONS_MARK = "Ask it **these** questions"
 SYSTEMONE_USE = """## Use it
 
@@ -54,6 +61,14 @@ def registry_card(card, repo):
     return card[:start] + SYSTEMONE_USE.format(repo=repo) + card[end:]
 
 
+def with_noulxp(card, line):
+    """The card with its line on NoulXP, just before the provenance."""
+    at = card.find(PROVENANCE_MARK)
+    if at == -1:
+        return card.rstrip("\n") + "\n\n" + line + "\n"
+    return card[:at] + "\n" + line + "\n" + card[at:]
+
+
 def cli_command():
     """The registry's CLI, wherever it is installed."""
     if shutil.which("systemone"):
@@ -65,8 +80,19 @@ def cli_command():
     return [sys.executable, "-m", "systemone.cli"]
 
 
-def publish(run_ref, repo=None, workspace=WORKSPACE, emit=None, private=False, dry_run=False):
-    """Push one run's checkpoint to the registry. Returns the CLI's exit code."""
+def publish(
+    run_ref,
+    repo=None,
+    workspace=WORKSPACE,
+    emit=None,
+    private=False,
+    dry_run=False,
+    noulxp=True,
+):
+    """Push one run's checkpoint to the registry. Returns the CLI's exit code.
+
+    With noulxp (the default) the version carries the run's NoulXP package, built and
+    checked first if the run has none that passed; when none passes, nothing is uploaded."""
     emit = emit or (lambda kind, **data: None)
     run_id = check_id(run_ref.split(":", 1)[-1])
     run_dir = workspace / "runs" / run_id
@@ -79,6 +105,9 @@ def publish(run_ref, repo=None, workspace=WORKSPACE, emit=None, private=False, d
             "The registry's CLI is not installed. Run `pip install systemonemodels`, "
             "then `systemone login`, and try again."
         )
+
+    # Before the card: a run whose package cannot pass publishes nothing, card included.
+    package = noulxp_package.for_publish(f"run:{run_id}", workspace, emit) if noulxp else None
 
     # A card written for the Hub names a Hub repository in its examples; on
     # the registry the examples pull from the registry.
@@ -93,6 +122,7 @@ def publish(run_ref, repo=None, workspace=WORKSPACE, emit=None, private=False, d
         ),
         target,
     )
+    card = with_noulxp(card, noulxp_package.card_line(package))
     (model_dir / "README.md").write_text(card)
     emit("phase", phase="card", message=f"Model card written from {run_id}'s measurements")
 
@@ -103,7 +133,22 @@ def publish(run_ref, repo=None, workspace=WORKSPACE, emit=None, private=False, d
         args.append("--private")
     if dry_run:
         args.append("--dry-run")
-    emit("phase", phase="push", message="Uploading to systemonemodels.tech")
+    with noulxp_package.staged(run_dir, model_dir, package is not None):
+        if package:
+            emit("log", message="noulxp/ holds the run's NoulXP package, next to the checkpoint")
+        emit("phase", phase="push", message="Uploading to systemonemodels.tech")
+        code, last = _push(args, emit)
+    if code != 0:
+        hint = ""
+        if "Not signed in" in last or "systemone login" in last:
+            hint = " Sign in first: `systemone login` (opens the registry in your browser)."
+        raise RuntimeError(f"systemone push failed: {last}.{hint}")
+    emit("phase", phase="done", message=last or "Published")
+    return code
+
+
+def _push(args, emit):
+    """`systemone push`, its output into the log. (exit code, last line printed)"""
     process = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -113,19 +158,20 @@ def publish(run_ref, repo=None, workspace=WORKSPACE, emit=None, private=False, d
     )
     assert process.stdout is not None
     last = ""
-    for line in process.stdout:
-        line = line.rstrip()
-        if line:
-            last = line
-            emit("log", message=line)
-    code = process.wait()
-    if code != 0:
-        hint = ""
-        if "Not signed in" in last or "systemone login" in last:
-            hint = " Sign in first: `systemone login` (opens the registry in your browser)."
-        raise RuntimeError(f"systemone push failed: {last}.{hint}")
-    emit("phase", phase="done", message=last or "Published")
-    return code
+    try:
+        for line in process.stdout:
+            line = line.rstrip()
+            if line:
+                last = line
+                emit("log", message=line)
+        return process.wait(), last
+    except BaseException:  # a cancelled job stops its upload too
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        raise
 
 
 def main(argv=None):
@@ -138,9 +184,22 @@ def main(argv=None):
     parser.add_argument(
         "--dry-run", action="store_true", help="Write the card and show the plan; upload nothing"
     )
+    parser.add_argument(
+        "--skip-noulxp",
+        action="store_true",
+        help="Publish without a NoulXP package (default: the run's package, built and checked "
+        "first if it has none that passed)",
+    )
     args = parser.parse_args(argv)
     try:
-        publish(args.run, args.repo, private=args.private, dry_run=args.dry_run, emit=_print)
+        publish(
+            args.run,
+            args.repo,
+            private=args.private,
+            dry_run=args.dry_run,
+            emit=_print,
+            noulxp=not args.skip_noulxp,
+        )
     except Exception as error:  # noqa: BLE001 - a CLI should explain itself
         sys.exit(f"{type(error).__name__}: {error}")
 

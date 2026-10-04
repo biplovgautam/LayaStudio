@@ -36,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import engine
+from . import engine, noulxp_package
 from .account import Account
 from .bootstrap import DEFAULT_MODEL, Bootstrap
 from .examples import catalog
@@ -428,7 +428,25 @@ class Studio:
             if report:
                 report["path"] = shown_path(path.parent, self.workspace.parent)
                 out.append(report)
+        # NoulXP packages live with their runs (runs/<id>/noulxp), which publish them.
+        for path in sorted(folders(self.workspace / "runs")):
+            entry = noulxp_package.listing(path, lambda p: shown_path(p, self.workspace.parent))
+            if entry:
+                out.append(entry)
         return out
+
+    def noulxp(self, run_id):
+        """What the publish dialog needs: the run's package, and whether one can be built."""
+        listing = noulxp_package.listing(
+            self.workspace / "runs" / run_id, lambda p: shown_path(p, self.workspace.parent)
+        )
+        missing = noulxp_package.missing_tooling()
+        return {
+            "package": listing if listing and listing.get("state") == "passed" else None,
+            "last": listing,
+            "tooling": noulxp_package.tooling_message(missing) if missing else None,
+            "test_rows": noulxp_package.TEST_ROWS,
+        }
 
     def pause_gpu(self):
         """Give a starting job the whole GPU: stop the arena, drop warm models."""
@@ -750,20 +768,33 @@ class Studio:
                     f"{target} exports can be {', '.join(PRECISIONS[target])}, not {precision!r}",
                 )
             label = target.upper() + ("" if precision == "float" else f" ({precision})")
+            spec = {"model": body["model"], "target": target, "precision": precision}
+            if target == "noulxp":
+                self.noulxp_ready(body["model"])
+                label = "a NoulXP package"
+                if body.get("test_rows") is not None:
+                    spec["test_rows"] = max(0, int(body["test_rows"]))
             return self.jobs.start(
-                "export",
-                {"model": body["model"], "target": target, "precision": precision},
-                f"export-{stamp}",
-                f"Export {modelname(body['model'])} to {label}",
+                "export", spec, f"export-{stamp}", f"Export {modelname(body['model'])} to {label}"
             )
         if kind == "publish":
             engine.resolve_model_ref(body["model"], self.workspace)
             repo = (body.get("repo") or "").strip() or None
             if repo and repo.count("/") != 1:
                 raise ApiError(HTTPStatus.BAD_REQUEST, "The repository is namespace/name")
+            include = bool(body.get("noulxp", True))
+            if include:
+                run_id = noulxp_package.locate(body["model"], self.workspace)[0]
+                if not self.noulxp(run_id)["package"]:  # it is built first: can it be?
+                    self.noulxp_ready(body["model"], publishing=True)
             return self.jobs.start(
                 "publish",
-                {"model": body["model"], "repo": repo, "private": bool(body.get("private"))},
+                {
+                    "model": body["model"],
+                    "repo": repo,
+                    "private": bool(body.get("private")),
+                    "noulxp": include,
+                },
                 f"publish-{stamp}",
                 f"Publish {modelname(body['model'])} to System One",
             )
@@ -802,6 +833,21 @@ class Studio:
                 f"Fetch example: {self.examples[body['name']]['title']}",
             )
         raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown job kind {kind!r}")
+
+    def noulxp_ready(self, ref, publishing=False):
+        """Refuse up front what a NoulXP build would refuse: not a run, a family without a
+        NoulXP exporter, or a machine without the tooling."""
+        try:
+            _, _, _, run = noulxp_package.locate(ref, self.workspace)
+        except ValueError as error:
+            raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
+        family, entry = noulxp_package.support(run, self.workspace)
+        skip = " Or publish without a NoulXP package." if publishing else ""
+        if entry["status"] != "ready":
+            raise ApiError(HTTPStatus.BAD_REQUEST, noulxp_package.refusal(family) + skip)
+        missing = noulxp_package.missing_tooling()
+        if missing:
+            raise ApiError(HTTPStatus.CONFLICT, noulxp_package.tooling_message(missing) + skip)
 
     # --- runs
 
@@ -1039,6 +1085,8 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 if len(route) == 2 and route[0] == "runs":
                     return self._send(HTTPStatus.OK, studio.run(route[1]))
+                if len(route) == 3 and route[0] == "runs" and route[2] == "noulxp":
+                    return self._send(HTTPStatus.OK, studio.noulxp(engine.check_id(route[1])))
                 if len(route) == 3 and route[0] == "runs" and route[2] == "errors":
                     return self._send(
                         HTTPStatus.OK,
@@ -1577,6 +1625,20 @@ details.family .family-body{padding:0 18px 12px;border-top:1px solid var(--borde
     <div class="modal-actions">
       <button class="btn" id="signin-cancel" type="button">Cancel</button>
       <button class="btn primary" id="signin-go" type="button">Get a sign-in code</button>
+    </div>
+  </div>
+</div>
+<div class="modal" id="publish" hidden role="dialog" aria-modal="true" aria-labelledby="publish-title">
+  <div class="modal-card">
+    <h2 id="publish-title">Publish to System One Models</h2>
+    <p class="muted" id="publish-lede"></p>
+    <label for="publish-repo">Repository, as namespace/name</label>
+    <input id="publish-repo" type="text" autocomplete="off" spellcheck="false">
+    <label class="check" style="margin-top:14px"><input type="checkbox" id="publish-noulxp" checked> Include a NoulXP package</label>
+    <div id="publish-noulxp-note" style="margin-top:8px"></div>
+    <div class="modal-actions">
+      <button class="btn" id="publish-cancel" type="button">Cancel</button>
+      <button class="btn primary" id="publish-go" type="button">Publish</button>
     </div>
   </div>
 </div>
@@ -2492,7 +2554,7 @@ async function viewJob(id, _, token) {
   const watched = first.job.state === "running";  // only a job seen finishing moves the page on
   main.innerHTML = `<p class="eyebrow"><span class="tiny-square"></span> <a href="#/jobs">Jobs</a></p>
   <div class="row" style="justify-content:space-between;align-items:flex-start"><div style="min-width:0"><h1 id="jt"></h1><div class="muted small" id="jmeta"></div></div><div class="row" id="jact"></div></div>
-  <section class="card" style="margin-top:18px"><div id="jstate"></div><div id="jprog" style="margin-top:10px"></div><pre id="jlog" style="max-height:340px"></pre></section>`;
+  <section class="card" style="margin-top:18px"><div id="jstate"></div><div id="jprog" style="margin-top:10px"></div><div id="jres"></div><pre id="jlog" style="max-height:340px"></pre></section>`;
   let drawn = null;
   const draw = job => {
     $("#jt").textContent = job.title || job.id;
@@ -2501,6 +2563,8 @@ async function viewJob(id, _, token) {
     $("#jstate").innerHTML = pill(job.state) + (job.error ? `<div class="notice bad">${esc(job.error)}</div>` : "");
     const f = job.state === "running" ? jobFraction(job) : null;
     $("#jprog").innerHTML = f != null ? `<div class="bar"><i style="width:${(100 * f).toFixed(1)}%"></i></div>` : "";
+    const nx = events.find(e => e.type === "result" && e.target === "noulxp");
+    $("#jres").innerHTML = nx ? noulxpNotice(nx) : "";
     $("#jlog").textContent = events.map(e => `${e.type.padEnd(9)} ${e.message || ""}${e.type === "progress" ? `${e.done}/${e.total}` : ""}${e.type === "result" ? JSON.stringify(e) : ""}`).join("\n") || "No events yet.";
   };
   const drawActions = job => {
@@ -2583,25 +2647,72 @@ function answerCard(q, a, def) {
 }
 
 // ------------------------------------------------------------------ models
-const EXPORT_FORMATS = [["onnx:float", "ONNX · float"], ["onnx:int8", "ONNX · int8"], ["onnx:int4", "ONNX · int4"], ["coreml:float", "Core ML · float"], ["coreml:int8", "Core ML · int8"], ["coreml:int4", "Core ML · int4"]];
+const EXPORT_FORMATS = [["onnx:float", "ONNX · float"], ["onnx:int8", "ONNX · int8"], ["onnx:int4", "ONNX · int4"], ["coreml:float", "Core ML · float"], ["coreml:int8", "Core ML · int8"], ["coreml:int4", "Core ML · int4"], ["noulxp:float", "NoulXP package · checked"]];
 function exportOptions() { return EXPORT_FORMATS.map(([v, t]) => `<option value="${v}">${t}</option>`).join(""); }
 async function startExport(ref, format) {
   const [target, precision] = format.split(":");
   try { const job = await api("/api/jobs", {method: "POST", body: {kind: "export", model: ref, target, precision}}); location.hash = "#/jobs/" + job.id; }
   catch (e) { toast(e.message); }
 }
+// A fine-tune goes up with its NoulXP package unless the box is unticked: the run's package
+// if it passed its check, else one built and checked first. A package that fails is never sent.
 function startPublish(ref) {
   withAccount(async () => {
-    const repo = prompt(`Publish to systemonemodels.tech as ${ACCOUNT.username}.\nRepository as namespace/name — leave empty for ${ACCOUNT.username}/<this run's name>.`, "");
-    if (repo === null) return;
-    try { const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: ref, repo: repo.trim() || null}}); location.hash = "#/jobs/" + job.id; }
-    catch (e) { toast(e.message); }
+    const modal = $("#publish"), repo = $("#publish-repo"), box = $("#publish-noulxp");
+    const note = $("#publish-noulxp-note"), go = $("#publish-go");
+    let info = null;
+    try { info = await api(`/api/runs/${encodeURIComponent(ref.replace(/^run:/, ""))}/noulxp`); } catch (e) { /* explained below */ }
+    $("#publish-lede").textContent = `The model goes up to systemonemodels.tech as ${ACCOUNT.username}, with a card built from this run's measurements.`;
+    repo.value = ""; repo.placeholder = `${ACCOUNT.username}/<this run's name>`;
+    const explain = () => {
+      const p = info && info.package;
+      if (!box.checked) note.innerHTML = `<p class="hint">The checkpoint goes up alone. The registry will not check it for NoulXP compatibility, and its card says so.</p>`;
+      else if (p) note.innerHTML = `<p class="hint">The run's package goes up as the version's <code>noulxp/</code> folder: ${p.cases_passed}/${p.cases} cases reproduced on the CPU, max |Δp| ${dpText(p.max_abs_dp)}. The registry checks it again before it shows the model as NoulXP compatible.${p.test_rows ? ` Its conformance file holds ${p.test_rows} rows of your test split, which are published with it.` : ""}</p>`;
+      else if (info && info.tooling) note.innerHTML = `<div class="notice warn">This run has no NoulXP package, and this machine cannot build one: ${esc(info.tooling)}</div>`;
+      else note.innerHTML = `<p class="hint">This run has no NoulXP package yet, so one is built and checked on the CPU first, which takes a few minutes. Its conformance file holds up to ${info ? info.test_rows : 100} rows of your test split, which are published with it. If the package does not pass, nothing is uploaded.</p>`;
+    };
+    box.checked = true; box.onchange = explain; explain();
+    modal.hidden = false; repo.focus();
+    $("#publish-cancel").onclick = () => { modal.hidden = true; };
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const job = await api("/api/jobs", {method: "POST", body: {kind: "publish", model: ref, repo: repo.value.trim() || null, noulxp: box.checked}});
+        modal.hidden = true; location.hash = "#/jobs/" + job.id;
+      } catch (e) { note.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+      finally { go.disabled = false; }
+    };
   });
 }
 function exportLabel(x) {
-  return ({onnx: "ONNX", coreml: "Core ML"}[x.target] || String(x.target).toUpperCase()) + (x.precision && x.precision !== "float" ? " · " + x.precision : "");
+  return ({onnx: "ONNX", coreml: "Core ML", noulxp: "NoulXP"}[x.target] || String(x.target).toUpperCase()) + (x.precision && x.precision !== "float" ? " · " + x.precision : "");
+}
+function dpText(v) { return v == null ? "–" : Number(v).toExponential(1); }
+function leftOut(x) {
+  const qs = Object.entries(x.questions_left_out || {});
+  return qs.length ? `Not in the conformance file: ${qs.map(([q, why]) => `${q} (${why})`).join("; ")}.` : "";
+}
+// A NoulXP export: the package the run keeps (it passed its check), or the attempt that failed.
+function noulxpItem(x) {
+  const ok = x.state === "passed", left = leftOut(x);
+  return `<li>${pill(ok ? "done" : "bad", "NoulXP")}
+    ${x.cases != null ? `<span>${x.cases_passed}/${x.cases} cases reproduced on the CPU</span>` : ""}
+    ${x.max_abs_dp != null ? `<span>max |Δp| ${dpText(x.max_abs_dp)}</span>` : ""}
+    ${ok ? `<span>${x.test_rows || 0} test rows in its conformance file</span><span>goes up when you publish</span>` : `<span class="down">${esc(x.error || "did not pass its check")}</span>`}
+    ${x.last_attempt ? `<span class="faint">a later rebuild failed: ${esc(x.last_attempt.error || "")}</span>` : ""}
+    ${left ? `<span class="faint">${esc(left)}</span>` : ""}
+    <span>${esc(when(x.created))}</span>
+    ${x.path ? `<span class="mono path">${esc(x.path)}</span>` : ""}</li>`;
+}
+function noulxpNotice(r) {
+  const cases = r.cases != null ? ` ${r.cases_passed}/${r.cases} cases reproduced on the CPU, max |Δp| ${dpText(r.max_abs_dp)}.` : "";
+  const left = leftOut(r);
+  return r.state === "passed"
+    ? `<div class="notice good"><b>The NoulXP package passed.</b>${esc(cases)}${r.test_rows ? ` ${r.test_rows} rows of your test split are in its conformance file, next to NoulXP's own requests.` : ""} It is kept with the run and goes up with it when you publish.${left ? " " + esc(left) : ""}</div>`
+    : `<div class="notice bad"><b>The NoulXP package did not pass.</b>${esc(cases)} It is kept for reading and is never published.${left ? " " + esc(left) : ""}</div>`;
 }
 function exportItem(x) {
+  if (x.target === "noulxp") return noulxpItem(x);
   const ms = x.ms_per_decision || x.ms_per_decision_cpu;
   return `<li>${pill("accent", exportLabel(x))}
     <span>${x.size_mb != null ? bytes(x.size_mb * 2 ** 20) : "–"}</span>
@@ -2621,6 +2732,7 @@ async function viewModels(_, __, token) {
     "unknown": pill("", "unknown"),
   }[m.fit] || "");
   const trainerPill = t => t === "ready" ? pill("done", "trains here") : t === "next" ? pill("running", "trainer coming next") : pill("", "trainer planned");
+  const noulxpPill = n => !n ? "" : n.status === "ready" ? pill("done", "NoulXP: " + n.profile) : n.status === "trainer" ? pill("", "NoulXP with its trainer") : pill("", "no NoulXP profile yet");
   const gb = n => n == null ? "–" : `${n} GB`;
   const params = b => b >= 1 ? `${b.toFixed(b >= 10 ? 0 : 1)}B` : b >= 0.001 ? `${Math.round(b * 1000)}M` : `${Math.round(b * 1e6)}K`;
   main.innerHTML = `<h1>Models</h1>
@@ -2645,7 +2757,7 @@ async function viewModels(_, __, token) {
   </section>
   <section class="section">
     <div class="section-head"><h2>Format and portability</h2></div>
-    <p class="hint">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. Exports add ONNX and Core ML in float, int8 or int4.</p>
+    <p class="hint">A Laya checkpoint is <code>model.safetensors</code> (FP16, the original PyTorch parameter names), <code>rl_agent_config.json</code> (with refitted temperatures), <code>encoder/</code>, <code>tokenizer/</code>, <code>questions.json</code> and <code>laya_finetune.json</code> (provenance). The same files load in <code>laya-mlx</code> on Apple silicon and in the PyTorch <code>laya</code> package on Windows, Linux, NVIDIA, AMD and Intel. Exports add ONNX and Core ML in float, int8 or int4, and a NoulXP package: the open standard's ONNX package with a conformance file of the fine-tune's own answers, checked on the CPU and kept with the run, which publishes it so systemonemodels.tech can check it for NoulXP compatibility.</p>
   </section>`;
 
   const bindDownloads = root => $$("[data-dl]", root).forEach(b => b.onclick = async () => { try { const r = await api("/api/jobs", {method: "POST", body: {kind: "download", repo_id: b.dataset.dl}}); location.hash = "#/jobs/" + r.id; } catch (e) { toast(e.message); } });
@@ -2721,8 +2833,9 @@ async function viewModels(_, __, token) {
     $("#families").innerHTML = `<p class="hint">This machine: ${m.memory_gb ? `${m.memory_gb} GB for training` : "memory unknown"}${m.accelerator ? " · " + esc(m.accelerator) : ""}. Estimates are for LoRA in bf16, and 4-bit QLoRA where that is the only way in.</p>` +
       cat.families.map((f, i) => {
         const fit = f.models.filter(x => x.fit === "fits" || x.fit === "qlora").length;
-        return `<details class="family"${i === 0 ? " open" : ""}><summary><b>${esc(f.name)}</b><span class="muted small">${f.models.length} ${f.models.length === 1 ? "model" : "models"} · ${fit} fit here</span><span class="spacer"></span>${trainerPill(f.trainer)}</summary>
+        return `<details class="family"${i === 0 ? " open" : ""}><summary><b>${esc(f.name)}</b><span class="muted small">${f.models.length} ${f.models.length === 1 ? "model" : "models"} · ${fit} fit here</span><span class="spacer"></span>${noulxpPill(f.noulxp)}${trainerPill(f.trainer)}</summary>
         <div class="family-body"><p class="hint" style="margin:12px 0">${esc(f.how)} <span class="faint">· ${esc(f.backends)}</span></p>
+        ${f.noulxp ? `<p class="hint" style="margin:-4px 0 12px"><b>NoulXP</b>${f.noulxp.profile ? ` (${esc(f.noulxp.profile)} profile)` : ""}: ${esc(f.noulxp.note)}</p>` : ""}
         <div class="tablewrap"><table class="wide"><tr><th>Model</th><th>Maker</th><th>Size</th><th>Licence</th><th>Needs</th><th>Here</th><th></th></tr>
         ${f.models.map(x => `<tr><td><a class="mono" href="https://huggingface.co/${esc(x.repo)}" target="_blank" rel="noreferrer">${esc(x.repo)}</a>${x.note ? `<div class="faint small">${esc(x.note)}</div>` : ""}${warnings(x.warnings)}</td>
           <td>${esc(x.maker)}</td><td>${x.params_b ? params(x.params_b) : "–"}</td><td>${esc(x.licence)}</td>
