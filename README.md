@@ -67,6 +67,21 @@ Latency and price for hosted APIs are as reported by the community catalog at [m
 | 🐍 **Proof, not vibes** | A built-in Snake task where the fine-tuned model plays *unassisted* — the base model dies on move one |
 | 🎛 **A studio, not a script** | A landing page, live training charts, a side-by-side playground and a Snake arena — all served from one local file |
 
+## Model families
+
+The studio trains three System One checkpoint formats, each in its maker's own prompt and files,
+so a fine-tune loads wherever its base model loads:
+
+| Model | Maker, licence | Trainer here | Exports |
+|---|---|---|---|
+| [Laya](https://github.com/NandhaKishorM/laya) (421M, 322M multilingual) | Convai Innovations, Apache-2.0 | MLX on Apple silicon, PyTorch everywhere else | ONNX, Core ML, NoulXP |
+| [Julia 1](https://huggingface.co/SupersonicLabs/Julia-1) (144M) | Supersonic Labs, Apache-2.0 | the same two trainers, Julia's prompt and float32 files | NoulXP |
+| [Decider](https://huggingface.co/Mapika/decider-2b) (0.8B, 2B, 4B) | Mapika, Apache-2.0 | LoRA with PEFT on PyTorch (4-bit QLoRA on NVIDIA), MLX-LM on Apple silicon | merged safetensors, GGUF, MLX-LM, NoulXP |
+
+Every other published System One model is listed on the Models page with its family, licence and
+what this machine can do with it; [docs/families.md](docs/families.md) has the full table, what
+each licence allows, the numbers measured on a GPU, and the order the remaining families come in.
+
 ## Install and run
 
 The quickest way, on any machine:

@@ -3027,7 +3027,9 @@ async function viewGuide() {
   <li><b>Honest test rows</b> that look like production traffic, ideally 200+ decisions.</li>
   <li><b>An escape hatch:</b> add an <code>other</code> option; the model always picks one of the options it is given.</li>
   <li><b>Soft labels</b> when annotators disagree, or when labels come from a larger teacher model (distillation).</li></ul></section>
-  <section class="card"><h2>6 · Limits to keep in mind</h2><ul style="padding-left:18px;margin:0">
+  <section class="card"><h2>6 · Julia 1 and Decider train here too</h2><p><b>Julia 1</b> (Supersonic Labs, 144M) is Laya's network with its own prompt: an option is its description, up to 8,192 tokens and 20 options. It trains with the same recipes, and its fine-tunes keep Julia's own files, in float32, with the calibration temperature folded into the scorer.</p>
+  <p><b>Decider</b> (Mapika, 0.8B to 4B) is a language model read by its answer letters: <code>Context: … Question: … (A) … (B) … Answer: (</code>. It trains with LoRA on its attention and MLP projections (or 4-bit QLoRA when memory is short), with cross-entropy on the letters, as Decider itself was made; a score question is one yes/no row per level. Its fine-tunes export to GGUF and MLX-LM, and every family gets a checked NoulXP package.</p></section>
+  <section class="card"><h2>7 · Limits to keep in mind</h2><ul style="padding-left:18px;margin:0">
   <li>Inputs beyond 512 / 1,024 tokens are cut: check the token budget on each dataset.</li>
   <li>Many labels share one option budget, so long label lists get clipped; fine-tuning helps, shorter criteria help more.</li>
   <li>Fine-tuning specializes the model. Evaluate other questions you rely on before replacing a general checkpoint.</li>
