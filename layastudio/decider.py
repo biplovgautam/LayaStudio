@@ -59,9 +59,13 @@ LORA_TARGETS = (
 
 # Decider v11's own LoRA stage was rank 64, alpha 128, learning rate 1e-4, 5% warm-up and a
 # cosine decay. A studio dataset is far smaller, so the default is the same shape at rank 16.
+# The objective defaults to the proper scoring rule the Laya trainer uses (log + spherical
+# score on each row's letters): on the Emotion example (A40, 600 test decisions) it beat
+# Decider's own cross-entropy, 90.7% against 89.2%, log loss 0.33 against 0.48, ECE 0.029
+# against 0.053. Cross-entropy stays available as "ce".
 HYPERPARAMETERS = {
     "method": "lora",
-    "objective": "ce",  # ce | proper
+    "objective": "proper",  # proper | ce
     "epochs": 2,
     "batch_size": 8,  # rows per micro-batch (fewer when batch_tokens says so)
     "batch_tokens": 8192,  # padded tokens per micro-batch
@@ -446,7 +450,9 @@ def fit_temperatures(answers, base_cfg, minimum=10):
     for qtype in TYPES:
         chosen = [a for a in answers if a[0] == qtype]
         if len(chosen) >= minimum:
-            by_type[qtype] = round(_golden(lambda T, c=chosen: nll(c, T), lo=0.25, hi=8.0), 4)
+            # The Laya trainer's range (engine.fit_temperature), which laya-mlx also enforces:
+            # a small validation split answered perfectly would otherwise drive T towards 0.
+            by_type[qtype] = round(_golden(lambda T, c=chosen: nll(c, T), lo=0.5, hi=5.0), 4)
             fitted.append(qtype)
         else:
             by_type[qtype] = temperature(base_cfg, qtype)

@@ -8,7 +8,8 @@ engine against the package's own conformance file, on the CPU; a pass shows the 
 
 The studio builds that package with **noulxp 0.4** (the release the registry checks with; the
 `export` extra installs it) for every fine-tune of a family that has both a trainer here and a
-NoulXP exporter. Today that is the Laya family.
+NoulXP exporter. Today that is every fine-tune the studio writes: Laya and Julia 1
+(`encoder-markers`) and Decider (`causal-letters`).
 
 ## What a fine-tune gets
 
@@ -18,11 +19,15 @@ python -m layastudio.export run:<id> --target noulxp     # or Export → NoulXP 
 python -m layastudio.publish_systemone run:<id>          # or Publish to System One
 ```
 
-1. `noulxp export laya` writes the package from the run's checkpoint: an ONNX graph whose weights
-   are the checkpoint's own `model.safetensors`, the tokenizer, `template.json` and
-   `calibration.json`.
-2. `noulxp conformance generate` records the fine-tune's own answers, from the `laya` package in
-   float32 on the CPU, to NoulXP's request set (52 requests, 11 languages: the coverage SPEC.md 9.2
+1. `noulxp export laya` (or `julia`) writes the package from the run's checkpoint: an ONNX graph
+   whose weights are the checkpoint's own `model.safetensors`, the tokenizer, `template.json` and
+   `calibration.json`. For a Decider fine-tune, `noulxp export decider` packages the run's GGUF
+   (`layastudio/gguf.py` converts it with llama.cpp's converter at a pinned commit; q8_0 by
+   default, as Decider's own package ships, `--gguf bf16` for the exact weights) with the
+   tokenizer, `prompt.json` and the fine-tune's temperatures as `calibration.json`.
+2. `noulxp conformance generate` records the fine-tune's own answers, from the model's own runtime
+   on the CPU (the `laya` package in float32; Julia's own inference; Decider's own GGUF readout
+   through llama.cpp), to NoulXP's request set (52 requests, 11 languages: the coverage SPEC.md 9.2
    asks for). Rows of the run's own test split can be added with `--test-rows N` (default 0);
    **rows added that way are published inside the package**, in `conformance.jsonl`, so a private
    dataset should stay at 0. A question over NoulXP's limits (20 options, 10 levels) cannot be asked
@@ -45,14 +50,15 @@ the checkpoint alone, and its card says it carries no package.
 
 | Family | NoulXP profile | Where the exporter stands | In the studio |
 |---|---|---|---|
-| Encoder + option-marker head (Laya style) | `encoder-markers` (ONNX) | `noulxp export laya`, released in noulxp 0.4 | built, checked and published with every fine-tune the studio writes (a standard Laya checkpoint); the check decides |
-| Decoder, letter readout (Jev / SemIf style: Nimble, Decider, JevK5, Tev1, cua-s1, Eikos, …) | `causal-letters` (GGUF) | noulxp 0.4 exports Decider (`noulxp export decider`) and AnyJev (`noulxp export anyjev`) only | arrives with this family's trainer, with an exporter for its fine-tunes |
+| Encoder + option-marker head (Laya style) | `encoder-markers` (ONNX) | `noulxp export laya` and `noulxp export julia`, released in noulxp 0.4 | built, checked and published with every Laya and Julia 1 fine-tune; the check decides. Von, open-jev, JevK5-Lite and dev-0.4b need exporters of their own |
+| Decoder, letter readout (Jev / SemIf style: Nimble, Decider, JevK5, Tev1, cua-s1, Eikos, …) | `causal-letters` (GGUF) | noulxp 0.4 exports Decider (`noulxp export decider`) and AnyJev (`noulxp export anyjev`) | built, checked and published with every Decider fine-tune; the other models' prompts arrive with their trainers |
 | Per-option cross-encoder | `encoder-pairs` | exists only on an unreleased noulxp branch (`encoder-pairs`, NoulXP 0.3 draft: Mira) | arrives with this family's trainer and a noulxp release that has the profile |
 | Decoder + learned pointer or slot head (Kev, OpenThai, Jev-Omni, NanoJev) | none yet | — | needs a profile first |
 | GLiNER2 / GLiClass extractor | none yet | — | needs a profile first |
 | Frozen embedder + small heads (CLM) | none yet | — | needs a profile first |
 | Tiny scorer from scratch (cua-s1-forms, cua-s1-nano) | none yet | — | needs a profile first |
 
-Only the Laya family trains here today, so every run gets a package. The Models page shows each
-family's NoulXP state, and an export or publish asked of another family says that NoulXP export
-arrives with that family's trainer instead of claiming a badge.
+Every kind the studio trains (Laya, Julia 1, Decider) has an exporter, so every run gets a
+package; a run is packaged as what its checkpoint is, whatever its base's catalogue entry says. The
+Models page shows each family's NoulXP state, and [families.md](families.md) has the packages
+measured on a GPU (52/52 for Julia 1 and Decider fine-tunes).

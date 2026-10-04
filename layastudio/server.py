@@ -2350,7 +2350,7 @@ const KIND_PRESETS = {
     head: PRESETS.head,
   },
   decider: {
-    lora: {title: "LoRA", sub: "Decider v11's own recipe shape: LoRA on the attention and MLP projections, cross-entropy on the option letters.", hp: {method: "lora"}},
+    lora: {title: "LoRA", sub: "Decider v11's own recipe shape: LoRA on the attention and MLP projections, a proper scoring rule on the option letters.", hp: {method: "lora"}},
     loraplus: {title: "LoRA+ ×4", sub: "The B matrices learn 4× faster: often better in few epochs.", hp: {method: "lora", loraplus_ratio: 4}},
     qlora: {title: "QLoRA (4-bit)", sub: "The frozen base in 4 bits: about half the memory, a little slower. NVIDIA GPUs and Apple silicon.", hp: {method: "lora", quantization: "4bit"}},
   },
@@ -2367,7 +2367,7 @@ function advancedFields(kind, H) {
     ${field("grad_accum", "Gradient accumulation", H.grad_accum)}${field("lr", "LoRA learning rate", H.lr)}${field("patience", "Early-stop patience (epochs)", H.patience)}
     ${field("lora_rank", "LoRA rank", H.lora_rank)}${field("lora_alpha", "LoRA alpha", H.lora_alpha)}${field("seed", "Seed", H.seed)}
     ${field("max_train_options", "Options per training row (gold kept; 0 = all)", H.max_train_options)}${field("max_state_tokens", "State tokens read in training", H.max_state_tokens)}${field("lora_dropout", "LoRA dropout", H.lora_dropout)}
-    ${select("objective", "Objective", H.objective, [["ce", "ce — cross-entropy on the letters (Decider's own)"], ["proper", "proper — log + spherical scores"]])}
+    ${select("objective", "Objective", H.objective, [["proper", "proper — log + spherical scores (measured best)"], ["ce", "ce — cross-entropy on the letters (Decider's own)"]])}
     ${select("class_weighting", "Class weighting", H.class_weighting, [["none", "none"], ["balanced", "balanced (rare labels count more)"]])}
     ${select("precision", "Frozen weights precision", H.precision, [["bfloat16", "bfloat16 (less memory)"], ["float32", "float32"]])}
     ${select("quantization", "Frozen weights in 4 bits", H.quantization, [["none", "no (LoRA)"], ["4bit", "yes (QLoRA: NVIDIA or Apple silicon)"]])}
