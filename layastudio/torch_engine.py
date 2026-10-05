@@ -453,8 +453,9 @@ def schedule_factor(warm, updates):
     return factor
 
 
-def fit(spec, hp, emit, workspace=WORKSPACE):
-    """Train, pick the best epoch, calibrate and save. Returns a training summary."""
+def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
+    """Train, pick the best epoch, calibrate and save. Returns a training summary.
+    before_model: called once the rows are encoded, before the model loads (the baseline)."""
     import torch
 
     device = runtime.torch_device()
@@ -481,6 +482,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     probe, skipped = encode(tok, cfg, train_rows, questions)
     if not probe:
         raise ValueError("No training decisions fit the model's token budget")
+    if before_model:
+        before_model()
     model, cfg = load_training_model(base_dir, hp, device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     trainable = sum(p.numel() for p in trainable_params)

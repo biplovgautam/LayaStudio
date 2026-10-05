@@ -201,6 +201,32 @@ def test_pytorch_training_writes_a_julia_checkpoint(checkpoint, tmp_path, monkey
     assert 0.5 <= T <= 5.0
 
 
+def test_a_run_that_cannot_train_stops_before_the_baseline(checkpoint, tmp_path, monkeypatch):
+    """The trainer encodes its rows before the base model is evaluated: a run none of whose
+    decisions fit the model's budget fails before the baseline's GPU minutes, not after."""
+    monkeypatch.setenv("LAYASTUDIO_BACKEND", "torch")
+    monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
+    workspace, meta = workspace_with_data(tmp_path, 30)
+    spec = {"run_id": "jb", "dataset": meta["id"], "base_model": f"path:{checkpoint}"}
+    events, baselines = [], []
+
+    class Stop(Exception):
+        pass
+
+    def baseline(*args):
+        baselines.append([kind for kind, _ in events])
+        raise Stop
+
+    monkeypatch.setattr(engine, "baseline", baseline)
+    with pytest.raises(Stop):  # the rows are encoded first, then the baseline runs
+        engine.train(spec, lambda kind, **d: events.append((kind, d)), workspace)
+    assert baselines == [["phase"]] and events[0][1]["phase"] == "prepare"
+    monkeypatch.setattr(julia, "encode_items", lambda *a, **k: ([], 99))  # nothing fits
+    with pytest.raises(ValueError, match="No training decisions fit"):
+        engine.train(spec, lambda kind, **d: None, workspace)
+    assert len(baselines) == 1
+
+
 def test_frozen_weights_are_written_as_the_base_has_them(checkpoint, tmp_path, monkeypatch):
     """bfloat16 training never rounds the float32 checkpoint: untouched tensors are the
     base's bit for bit, and adapted ones are the base plus the LoRA update."""

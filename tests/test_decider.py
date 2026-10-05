@@ -230,6 +230,18 @@ def test_pytorch_lora_writes_a_decider_checkpoint(checkpoint, tmp_path, monkeypa
     assert {k: v["shape"] for k, v in before.items()} == {k: v["shape"] for k, v in after.items()}
 
 
+def test_qlora_off_cuda_is_refused_before_the_baseline(monkeypatch):
+    """4-bit QLoRA needs CUDA on PyTorch: said before the baseline evaluates anything."""
+    from layastudio import decider_engine
+
+    monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
+    hp = {**decider.HYPERPARAMETERS, "quantization": "4bit"}
+    ran = []
+    with pytest.raises(ValueError, match="4-bit QLoRA needs an NVIDIA GPU"):
+        decider_engine.torch_fit({}, hp, lambda *a, **k: None, before_model=lambda: ran.append(1))
+    assert ran == []
+
+
 @needs_mlx_lm
 def test_mlx_lora_writes_the_same_checkpoint_format(checkpoint, tmp_path):
     from layastudio import decider_mlx

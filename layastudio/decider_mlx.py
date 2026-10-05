@@ -225,7 +225,7 @@ def evaluate_rows(model, items, letters, pad_id, rows_per_batch=16):
     return total / max(1, len(items)), hits / max(1, len(items)), out
 
 
-def fit(spec, hp, emit, workspace=WORKSPACE):
+def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     """The MLX trainer: decider_engine.torch_fit's steps, on Apple silicon."""
     import mlx.core as mx
     import mlx.nn as nn
@@ -253,6 +253,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     probe, skipped = decider.encode_items(prompter, train_rows, questions, hp=hp)
     if not probe:
         raise ValueError("No training rows could be built in Decider's prompt")
+    if before_model:
+        before_model()
     frozen = mx.bfloat16 if hp["precision"] == "bfloat16" else mx.float32
     model = load(base_dir, dtype=frozen)
     if hp.get("quantization") == "4bit":

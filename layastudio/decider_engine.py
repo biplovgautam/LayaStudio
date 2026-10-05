@@ -44,13 +44,14 @@ CARRIED = (
 )
 
 
-def fit(spec, hp, emit, workspace=WORKSPACE):
-    """Train on this machine's backend: MLX-LM on Apple silicon, PyTorch everywhere else."""
+def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
+    """Train on this machine's backend: MLX-LM on Apple silicon, PyTorch everywhere else.
+    before_model: called once the rows are built, before the model loads (the baseline)."""
     if runtime.backend() == "mlx":
         from . import decider_mlx
 
-        return decider_mlx.fit(spec, hp, emit, workspace)
-    return torch_fit(spec, hp, emit, workspace)
+        return decider_mlx.fit(spec, hp, emit, workspace, before_model)
+    return torch_fit(spec, hp, emit, workspace, before_model)
 
 
 def check_hyperparameters(hp):
@@ -63,6 +64,12 @@ def check_hyperparameters(hp):
     for key in ("batch_size", "batch_tokens", "grad_accum", "epochs", "lora_rank"):
         if int(hp.get(key, 1)) < 1:
             raise ValueError(f"{key} must be at least 1")
+
+
+def check_device(hp, device):
+    """Refuse what this PyTorch device cannot train: 4-bit QLoRA needs CUDA (bitsandbytes)."""
+    if hp.get("quantization") == "4bit" and getattr(device, "type", "cpu") != "cuda":
+        raise ValueError("4-bit QLoRA needs an NVIDIA GPU here (bitsandbytes); use LoRA")
 
 
 # ----------------------------------------------------------------------------- the model
@@ -84,8 +91,7 @@ def load_base(model_dir, hp, device):
 
     dtype = base_dtype(torch, device, hp["precision"])
     if hp.get("quantization") == "4bit":
-        if getattr(device, "type", "cpu") != "cuda":
-            raise ValueError("4-bit QLoRA needs an NVIDIA GPU here (bitsandbytes); use LoRA")
+        check_device(hp, device)
         from transformers import BitsAndBytesConfig
 
         quantization = BitsAndBytesConfig(
@@ -243,7 +249,7 @@ def trainable_state(model):
     }
 
 
-def torch_fit(spec, hp, emit, workspace=WORKSPACE):
+def torch_fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     """Train, keep the best epoch, calibrate, merge and save. Returns the training summary."""
     import torch
 
@@ -251,6 +257,7 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE):
 
     check_hyperparameters(hp)
     device = runtime.torch_device()
+    check_device(hp, device)  # before the baseline, which a run that cannot train never needs
     decider.portable_kernels(device)
     run_dir = workspace / "runs" / check_id(spec["run_id"])
     questions, rows, meta = load_dataset(spec["dataset"], workspace)
@@ -274,6 +281,8 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE):
     probe, skipped = decider.encode_items(prompter, train_rows, questions, hp=hp)
     if not probe:
         raise ValueError("No training rows could be built in Decider's prompt")
+    if before_model:
+        before_model()
     longest = max(len(it["ids"]) for it in probe)
     kind = getattr(device, "type", "cpu")
     checkpoint = hp["grad_checkpoint"] == "on" or (

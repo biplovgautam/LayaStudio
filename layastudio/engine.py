@@ -984,11 +984,12 @@ def save_julia_checkpoint(model, base_dir, out_dir, questions, provenance):
     return julia.write_checkpoint(tensors, base_dir, out_dir, questions, provenance, save)
 
 
-def fit(spec, hp, emit, workspace=WORKSPACE):
+def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     """Train, pick the best epoch, calibrate and save. Returns a training summary.
 
     Kept separate from train() so the model, optimizer state and gradients are released
     when this returns, before the fine-tuned checkpoint is reloaded for evaluation.
+    before_model: called once the rows are encoded, before the model loads (the baseline).
     """
     import mlx.core as mx
     import mlx.nn as nn
@@ -1014,6 +1015,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE):
     probe, skipped = encode(tok, cfg, train_rows, questions)
     if not probe:
         raise ValueError("No training decisions fit the model's token budget")
+    if before_model:
+        before_model()
     model, cfg = load_training_model(base_dir, hp)
     trainable = sum(v.size for _, v in tree_flatten(model.trainable_parameters()))
     total = sum(v.size for _, v in tree_flatten(model.parameters()))
@@ -1202,18 +1205,25 @@ def train(spec, emit, workspace=WORKSPACE):
 
     kind = model_kind(spec["base_model"], workspace)
     hp = {**hyperparameters(kind), **spec.get("hyperparameters", {})}
-    if spec.get("baseline", True):
-        baseline(spec["base_model"], spec["dataset"], emit, workspace)
+
+    def before_model():
+        """The baseline, run by the trainer once it has encoded its rows and before it loads
+        the model: a run with nothing it can train on stops before the base model is
+        evaluated, not after."""
+        if spec.get("baseline", True):
+            baseline(spec["base_model"], spec["dataset"], emit, workspace)
+            emit("phase", phase="prepare", message="Building the model to fine-tune")
+
     if kind == kinds.DECIDER:
         from .decider_engine import fit as decider_fit
 
-        decider_fit(spec, hp, emit, workspace)
+        decider_fit(spec, hp, emit, workspace, before_model)
     elif runtime.backend() == "mlx":
-        fit(spec, hp, emit, workspace)
+        fit(spec, hp, emit, workspace, before_model)
     else:
         from .torch_engine import fit as torch_fit
 
-        torch_fit(spec, hp, emit, workspace)
+        torch_fit(spec, hp, emit, workspace, before_model)
     runtime.clear_cache()
 
     emit("phase", phase="evaluate", message="Evaluating the fine-tuned model on the test split")
