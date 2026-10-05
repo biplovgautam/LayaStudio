@@ -1549,6 +1549,7 @@ def run_job(job_dir):
                 emit,
                 precision=spec.get("precision", "float"),
                 test_rows=spec.get("test_rows"),
+                gguf=spec.get("gguf"),  # the GGUF a Decider package carries; bf16 unless asked
             )
         elif kind == "import":
             from .families import import_from_registry
