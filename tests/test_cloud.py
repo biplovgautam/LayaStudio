@@ -3,8 +3,13 @@ from a config file with no UI. Nothing here needs MLX, PyTorch or a real model, 
 end-to-end runs, which use the tests' tiny random checkpoints.
 """
 
+import hashlib
+import io
 import json
+import os
 import signal
+import subprocess
+import sys
 
 import pytest
 from common import QUESTIONS, make_rows
@@ -272,3 +277,149 @@ def test_an_export_job_passes_the_gguf_choice_on(tmp_path, monkeypatch):
         )
         assert engine.run_job(job) == 0
         assert seen["gguf"] == gguf and seen["precision"] == "float"
+
+
+# ----------------------------------------------------------------------------- headless runs
+
+
+def write_run(folder, base_model, **extra):
+    """A run file with its own dataset files, as a cloud GPU gets one."""
+    folder.mkdir(parents=True, exist_ok=True)
+    rows = jsonl(make_rows(45))
+    (folder / "train.jsonl").write_text(rows)
+    (folder / "questions.json").write_text(json.dumps(QUESTIONS))
+    checked = datasets.validate(QUESTIONS, rows, "train.jsonl", seed=13)[2]
+    config = {
+        "name": "tiny",
+        "base_model": base_model,
+        "dataset": {
+            "questions": "questions.json",
+            "train": "train.jsonl",
+            "seed": 13,
+            "expected": {"rows": checked["rows"], "sha256": checked["sha256"]},
+        },
+        "hyperparameters": {"epochs": 1, "batch_size": 4},
+        "workspace": "ws",
+        **extra,
+    }
+    (folder / "run.json").write_text(json.dumps(config))
+    return folder / "run.json", checked
+
+
+def test_a_run_file_that_cannot_train_ends_with_a_refusal(tmp_path):
+    config, _ = write_run(tmp_path / "run", "hub:aac6fef/no-such-model")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 2
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["type"] for e in events] == ["refused", "finished"]
+    assert "not downloaded yet" in events[0]["message"]
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "refused" and result["error"]["stage"] == "prepare"
+    assert not (tmp_path / "run/ws/runs").exists()  # nothing was written for it
+    config.write_text("{not json")
+    assert cloud.run(config, result=tmp_path / "r.json", stream=io.StringIO()) == 2
+    assert json.loads((tmp_path / "r.json").read_text())["state"] == "refused"
+
+
+def tiny_base(kind, folder):
+    """A tiny random base checkpoint of a kind, and the environment its run trains in: the
+    CPU through PyTorch when this machine has the PyTorch stack, else MLX."""
+    has_torch = all(
+        __import__("importlib").util.find_spec(m) for m in ("torch", "transformers", "laya")
+    )
+    if kind == "julia":
+        if not has_torch:
+            pytest.skip("Julia's tiny checkpoint is built with PyTorch")
+        import tiny
+
+        path = tiny.julia_checkpoint(folder / "julia")
+    else:
+        pytest.importorskip("mlx.core", reason="Laya's tiny checkpoint is built with MLX")
+        from test_noulxp import tiny_checkpoint
+
+        path = tiny_checkpoint(folder / "laya")
+    env = {"LAYASTUDIO_BACKEND": "torch", "LAYASTUDIO_DEVICE": "cpu"} if has_torch else {}
+    return f"path:{path}", env
+
+
+def headless(config, env, *args):
+    """`python -m layastudio.cloud --config <file>`, as a cloud GPU's agent calls it."""
+    return subprocess.Popen(
+        [sys.executable, "-m", "layastudio.cloud", "--config", str(config), *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ, **env},
+        cwd=str(engine.PACKAGE.parent),
+    )
+
+
+@pytest.mark.parametrize("kind", ["julia", "laya"])
+def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
+    """End to end with no UI: baseline, training and evaluation, then a NoulXP package where
+    this machine has the tooling; every event a JSON line, the result file at the end."""
+    from layastudio import noulxp_package
+
+    ref, env = tiny_base(kind, tmp_path / "models")
+    packaged = noulxp_package.missing_tooling(kind) is None
+    exports = [{"target": "noulxp"}] if packaged else []
+    config, checked = write_run(tmp_path / "run", ref, exports=exports)
+    process = headless(config, env)
+    stdout, stderr = process.communicate(timeout=900)
+    assert process.returncode == 0, stderr[-3000:]
+    events = [json.loads(line) for line in stdout.splitlines()]  # every line is one JSON event
+    assert events[0]["type"] == "prepared" and events[-1]["type"] == "finished"
+    assert events[0]["dataset"]["rows"] == checked["rows"]
+    stages = [(e["stage"], e["state"]) for e in events if e["type"] == "stage"]
+    expected = [("train", "running"), ("train", "done")]
+    if packaged:
+        expected += [("export:noulxp", "running"), ("export:noulxp", "done")]
+    assert stages == expected
+    trained = {e["type"] for e in events if e.get("stage") == "train" and "job" not in e}
+    assert {"phase", "epoch", "result", "done"} <= trained
+
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "succeeded" and result["kind"] == kind
+    assert result["dataset"]["sha256"] == checked["sha256"]
+    assert result["comparison"]["finetuned"]["overall"]["n"] > 0
+    assert result["training"]["kind"] == kind and "records" not in result["eval"]
+    run_dir = tmp_path / "run/ws/runs" / result["run_id"]
+    assert engine.read_json(run_dir / "run.json")["kind"] == kind
+    model = {f["path"]: f for f in result["outputs"]["model"]}
+    weights = run_dir / "model/model.safetensors"
+    assert model["model/model.safetensors"]["size"] == weights.stat().st_size
+    assert (
+        model["model/model.safetensors"]["sha256"]
+        == hashlib.sha256(weights.read_bytes()).hexdigest()
+    )
+    if packaged:
+        [package] = result["exports"]
+        assert package["state"] == "done" and package["result"]["state"] == "passed"
+        assert any(f["path"] == "noulxp/noulxp.json" for f in result["outputs"]["noulxp"])
+    else:
+        assert "noulxp" not in result["outputs"]
+
+
+def test_a_cancelled_run_stops_its_job_and_says_so(tmp_path):
+    for kind in ("julia", "laya"):
+        try:
+            ref, env = tiny_base(kind, tmp_path / "models" / kind)
+            break
+        except pytest.skip.Exception:
+            continue
+    else:
+        pytest.skip("no tiny checkpoint can be built here")
+    config, _ = write_run(tmp_path / "run", ref, hyperparameters={"epochs": 50, "batch_size": 4})
+    process = headless(config, env)
+    for line in process.stdout:
+        event = json.loads(line)
+        if event["type"] == "stage" and event["state"] == "running":
+            process.send_signal(signal.SIGTERM)
+            break
+    rest, _ = process.communicate(timeout=120)
+    assert process.returncode == 143
+    last = json.loads(rest.splitlines()[-1])
+    assert last == {**last, "type": "finished", "state": "cancelled"}
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "cancelled" and result["stages"][0]["state"] == "cancelled"
+    assert "outputs" not in result

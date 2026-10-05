@@ -1,4 +1,4 @@
-"""Fine-tunes without the UI: the checks every run starts with, here and in the cloud.
+"""Fine-tunes without the UI: the checks every run starts with, and a whole run from a file.
 
 A run in the cloud studio trains on a rented GPU that nobody watches, so it has to be refused,
 or started, exactly as the Train button here refuses or starts it. Both call prepare_run, the
@@ -17,7 +17,15 @@ one place those rules live:
 
 Then it writes the run's record, runs/<id>/run.json, and returns the jobs to start.
 
-A run's config, with paths relative to its own folder:
+    layastudio train --config run.json         # or: python -m layastudio.cloud --config run.json
+
+runs one fine-tune end to end with no UI: training (baseline, fit, evaluation, comparison),
+then each export, NoulXP packages included. Each is the child process the UI starts
+(python -m layastudio.engine run <job_dir>), so a run here is the run the studio makes. Every
+event is printed to stdout as one JSON line, and a result file says how the run ended, with
+its measurements and its output files (size and SHA-256). It is what a cloud GPU runs.
+
+The config, with paths relative to its own folder:
 
     {
       "name": "emotion",                              optional
@@ -36,8 +44,13 @@ A run's config, with paths relative to its own folder:
     }
 """
 
+import argparse
+import hashlib
 import json
 import math
+import os
+import signal
+import sys
 import time
 from pathlib import Path
 
@@ -70,6 +83,9 @@ COUNTS = (
 AT_LEAST_ONE = ("epochs", "batch_size", "grad_accum", "lora_rank", "batch_tokens")
 # The precision an export gets when the run does not say (as `python -m layastudio.export`).
 DEFAULT_PRECISION = {"gguf": "bf16", "mlx": "int4"}
+# Outputs of a run, in the result's manifest: the checkpoint, its NoulXP package (only one that
+# passed its check), and the exports (GGUF, MLX-LM).
+OUTPUTS = ("model", "noulxp", "exports")
 
 
 class Refused(ValueError):
@@ -366,3 +382,284 @@ def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
         "warnings": warnings,
         "run": record,
     }
+
+
+# ----------------------------------------------------------------------------- headless runs
+
+
+def _sha256(path, chunk=1 << 24):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while block := handle.read(chunk):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def manifest(run_dir):
+    """The run's output files, by kind: {"model": [{"path", "size", "sha256"}], ...}, with
+    paths relative to the run's folder."""
+    out = {}
+    for group in OUTPUTS:
+        folder = run_dir / group
+        if not folder.is_dir():
+            continue
+        out[group] = [
+            {
+                "path": path.relative_to(run_dir).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": _sha256(path),
+            }
+            for path in sorted(folder.rglob("*"))
+            if path.is_file() and not path.name.endswith(".tmp")
+        ]
+    return out
+
+
+class Printer:
+    """Events as JSON lines on a stream, each written whole and flushed at once."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def line(self, event):
+        self.stream.write(json.dumps(engine.finite(event), ensure_ascii=False, default=str) + "\n")
+        self.stream.flush()
+
+    def __call__(self, type_, /, **data):  # positional: events carry a "kind" field too
+        self.line({"t": round(time.time(), 3), "type": type_, **data})
+
+
+def _free_job_id(workspace, job_id):
+    job_id = job_id[:81].rstrip("-")
+    found, n = job_id, 1
+    while (workspace / "jobs" / found).exists():
+        n += 1
+        found = f"{job_id[:76].rstrip('-')}-{n}"
+    return found
+
+
+def _tail(path, lines=50):
+    try:
+        return path.read_text(errors="replace").splitlines()[-lines:]
+    except OSError:
+        return []
+
+
+class Headless:
+    """One prepared run's jobs, one after another, each a child process whose events are
+    forwarded as they are written. SIGTERM or Ctrl+C cancels the job that is running (SIGTERM,
+    then SIGKILL after 30 s) and starts no other."""
+
+    KILL_AFTER = 30
+
+    def __init__(self, workspace, emit):
+        self.workspace = workspace
+        self.emit = emit
+        # The jobs' workspace is the run's, for the files they keep beside it too.
+        self.env = {"LAYASTUDIO_HOME": str(workspace)}
+        self.process = None
+        self.cancelled = False
+
+    def cancel(self, *_):
+        self.cancelled = True
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+
+    def stage(self, stage, kind, spec, job_id, title):
+        """Run one job. {"stage", "job", "state", "seconds", "result", "error"}"""
+        job_id = _free_job_id(self.workspace, job_id)
+        path = engine.write_job(self.workspace, job_id, kind, spec, title)
+        self.emit("stage", stage=stage, job=job_id, state="running")
+        started = time.monotonic()
+        result = error = None
+        with open(path / "output.log", "w") as log:
+            self.process = engine.start_job(path, kind, log, self.env)
+            if self.cancelled:
+                self.process.terminate()
+            for event in self._follow(path / "events.jsonl"):
+                self.emit.line({**event, "stage": stage})
+                if event.get("type") == "result":
+                    result = {k: v for k, v in event.items() if k not in ("t", "type")}
+                elif event.get("type") == "error":
+                    error = event
+        code, self.process = self.process.returncode, None
+        state = "done" if code == 0 else "cancelled" if code == 143 or self.cancelled else "failed"
+        outcome = {
+            "stage": stage,
+            "job": job_id,
+            "state": state,
+            "seconds": round(time.monotonic() - started, 1),
+            "result": result,
+        }
+        if state == "failed":
+            error = error or {}
+            outcome["error"] = {
+                "message": error.get("message") or f"The job ended with exit code {code}",
+                "traceback": (error.get("traceback") or "").splitlines()[-50:],
+                "log_tail": _tail(path / "output.log"),
+            }
+        self.emit("stage", **{k: v for k, v in outcome.items() if k != "result"})
+        return outcome
+
+    def _follow(self, events_path):
+        """The child's events as they are written, until it exits."""
+        position, pending, stop_at = 0, "", None
+        while True:
+            done = self.process.poll() is not None
+            if events_path.exists():
+                with open(events_path, encoding="utf-8") as handle:
+                    handle.seek(position)
+                    pending += handle.read()
+                    position = handle.tell()
+                *complete, pending = pending.split("\n")
+                for line in complete:
+                    if line.strip():
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            yield {"t": round(time.time(), 3), "type": "log", "message": line}
+            if done:
+                return
+            if self.cancelled:
+                stop_at = stop_at or time.monotonic() + self.KILL_AFTER
+                if time.monotonic() > stop_at:
+                    self.process.kill()
+            time.sleep(0.2)
+
+
+def _summaries(run_dir):
+    evaluation = engine.read_json(run_dir / "eval.json")
+    return {
+        "training": engine.read_json(run_dir / "training.json"),
+        "comparison": engine.read_json(run_dir / "comparison.json"),
+        "eval": {k: v for k, v in evaluation.items() if k != "records"} if evaluation else None,
+    }
+
+
+def run(config, workspace=None, result=None, stream=None):
+    """Run the fine-tune a config file describes, end to end. Returns the exit code: 0 when it
+    trained (each export's own state is in the result), 1 when it failed, 2 when it was
+    refused, 143 when it was cancelled. The result file is written whatever happens."""
+    emit = Printer(stream or sys.stdout)
+    config = Path(config).resolve()
+    result = Path(result).resolve() if result else config.parent / "result.json"
+    started = time.time()
+    outcome = {"state": "failed", "config": str(config), "started": engine.now()}
+
+    def finish(state, code, **fields):
+        outcome.update(fields, state=state, finished=engine.now())
+        outcome["seconds"] = round(time.time() - started, 1)
+        engine.write_json(result, outcome)
+        emit("finished", state=state, result=str(result))
+        return code
+
+    try:
+        spec = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        emit("refused", message=f"Cannot read the config: {error}")
+        return finish("refused", 2, error={"stage": "prepare", "message": str(error)})
+    if not isinstance(spec, dict):
+        emit("refused", message="The config is a JSON object")
+        return finish("refused", 2, error={"stage": "prepare", "message": "not a JSON object"})
+    where = workspace or spec.get("workspace")
+    workspace = (config.parent / where).resolve() if where else engine.WORKSPACE
+    outcome["workspace"] = str(workspace)
+    ref = spec.get("base_model")
+    if isinstance(ref, str) and ref.startswith("path:"):  # a folder beside the config, too
+        spec["base_model"] = f"path:{(config.parent / Path(ref[5:]).expanduser()).resolve()}"
+    try:
+        prepared = prepare_run(spec, workspace, base=config.parent)
+    except Refused as error:
+        emit("refused", message=str(error))
+        return finish("refused", 2, error={"stage": "prepare", "message": str(error)})
+    except Exception as error:  # noqa: BLE001 - the result file says what went wrong
+        message = f"{type(error).__name__}: {error}"
+        emit("error", message=message)
+        return finish("failed", 1, error={"stage": "prepare", "message": message})
+
+    run_id = prepared["run_id"]
+    run_dir = workspace / "runs" / run_id
+    meta = prepared["dataset"]
+    outcome.update(
+        run_id=run_id,
+        name=prepared["name"],
+        kind=prepared["kind"],
+        base_model=prepared["job"]["base_model"],
+        run_dir=str(run_dir),
+        dataset={
+            k: meta.get(k) for k in ("id", "name", "sha256", "seed", "rows", "decisions", "kinds")
+        },
+        hyperparameters=prepared["hyperparameters"],
+        ignored=prepared["ignored"],
+        warnings=prepared["warnings"],
+        stages=[],
+        exports=[],
+    )
+    emit(
+        "prepared",
+        **{k: outcome[k] for k in ("run_id", "name", "kind", "base_model", "dataset")},
+        hyperparameters=prepared["hyperparameters"],
+        exports=prepared["exports"],
+        warnings=prepared["warnings"],
+    )
+
+    runner = Headless(workspace, emit)
+    previous = {sig: signal.signal(sig, runner.cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        train = runner.stage(
+            "train", "train", prepared["job"], run_id, f"Fine-tune: {prepared['name']}"
+        )
+        outcome["stages"].append(train)
+        outcome.update(_summaries(run_dir))
+        if train["state"] != "done":
+            error = {"stage": "train", **train.get("error", {"message": "Cancelled"})}
+            return finish(train["state"], 143 if train["state"] == "cancelled" else 1, error=error)
+        for spec in prepared["exports"]:
+            name = f"export:{spec['target']}"
+            if runner.cancelled:
+                outcome["exports"].append({**spec, "state": "cancelled"})
+                continue
+            done = runner.stage(
+                name, "export", spec, f"export-{spec['target']}-{run_id}", f"Export {run_id}"
+            )
+            outcome["stages"].append(done)
+            outcome["exports"].append(
+                {**spec, "state": done["state"], "result": done["result"]}
+                | ({"error": done["error"]} if "error" in done else {})
+            )
+        outcome["outputs"] = manifest(run_dir)
+        if runner.cancelled:
+            return finish("cancelled", 143, error={"stage": "export", "message": "Cancelled"})
+        return finish("succeeded", 0)
+    except Exception as error:  # noqa: BLE001 - the result file says what went wrong
+        return finish(
+            "failed", 1, error={"stage": "run", "message": f"{type(error).__name__}: {error}"}
+        )
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="layastudio train",
+        description="Run one fine-tune with no UI: training, then its exports. Events go to "
+        "stdout as JSON lines; the result file says how it ended.",
+    )
+    parser.add_argument("--config", required=True, type=Path, help="The run, as a JSON file")
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="Datasets, runs and checkpoints (default: the config's, else the studio's)",
+    )
+    parser.add_argument(
+        "--result", type=Path, help="Where the result goes (default: result.json beside the config)"
+    )
+    args = parser.parse_args(argv)
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    workspace = args.workspace.expanduser().resolve() if args.workspace else None
+    return run(args.config, workspace, args.result)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

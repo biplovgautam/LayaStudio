@@ -3,6 +3,7 @@
 your own data, on your own machine.
 
     layastudio                    # or: uv run layastudio
+    layastudio train --config run.json    # one fine-tune with no UI (cloud.py)
 
 One command. The server answers immediately and finishes setting itself up in the
 background: it detects this machine, checks the training runtime (MLX on Apple silicon,
@@ -26,6 +27,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import webbrowser
@@ -1179,9 +1181,16 @@ def find_port(preferred, host="127.0.0.1", tries=20):
 
 
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["train"]:  # a fine-tune with no UI: training, exports, a result file
+        from .cloud import main as train
+
+        return train(argv[1:])
     parser = argparse.ArgumentParser(
         prog="layastudio",
         description="Fine-tune Laya on your own data, on your own machine",
+        epilog="layastudio train --config run.json runs one fine-tune with no UI "
+        "(layastudio train --help)",
     )
     parser.add_argument("--port", type=int, default=8765, help="Default 8765, or the next free")
     parser.add_argument(

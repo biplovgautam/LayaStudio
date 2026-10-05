@@ -481,6 +481,22 @@ upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime
 
 **Roadmap:** training on NVIDIA GPUs and Linux; LiteRT for Android and NPUs; a batch scoring CLI; and an experiment on retraining the escalation head.
 
+### A run without the UI
+
+```bash
+layastudio train --config run.json       # or: python -m layastudio.cloud --config run.json
+```
+
+runs one fine-tune end to end with no page open: the baseline, training, evaluation and
+comparison, then each export the run asks for, NoulXP packages included. The config names the
+base model, the dataset (one in the workspace, or its files beside the config), the
+hyperparameters and the exports; [`layastudio/cloud.py`](layastudio/cloud.py) documents every
+field. Each step is the same child process the Train and Export buttons start, and the run is
+checked by the same function the Train button calls (`cloud.prepare_run`), so a run refused
+here is refused there too. Every event is printed to stdout as one JSON line, and
+`result.json` (beside the config) says how the run ended, with its measurements and its output
+files, each with its size and SHA-256. It is what the cloud studio's GPUs run.
+
 ## Privacy and security
 
 - Binds to `127.0.0.1` only, rejects other host names (DNS rebinding) and cross-origin requests, and accepts JSON bodies only, so a web page cannot drive it.
@@ -493,7 +509,9 @@ upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime
 | Path | What it is |
 |---|---|
 | [`layastudio/server.py`](layastudio/server.py) | The app in one file: JSON API + web UI, standard library only, no build step |
-| [`layastudio/engine.py`](layastudio/engine.py) | MLX engine: data parsing, token analysis, LoRA training, calibration, evaluation, export |
+| [`layastudio/engine.py`](layastudio/engine.py) | MLX engine: token analysis, LoRA training, calibration, evaluation, the job runner |
+| [`layastudio/datasets.py`](layastudio/datasets.py) | Datasets read, checked and split with the standard library alone, the same everywhere |
+| [`layastudio/cloud.py`](layastudio/cloud.py) | The checks every fine-tune starts with, and `layastudio train --config`, a run with no UI |
 | [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
 | [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
 | [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
@@ -505,8 +523,8 @@ upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime
 Jobs run as child processes of `layastudio.engine`, so a crash, a cancel or an out-of-memory error never takes the UI down, and GPU memory returns to the system when a job ends.
 
 ```bash
-uv run pytest -q          # 13 tests, no downloads, ~20 s
-uv run ruff check .
+uv run --extra dev pytest -q    # no downloads; tests that need MLX or PyTorch skip without them
+uv run --extra dev ruff check layastudio && uv run --extra dev ruff format --check layastudio
 ```
 
 ## FAQ

@@ -26,7 +26,10 @@ def studio(tmp_path):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     # Run setup inline, without touching the network: no download, no example datasets.
     setup = Bootstrap(tmp_path / "ws", download=False, fetch_examples=False)
-    setup.run()
+    try:
+        setup.run()
+    except SystemExit:  # no training stack here (neither MLX nor PyTorch): setup stops, as it may
+        pass
     server.Handler.studio = server.Studio(tmp_path / "ws", setup)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
