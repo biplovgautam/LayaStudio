@@ -227,7 +227,9 @@ def percent(value):
 
 
 def build_card(run, training, comparison, repo, questions, kind="laya"):
-    base_repo = run["base_model"].split(":", 1)[-1]
+    kind_, _, base_repo = run["base_model"].partition(":")
+    if kind_ == "hub":  # hub:<repo>@<revision>: the card names the repository
+        base_repo = base_repo.partition("@")[0]
     rows, extra = [], ""
     if comparison:
         base, tuned = comparison["base"]["overall"], comparison["finetuned"]["overall"]

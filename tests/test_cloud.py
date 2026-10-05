@@ -78,6 +78,10 @@ def hp(**values):
 
 BAD = {
     "no dataset": lambda c: {"base_model": c.laya},
+    "a hub reference with an empty revision": lambda c: {
+        **c.spec(),
+        "base_model": "hub:aac6fef/laya-mlx@",
+    },
     "unknown dataset": lambda c: {**c.spec(), "dataset": "no-such-dataset"},
     "dataset id that is a path": lambda c: {**c.spec(), "dataset": "../datasets"},
     "dataset files sent to the server": lambda c: {
@@ -195,9 +199,51 @@ def test_a_kind_that_answers_some_questions_says_which_it_leaves_out(context):
     questions = {**WIDE, "flag": QUESTIONS["flag"]}
     mixed = engine.create_dataset("mixed", questions, jsonl(rows), "m.jsonl", workspace=c.workspace)
     run = cloud.prepare_run({**c.spec("julia", name="j"), "dataset": mixed["id"]}, c.workspace)
-    assert run["warnings"] == ["Julia 1 leaves out wide: 25 options; Julia 1 answers 2 to 20"]
+    left_out = [w for w in run["warnings"] if "leaves out" in w]
+    assert left_out == ["Julia 1 leaves out wide: 25 options; Julia 1 answers 2 to 20"]
     laya = cloud.prepare_run({**c.spec(name="l"), "dataset": mixed["id"]}, c.workspace)
-    assert laya["warnings"] == []
+    assert not any("leaves out" in w for w in laya["warnings"])
+    # These bases are folders with no published name: trained, and said so.
+    assert any("no published name" in w for w in laya["warnings"])
+
+
+def hub_cache(tmp_path, monkeypatch, repo, kind):
+    """A Hugging Face cache holding repo at one commit, as a download by commit leaves it:
+    snapshots/<commit> and no refs/main. Returns the commit."""
+    import huggingface_hub.constants
+
+    commit = hashlib.sha1(repo.encode()).hexdigest()
+    folder = tmp_path / "hub" / f"models--{repo.replace('/', '--')}" / "snapshots" / commit
+    folder.mkdir(parents=True)
+    fake_checkpoint(folder, kind)
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    return commit
+
+
+def test_a_base_pinned_to_a_revision_is_found_licence_checked_and_named(
+    context, tmp_path, monkeypatch
+):
+    from layastudio import noulxp_package
+
+    _, c = context
+    commit = hub_cache(tmp_path, monkeypatch, "Mapika/decider-2b", kinds.DECIDER)
+    with pytest.raises(cloud.Refused, match="not downloaded yet"):  # main is not cached
+        cloud.prepare_run(c.spec("decider", base_model="hub:Mapika/decider-2b"), c.workspace)
+    ref = f"hub:Mapika/decider-2b@{commit}"
+    run = cloud.prepare_run({**c.spec(name="pinned"), "base_model": ref}, c.workspace)
+    assert run["kind"] == kinds.DECIDER and run["job"]["base_model"] == ref
+    assert not any("no published name" in w for w in run["warnings"])
+    # The package names the model and the revision it was trained from.
+    source = noulxp_package.provenance(run["run"], run["run_id"], c.workspace)
+    assert source["model"] == "Mapika/decider-2b" and source["revision"] == commit
+    assert source["license"]
+    # A pinned revision of a model whose licence allows no derivatives is refused all the same.
+    tev1 = hub_cache(tmp_path, monkeypatch, "together-ai/tev1", kinds.DECIDER)
+    with pytest.raises(cloud.Refused) as refused:
+        cloud.prepare_run({**c.spec(), "base_model": f"hub:together-ai/tev1@{tev1}"}, c.workspace)
+    with pytest.raises(cloud.Refused) as imported:
+        cloud.prepare_run(c.spec("tev1"), c.workspace)
+    assert str(refused.value) == str(imported.value)
 
 
 # ----------------------------------------------------------------------------- run files

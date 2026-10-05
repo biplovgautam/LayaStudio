@@ -987,7 +987,7 @@ class Studio:
 
 
 def modelname(ref):
-    return ref.split(":", 1)[-1].split("/")[-1]
+    return ref.split(":", 1)[-1].split("/")[-1].partition("@")[0]
 
 
 def label_text(qdef, target):
@@ -1839,7 +1839,7 @@ function renderSetup(setup) {
 }
 function modelName(ref) {
   if (!ref) return "–";
-  if (ref.startsWith("hub:")) return ref.slice(4).split("/").pop();
+  if (ref.startsWith("hub:")) return ref.slice(4).split("/").pop().split("@")[0];
   if (ref.startsWith("run:")) { const r = (OV?.runs || []).find(x => "run:" + x.id === ref); return r ? r.name : ref.slice(4); }
   if (ref.startsWith("path:")) { const m = (OV?.models || []).find(x => x.ref === ref); return m ? m.repo.replace(" (imported)", "") : ref; }
   return ref;

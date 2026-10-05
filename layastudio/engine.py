@@ -255,11 +255,22 @@ def load_dataset(dataset_id, workspace=WORKSPACE):
 # ----------------------------------------------------------------------------- models
 
 
+def hub_parts(value):
+    """(repo, revision) of a hub reference's value: <repo>, or <repo>@<revision> for a pinned
+    commit, tag or branch. revision is None for the main branch, as cached."""
+    repo, at, revision = str(value).partition("@")
+    if at and not (repo and revision):
+        raise ValueError(f"Unknown model reference 'hub:{value}'")
+    return repo, revision or None
+
+
 def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
-    """'hub:<repo>', 'run:<id>' or 'path:<dir>' -> local checkpoint directory.
+    """'hub:<repo>[@<revision>]', 'run:<id>' or 'path:<dir>' -> local checkpoint directory.
 
     The folder must be a complete checkpoint of a kind the studio trains (kinds.py): Laya,
-    Julia 1 or Decider. Hub repositories are fetched with the files their kind needs."""
+    Julia 1 or Decider. Hub repositories are fetched with the files their kind needs, at the
+    revision the reference pins (a download by commit leaves no main branch in the cache,
+    so a pinned model is found only by its revision)."""
     from . import kinds
 
     kind, _, value = str(ref).partition(":")
@@ -270,11 +281,13 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
     elif kind == "hub":
         from huggingface_hub import snapshot_download
 
+        repo, revision = hub_parts(value)
         try:
             path = Path(
                 snapshot_download(
-                    value,
-                    allow_patterns=list(kinds.DOWNLOAD[kinds.of_repo(value)]),
+                    repo,
+                    revision=revision,
+                    allow_patterns=list(kinds.DOWNLOAD[kinds.of_repo(repo)]),
                     local_files_only=not allow_download,
                 )
             )

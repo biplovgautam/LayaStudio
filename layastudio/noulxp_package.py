@@ -56,7 +56,16 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
-from .engine import WORKSPACE, check_id, load_dataset, now, read_json, resolve_model_ref, write_json
+from .engine import (
+    WORKSPACE,
+    check_id,
+    hub_parts,
+    load_dataset,
+    now,
+    read_json,
+    resolve_model_ref,
+    write_json,
+)
 
 REQUIREMENT = "noulxp[export,laya,onnx]>=0.4,<0.5"
 RELEASE = (0, 4)  # the noulxp release line systemonemodels.tech checks packages with
@@ -187,22 +196,33 @@ def locate(model_ref, workspace=WORKSPACE):
     return run_id, run_dir, model_dir, run
 
 
-def base_model(ref, workspace=WORKSPACE, depth=0):
+def base_model(ref, workspace=WORKSPACE):
     """The published name of the model a run started from; never a path on this machine."""
+    return base_reference(ref, workspace)[0]
+
+
+def base_reference(ref, workspace=WORKSPACE, depth=0):
+    """(repository, revision) of the model a run started from: a hub reference's own (its
+    revision when it pins one), a path imported from the registry (imports.json), or a run's
+    base, followed back. (None, None) for a folder the studio knows no published name of."""
     kind, _, value = str(ref or "").partition(":")
     if kind == "hub":
-        return value
+        try:
+            return hub_parts(value)
+        except ValueError:
+            return None, None
     if kind == "path":
         from .families import imports
 
-        return next((e.get("repo") for e in imports(workspace) if e.get("ref") == ref), None)
+        repo = next((e.get("repo") for e in imports(workspace) if e.get("ref") == ref), None)
+        return repo, None
     if kind == "run" and depth < 4:
         try:
             parent = read_json(workspace / "runs" / check_id(value) / "run.json") or {}
         except ValueError:
-            return None
-        return base_model(parent.get("base_model"), workspace, depth + 1)
-    return None
+            return None, None
+        return base_reference(parent.get("base_model"), workspace, depth + 1)
+    return None, None
 
 
 def support(run, workspace=WORKSPACE, model_dir=None):
@@ -225,11 +245,12 @@ def provenance(run, run_id, workspace=WORKSPACE):
     """The manifest's `source`: what this package is a conversion of. No local paths."""
     from .families import find
 
-    base = base_model(run.get("base_model"), workspace)
+    base, revision = base_reference(run.get("base_model"), workspace)
     known = find(base) if base else None
     training = read_json(workspace / "runs" / run_id / "training.json") or {}
     return {
         "model": base,
+        **({"revision": revision} if revision else {}),
         "license": known.licence if known else None,
         "fine_tune": {
             "tool": "System One Studio",

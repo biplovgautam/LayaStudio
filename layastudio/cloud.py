@@ -29,7 +29,8 @@ The config, with paths relative to its own folder:
 
     {
       "name": "emotion",                              optional
-      "base_model": "hub:Mapika/decider-2b",          hub:<repo> (downloaded), path:<dir>, run:<id>
+      "base_model": "hub:Mapika/decider-2b@<commit>", hub:<repo>[@<revision>] (downloaded),
+                                                      path:<dir>, run:<id>
       "dataset": {                                    or the id of a dataset in the workspace
         "questions": "questions.json",                a file, or the questions themselves
         "train": "train.jsonl", "test": "test.jsonl", test optional; JSONL, JSON, CSV or TSV
@@ -96,15 +97,11 @@ class Refused(ValueError):
 
 
 def check_licence(ref, workspace):
-    """Refuse a base model whose licence does not allow derivatives (families.py)."""
+    """Refuse a base model whose licence does not allow derivatives (families.py): a hub
+    repository at any revision, a folder imported from the registry, or a run's own base."""
     from . import families, noulxp_package
 
-    repo = (
-        ref.split(":", 1)[1]
-        if ref.startswith("hub:")
-        else noulxp_package.base_model(ref, workspace)
-    )
-    known = families.find(repo or "")
+    known = families.find(noulxp_package.base_model(ref, workspace) or "")
     if known and not families.trainer_status(known)["ready"]:
         raise Refused(families.trainer_status(known)["reason"])
 
@@ -112,7 +109,7 @@ def check_licence(ref, workspace):
 def base_model(ref, workspace):
     """(checkpoint folder, kind) of a base model the studio may fine-tune, or Refused."""
     if not isinstance(ref, str) or not ref:
-        raise Refused("Choose a base model: hub:<repo>, path:<folder> or run:<id>")
+        raise Refused("Choose a base model: hub:<repo>[@<revision>], path:<folder> or run:<id>")
     try:
         model_dir = engine.resolve_model_ref(ref, workspace)
         kind = kinds.check(model_dir)
@@ -340,6 +337,14 @@ def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
         warnings.append(
             f"Not hyperparameters of the {kinds.NAME[kind]} trainer: {', '.join(ignored)}"
         )
+    if ref.startswith("path:"):
+        from . import noulxp_package
+
+        if not noulxp_package.base_model(ref, workspace):
+            warnings.append(
+                "The base model is a folder with no published name: its licence is not "
+                "checked, and its packages name no base model (hub:<repo>@<revision> does both)"
+            )
 
     name = spec.get("name")
     if name is not None and not isinstance(name, str):
