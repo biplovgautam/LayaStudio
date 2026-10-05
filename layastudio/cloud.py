@@ -35,10 +35,10 @@ The config, with paths relative to its own folder:
         "questions": "questions.json",                a file, or the questions themselves
         "train": "train.jsonl", "test": "test.jsonl", test optional; JSONL, JSON, CSV or TSV
         "seed": 13,                                   the split's seed
-        "expected": {"rows": {"train": 1079, "val": 121, "test": 600}, "sha256": "..."}
+        "expected": {"rows": {"train": 1079, "val": 121, "test": 600}, "digest": "..."}
       },
       "hyperparameters": {"epochs": 2},               over the kind's defaults
-      "bounds": {"epochs": {"min": 1, "max": 5}},     optional limits on the final values
+      "bounds": {"epochs": {"min": 1, "max": 5}},     optional: what the run may change
       "limits": {"max_bytes": 26214400, "max_rows": 200000},
       "exports": [{"target": "noulxp", "gguf": "bf16"}],
       "run_id": "...", "baseline": true, "workspace": "..."
@@ -192,6 +192,8 @@ def hyperparameters(kind, given, bounds=None):
 
 
 def _read(path, base, max_bytes=None):
+    """A file's bytes, exactly: the platform checks the bytes uploaded, and reading the file as
+    text would turn a quoted CSV cell's CRLF into LF, which makes it another dataset."""
     path = Path(path)
     path = path if path.is_absolute() else Path(base) / path
     try:
@@ -200,39 +202,77 @@ def _read(path, base, max_bytes=None):
             raise Refused(
                 f"{path.name} is {size / 2**20:.1f} MB; the limit is {max_bytes / 2**20:g} MB"
             )
-        return path.name, path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as error:
+        return path.read_bytes()
+    except OSError as error:
         raise Refused(f"Cannot read {path.name}: {error}") from None
+
+
+def _text(data, name):
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise Refused(f"Cannot read {name}: {error}") from None
+
+
+def dataset_file(given, base, max_bytes=None, field="train"):
+    """(name, text) of one of a run's dataset files: a path, or {"path", "name", "sha256"}.
+    name is the file's own name, whose extension chooses the reader, when it was saved under
+    another; sha256 is its bytes', and a file that differs is refused."""
+    entry = given if isinstance(given, dict) else {"path": given}
+    path, name, sha256 = entry.get("path"), entry.get("name"), entry.get("sha256")
+    if not isinstance(path, str) or not path:
+        raise Refused(f'The {field} file is a path, or {{"path", "name", "sha256"}}')
+    if name is not None and (not isinstance(name, str) or not name):
+        raise Refused(f"The {field} file's name is text: the file's own name")
+    name = name or Path(path).name
+    data = _read(path, base, max_bytes)
+    if sha256 is not None:
+        found = hashlib.sha256(data).hexdigest()
+        if found != sha256:
+            raise Refused(
+                f"The {field} file is not the one uploaded: its sha256 is {found}, "
+                f"expected {sha256}"
+            )
+    return name, _text(data, name)
+
+
+def _limit(limits, key):
+    value = limits.get(key)
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+        raise Refused(f"limits.{key} is a whole number")
+    return value
 
 
 def dataset(given, workspace, base=None, limits=None):
     """(questions, rows, report, meta) of the run's dataset: one the workspace has (its id), or,
     when the run comes from a file (base: that file's folder), files to read, check and split
-    now: {"questions", "train", "test", "name", "seed", "expected"}. rows and report are None
-    for a saved dataset; meta is None until a checked one is saved (save_dataset)."""
+    now: {"questions", "train", "test", "name", "seed", "expected"}. report is None for a
+    saved dataset; meta is None until a checked one is saved (save_dataset)."""
     if isinstance(given, str):
         try:
-            questions, _, meta = engine.load_dataset(given, workspace)
+            questions, rows, meta = engine.load_dataset(given, workspace)
         except (FileNotFoundError, ValueError) as error:
             raise Refused(str(error)) from None
-        return questions, None, None, meta
+        return questions, rows, None, meta
     if base is None or not isinstance(given, dict):
         raise Refused("Choose a dataset: the id of one in this workspace")
-    limits = limits or {}
+    limits = {} if limits is None else limits
     if not isinstance(limits, dict):
         raise Refused("limits is {max_bytes, max_rows}")
-    max_bytes, max_rows = limits.get("max_bytes"), limits.get("max_rows")
+    max_bytes, max_rows = _limit(limits, "max_bytes"), _limit(limits, "max_rows")
     if "train" not in given or "questions" not in given:
         raise Refused("A dataset names its questions and its train file")
     questions = given["questions"]
     if isinstance(questions, str):
         try:
-            questions = json.loads(_read(questions, base)[1])
+            questions = json.loads(_text(_read(questions, base), questions))
         except json.JSONDecodeError as error:
             raise Refused(f"The questions are not JSON: {error}") from None
-    train_name, train_text = _read(given["train"], base, max_bytes)
+    elif not isinstance(questions, dict):
+        raise Refused("The questions are a file, or the questions themselves")
+    train_name, train_text = dataset_file(given["train"], base, max_bytes, "train")
     test_name, test_text = (
-        _read(given["test"], base, max_bytes) if given.get("test") else (None, None)
+        dataset_file(given["test"], base, max_bytes, "test") if given.get("test") else (None, None)
     )
     seed = given.get("seed", 13)
     if isinstance(seed, bool) or not isinstance(seed, int):
@@ -245,12 +285,18 @@ def dataset(given, workspace, base=None, limits=None):
         raise Refused(str(error)) from None
     expected = given.get("expected") or {}
     if not isinstance(expected, dict):
-        raise Refused("expected is {rows, sha256}: what the checked dataset was")
-    for key in ("rows", "sha256"):
-        if key in expected and expected[key] != report[key]:
+        raise Refused("expected is {rows, digest}: what the checked dataset was")
+    for key in expected:
+        if key not in ("rows", "digest"):
+            raise Refused(
+                f"expected has rows and digest (the checked dataset's sha256), not {key!r}; "
+                "a file's own sha256 goes with the file"
+            )
+    for key, found in (("rows", report["rows"]), ("digest", report["sha256"])):
+        if key in expected and expected[key] != found:
             raise Refused(
                 f"The dataset does not match the one that was checked: {key} is "
-                f"{report[key]}, expected {expected[key]}"
+                f"{found}, expected {expected[key]}"
             )
     report["files"] = {"train": train_name, "test": test_name}
     report["name"] = str(given.get("name") or Path(train_name).stem)

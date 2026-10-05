@@ -271,7 +271,7 @@ def test_a_run_file_brings_its_dataset_split_as_the_studio_splits_it(context, tm
         "questions": "questions.json",
         "train": "train.jsonl",
         "seed": 5,
-        "expected": {"rows": checked["rows"], "sha256": checked["sha256"]},
+        "expected": {"rows": checked["rows"], "digest": checked["sha256"]},
     }
     run = cloud.prepare_run({"dataset": given, "base_model": c.laya}, c.workspace, base=tmp_path)
     assert run["dataset"]["id"] == made["id"]  # the same dataset: same rows, same split
@@ -281,10 +281,18 @@ def test_a_run_file_brings_its_dataset_split_as_the_studio_splits_it(context, tm
         cloud.prepare_run({"dataset": wrong, "base_model": c.laya}, c.workspace, base=tmp_path)
     for bad, message in (
         ({**given, "train": "missing.jsonl"}, "Cannot read missing.jsonl"),
+        ({**given, "train": 5}, "The train file is a path"),
+        ({**given, "train": {"name": "train.jsonl"}}, "The train file is a path"),
+        ({**given, "train": {"path": "train.jsonl", "name": 5}}, "name is text"),
+        ({**given, "test": ["test.jsonl"]}, "The test file is a path"),
+        ({**given, "questions": 5}, "The questions are a file"),
         ({**given, "seed": "5"}, "seed is a whole number"),
         ({k: v for k, v in given.items() if k != "train"}, "names its questions and its train"),
         ({**given, "questions": {"q": {"type": "rank"}}}, "Unknown question type"),
         ({**given, "expected": [1]}, "expected is"),
+        # The platform's file hash is the file's: it goes with the file, not with expected.
+        ({**given, "expected": {"sha256": checked["sha256"]}}, "not 'sha256'"),
+        ({**given, "train": {"path": "train.jsonl", "sha256": "0" * 64}}, "not the one uploaded"),
     ):
         with pytest.raises(cloud.Refused, match=message):
             cloud.prepare_run({"dataset": bad, "base_model": c.laya}, c.workspace, base=tmp_path)
@@ -293,13 +301,66 @@ def test_a_run_file_brings_its_dataset_split_as_the_studio_splits_it(context, tm
         cloud.prepare_run(
             {"dataset": given, "base_model": c.laya, "limits": limits}, c.workspace, base=tmp_path
         )
-    with pytest.raises(cloud.Refused, match="limits is"):
-        cloud.prepare_run(
-            {"dataset": given, "base_model": c.laya, "limits": [1]}, c.workspace, base=tmp_path
-        )
+    for limits, message in (
+        ([1], "limits is"),
+        ({"max_bytes": "25MB"}, "limits.max_bytes is a whole number"),
+        ({"max_rows": -1}, "limits.max_rows is a whole number"),
+    ):
+        with pytest.raises(cloud.Refused, match=message):
+            cloud.prepare_run(
+                {"dataset": given, "base_model": c.laya, "limits": limits},
+                c.workspace,
+                base=tmp_path,
+            )
     with pytest.raises(cloud.Refused, match="the limit is 49"):
         cloud.prepare_run(
             {"dataset": given, "base_model": c.laya, "limits": {"max_rows": 49}},
+            c.workspace,
+            base=tmp_path,
+        )
+
+
+def test_a_file_is_read_as_its_bytes_and_by_its_own_name(context, tmp_path):
+    """A CSV whose quoted cells hold CRLF line breaks is the dataset the studio makes of the same
+    upload (and the platform of the same bytes): read as text, the cells would lose their CR
+    and the dataset would be another. A file saved without its name is read by the name given."""
+    url, c = context
+    lines = ["state,topic,level,flag"] + [
+        f'"red {i}\r\nsecond line {i}",{["alpha", "beta", "gamma"][i % 3]},{i % 3},{i % 2 == 0}'
+        for i in range(20)
+    ]
+    data = ("\r\n".join(lines) + "\r\n").encode()
+    (tmp_path / "train.csv").write_bytes(data)
+    (tmp_path / "upload.bin").write_bytes(data)
+    text = data.decode()
+    checked = datasets.validate(QUESTIONS, text, "train.csv", seed=13)[2]
+    status, made = call(
+        url,
+        "/api/datasets",
+        {"name": "crlf", "questions": QUESTIONS, "train": {"name": "train.csv", "text": text}},
+    )
+    assert status == 201, made
+    assert made["sha256"] == checked["sha256"]
+    sha256 = hashlib.sha256(data).hexdigest()
+    for n, train in enumerate(
+        ("train.csv", {"path": "upload.bin", "name": "train.csv", "sha256": sha256})
+    ):  # the second as an agent may save it
+        given = {
+            "questions": QUESTIONS,
+            "train": train,
+            "name": "crlf",
+            "expected": {"rows": checked["rows"], "digest": checked["sha256"]},
+        }
+        run = cloud.prepare_run(
+            {"dataset": given, "base_model": c.laya, "name": f"run {n}"}, c.workspace, base=tmp_path
+        )
+        assert run["dataset"]["id"] == made["id"]
+        rows = engine.load_dataset(made["id"], c.workspace)[1]
+        assert rows[0]["state"].startswith("red ") and "\r\n" in rows[0]["state"]
+    # Read by its saved name, the CSV would be taken for JSONL and refused.
+    with pytest.raises(cloud.Refused, match="valid labeled rows"):
+        cloud.prepare_run(
+            {"dataset": {"questions": QUESTIONS, "train": "upload.bin"}, "base_model": c.laya},
             c.workspace,
             base=tmp_path,
         )
@@ -349,7 +410,7 @@ def write_run(folder, base_model, **extra):
             "questions": "questions.json",
             "train": "train.jsonl",
             "seed": 13,
-            "expected": {"rows": checked["rows"], "sha256": checked["sha256"]},
+            "expected": {"rows": checked["rows"], "digest": checked["sha256"]},
         },
         "hyperparameters": {"epochs": 1, "batch_size": 4},
         "workspace": "ws",
