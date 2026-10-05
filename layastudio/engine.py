@@ -1594,6 +1594,8 @@ def run_job(job_dir):
                 spec["target"],
                 workspace,
                 emit,
+                # ONNX and Core ML folders: in workspace/exports, or a run's own (cloud.py)
+                out_dir=workspace / spec["out_dir"] if spec.get("out_dir") else None,
                 precision=spec.get("precision", "float"),
                 test_rows=spec.get("test_rows"),
                 gguf=spec.get("gguf"),  # the GGUF a Decider package carries; bf16 unless asked

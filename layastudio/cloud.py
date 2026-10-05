@@ -13,7 +13,8 @@ one place those rules live:
 - the dataset is one this workspace has, or files read, checked and split by
   datasets.validate: the same split the platform computed when it checked the upload, which
   the run can be told to expect; and the kind's trainer has decisions to learn from in it;
-- the exports are ones the kind has, at a precision it takes, with the tooling installed.
+- the exports are ones the kind has, at a precision it takes, with the tooling installed
+  (check_export, which the Export button calls too).
 
 Then it writes the run's record, runs/<id>/run.json, and returns the jobs to start.
 
@@ -95,6 +96,10 @@ OUTPUTS = ("model", "noulxp", "exports")
 
 class Refused(ValueError):
     """A run that does not start, and why. The server answers 400 with the message."""
+
+
+class Unavailable(Refused):
+    """What this machine cannot make until something is installed. The server answers 409."""
 
 
 # ----------------------------------------------------------------------------- the checks
@@ -318,8 +323,14 @@ def dataset(given, workspace, base=None, limits=None):
     return questions, rows, report, None
 
 
-def check_export(kind, item, run_id):
-    """One export the run asks for, as its job's spec: {"model", "target", "precision", ...}."""
+def check_export(kind, item, model_ref):
+    """One export of a checkpoint of a kind (kinds.py), as its job's spec: {"model", "target",
+    "precision", "gguf", "test_rows"}. The Export button's rules and a run's, in one place.
+
+    item: {"target", "precision", "gguf", "test_rows"}, or a target alone. precision defaults
+    to the export's own (bf16 GGUF, int4 MLX, float otherwise); gguf chooses the GGUF a
+    Decider NoulXP package carries; test_rows, the test rows its conformance file holds.
+    A NoulXP package needs its tooling here (Unavailable)."""
     from .export import KIND_TARGETS, PRECISIONS
 
     if isinstance(item, str):
@@ -329,13 +340,11 @@ def check_export(kind, item, run_id):
     target = item.get("target")
     allowed = KIND_TARGETS[kind]
     if target not in allowed:
-        raise Refused(
-            f"A {kinds.NAME[kind]} fine-tune exports to {', '.join(allowed)}, not {target!r}"
-        )
+        raise Refused(f"A {kinds.NAME[kind]} model exports to {', '.join(allowed)}, not {target!r}")
     precision = item.get("precision") or DEFAULT_PRECISION.get(target, "float")
     if precision not in PRECISIONS[target]:
         raise Refused(f"{target} exports can be {', '.join(PRECISIONS[target])}, not {precision!r}")
-    spec = {"model": f"run:{run_id}", "target": target, "precision": precision}
+    spec = {"model": model_ref, "target": target, "precision": precision}
     if item.get("gguf") is not None:
         if target != "noulxp" or kind != kinds.DECIDER:
             raise Refused("gguf chooses the GGUF a Decider NoulXP package carries")
@@ -352,7 +361,7 @@ def check_export(kind, item, run_id):
 
         missing = noulxp_package.missing_tooling(kind)
         if missing:
-            raise Refused(noulxp_package.tooling_message(missing, kind))
+            raise Unavailable(noulxp_package.tooling_message(missing, kind))
     return spec
 
 
@@ -384,7 +393,8 @@ def run_id_for(spec, name, workspace, stamp=None):
         engine.check_id(run_id)
     except ValueError as error:
         raise Refused(str(error)) from None
-    if (workspace / "runs" / run_id).exists():
+    # The train job is named after its run, here and in the studio.
+    if (workspace / "runs" / run_id).exists() or (workspace / "jobs" / run_id).exists():
         raise Refused(f"A run named {run_id} exists already")
     return run_id
 
@@ -431,7 +441,11 @@ def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
     given = spec.get("exports") or []
     if not isinstance(given, list):
         raise Refused("exports is a list")
-    exports = [check_export(kind, item, run_id) for item in given]
+    exports = [check_export(kind, item, f"run:{run_id}") for item in given]
+    for export in exports:
+        if export["target"] in ("onnx", "coreml"):  # into the run's folder, as GGUF and MLX go
+            suffix = "" if export["precision"] == "float" else f"-{export['precision']}"
+            export["out_dir"] = f"runs/{run_id}/exports/{export['target']}{suffix}"
 
     if meta is None:  # checked above, saved only now that the run starts
         files = report.pop("files")

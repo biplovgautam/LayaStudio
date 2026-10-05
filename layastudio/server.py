@@ -46,6 +46,8 @@ PACKAGE = Path(__file__).resolve().parent
 
 MAX_BODY = 512 * 2**20
 TERMINAL = {"done": "done", "error": "failed", "cancelled": "cancelled"}
+# What the Train button sends, and all a fine-tune started here takes (cloud.prepare_run).
+TRAIN_FIELDS = ("dataset", "base_model", "name", "hyperparameters", "baseline")
 
 
 class ApiError(Exception):
@@ -745,15 +747,18 @@ class Studio:
         stamp = time.strftime("%m%d-%H%M%S")
         if kind == "train":
             # The checks every fine-tune starts with, here and in the cloud: cloud.prepare_run.
+            # Only what the Train button sends: a run's id, bounds, limits and exports are a
+            # run file's (layastudio train --config), which the studio does not take here.
+            spec = {k: body[k] for k in TRAIN_FIELDS if k in body}
             try:
-                run = cloud.prepare_run(body, self.workspace, stamp)
+                run = cloud.prepare_run(spec, self.workspace, stamp)
             except cloud.Refused as error:
                 raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
             try:
                 return self.jobs.start(
                     "train", run["job"], run["run_id"], f"Fine-tune: {run['name']}"
                 )
-            except ApiError:
+            except Exception:
                 shutil.rmtree(self.workspace / "runs" / run["run_id"], ignore_errors=True)
                 raise
         if kind == "evaluate":
@@ -767,30 +772,23 @@ class Studio:
             )
         if kind == "export":
             model_dir = engine.resolve_model_ref(body["model"], self.workspace)
-            from .export import PRECISIONS, targets_for
-
-            target = body.get("target", "onnx")
-            if target not in PRECISIONS:
-                raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown export target {target!r}")
-            allowed = targets_for(model_dir)
-            if target not in allowed:
-                raise ApiError(
-                    HTTPStatus.BAD_REQUEST,
-                    f"This model exports to {', '.join(allowed)}, not {target}",
+            item = {k: body.get(k) for k in ("target", "precision", "gguf", "test_rows")}
+            item["target"] = item["target"] or "onnx"
+            if item["target"] == "noulxp":  # a run, of a family NoulXP has an exporter for
+                self.noulxp_ready(body["model"], tooling=False)
+            # The rules a run's exports follow too (cloud.check_export).
+            try:
+                spec = cloud.check_export(
+                    kinds.detect(model_dir) or kinds.LAYA, item, body["model"]
                 )
-            precision = body.get("precision", "float")
-            if precision not in PRECISIONS[target]:
-                raise ApiError(
-                    HTTPStatus.BAD_REQUEST,
-                    f"{target} exports can be {', '.join(PRECISIONS[target])}, not {precision!r}",
-                )
+            except cloud.Unavailable as error:
+                raise ApiError(HTTPStatus.CONFLICT, str(error)) from None
+            except cloud.Refused as error:
+                raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
+            target, precision = spec["target"], spec["precision"]
             label = target.upper() + ("" if precision == "float" else f" ({precision})")
-            spec = {"model": body["model"], "target": target, "precision": precision}
             if target == "noulxp":
-                self.noulxp_ready(body["model"])
                 label = "a NoulXP package"
-                if body.get("test_rows") is not None:
-                    spec["test_rows"] = max(0, int(body["test_rows"]))
             return self.jobs.start(
                 "export", spec, f"export-{stamp}", f"Export {modelname(body['model'])} to {label}"
             )
@@ -851,9 +849,9 @@ class Studio:
             )
         raise ApiError(HTTPStatus.BAD_REQUEST, f"Unknown job kind {kind!r}")
 
-    def noulxp_ready(self, ref, publishing=False):
+    def noulxp_ready(self, ref, publishing=False, tooling=True):
         """Refuse up front what a NoulXP build would refuse: not a run, a family without a
-        NoulXP exporter, or a machine without the tooling."""
+        NoulXP exporter, or a machine without the tooling (unless the caller checks it)."""
         try:
             _, _, model_dir, run = noulxp_package.locate(ref, self.workspace)
         except ValueError as error:
@@ -863,7 +861,7 @@ class Studio:
         if entry["status"] != "ready":
             raise ApiError(HTTPStatus.BAD_REQUEST, noulxp_package.refusal(family) + skip)
         kind = kinds.detect(model_dir) or "laya"
-        missing = noulxp_package.missing_tooling(kind)
+        missing = noulxp_package.missing_tooling(kind) if tooling else None
         if missing:
             raise ApiError(
                 HTTPStatus.CONFLICT, noulxp_package.tooling_message(missing, kind) + skip

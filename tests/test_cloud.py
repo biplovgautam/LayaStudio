@@ -130,7 +130,12 @@ BAD = {
         "dataset": c.wide_only,
     },
     "name not text": lambda c: c.spec(name=7),
+}
+# What only a run file brings (layastudio train --config): the studio's server takes the Train
+# button's fields alone, so prepare_run refuses these and the server never sees them.
+BAD_RUN_FILE = {
     "run id not an id": lambda c: c.spec(run_id="Not An Id"),
+    "run id of a job that exists": lambda c: c.spec(run_id=c.job),
     "export the kind does not have": lambda c: c.spec(exports=[{"target": "gguf"}]),
     "export at an unknown precision": lambda c: c.spec(
         exports=[{"target": "onnx", "precision": "int2"}]
@@ -161,7 +166,9 @@ def context(studio, monkeypatch):  # noqa: F811
     # Setup state is not what these cases are about (on a machine without a training stack
     # it never becomes ready, and the server answers 409 to every fine-tune).
     monkeypatch.setattr(type(server_studio.bootstrap), "ready", property(lambda self: True))
-    return url, Context(server_studio.workspace)
+    c = Context(server_studio.workspace)
+    c.studio = server_studio
+    return url, c
 
 
 def written(workspace):
@@ -179,6 +186,72 @@ def test_prepare_run_refuses_what_the_server_refuses(context, case):
     status, body = call(url, "/api/jobs", {"kind": "train", **spec})
     assert (status, body["error"]) == (400, str(refused.value))  # the same rule, said the same
     assert written(c.workspace) == before
+
+
+@pytest.mark.parametrize("case", list(BAD_RUN_FILE))
+def test_prepare_run_refuses_a_run_file_that_cannot_train(context, case):
+    _, c = context
+    before = written(c.workspace)
+    with pytest.raises(cloud.Refused):
+        cloud.prepare_run(BAD_RUN_FILE[case](c), c.workspace)
+    assert written(c.workspace) == before
+
+
+def test_the_server_takes_only_what_the_train_button_sends(context, monkeypatch):
+    """A run's id, bounds, limits and exports are a run file's: the server starts the run it
+    always started, under its own id, and records no exports it would never make."""
+    url, c = context
+    started = []
+    monkeypatch.setattr(c.studio.jobs, "start", lambda *a: started.append(a) or a[2])
+    spec = c.spec(
+        name="plain",
+        run_id=c.job,
+        exports=[{"target": "noulxp"}],
+        bounds={"epochs": {"max": 1}},
+        hyperparameters={"epochs": 3},
+        limits={"max_rows": 1},
+    )
+    status, body = call(url, "/api/jobs", {"kind": "train", **spec})
+    assert status == 201, body
+    [(kind, job, job_id, _)] = started
+    assert kind == "train" and job_id == job["run_id"] != c.job
+    assert job["run_id"].startswith("plain-") and job["hyperparameters"] == {"epochs": 3}
+    assert "exports" not in engine.read_json(c.workspace / "runs" / job_id / "run.json")
+
+
+EXPORTS = {
+    "a target the kind does not have": {"target": "gguf"},
+    "an unknown target": {"target": "tflite"},
+    "an unknown precision": {"target": "onnx", "precision": "int2"},
+    "test rows for an ONNX export": {"target": "onnx", "test_rows": 5},
+    "test rows that are text": {"target": "noulxp", "test_rows": "5"},
+    "a GGUF choice for a Laya package": {"target": "noulxp", "gguf": "q8_0"},
+}
+
+
+@pytest.mark.parametrize("case", list(EXPORTS))
+def test_the_export_button_and_a_run_file_refuse_the_same_exports(context, case, monkeypatch):
+    url, c = context
+    run_id = cloud.prepare_run(c.spec(name="x"), c.workspace)["run_id"]
+    (c.workspace / "runs" / run_id / "model").symlink_to(c.laya[5:], target_is_directory=True)
+    monkeypatch.setattr(c.studio.jobs, "start", lambda *a: pytest.fail("a job was started"))
+    item = EXPORTS[case]
+    with pytest.raises(cloud.Refused) as refused:
+        cloud.check_export(kinds.LAYA, item, f"run:{run_id}")
+    status, body = call(url, "/api/jobs", {"kind": "export", "model": f"run:{run_id}", **item})
+    assert (status, body["error"]) == (400, str(refused.value))
+
+
+def test_exports_default_to_their_own_precision(context):
+    _, c = context
+    assert cloud.check_export(kinds.DECIDER, "gguf", "run:x")["precision"] == "bf16"
+    assert cloud.check_export(kinds.DECIDER, "mlx", "run:x")["precision"] == "int4"
+    assert cloud.check_export(kinds.LAYA, "onnx", "run:x")["precision"] == "float"
+    # A run's ONNX and Core ML folders are its own, as its GGUF and MLX exports are.
+    run = cloud.prepare_run(
+        c.spec(name="o", exports=[{"target": "onnx", "precision": "int8"}]), c.workspace
+    )
+    assert run["exports"][0]["out_dir"] == f"runs/{run['run_id']}/exports/onnx-int8"
 
 
 def test_a_run_is_prepared_as_the_server_starts_it(context):
