@@ -159,13 +159,16 @@ def check_bounds(hp, bounds):
         if key not in hp or not isinstance(bound, dict):
             raise Refused(f"bounds for {key!r}: not a hyperparameter of this trainer")
         value = hp[key]
-        if "choices" in bound and value not in bound["choices"]:
-            shown = ", ".join(str(c) for c in bound["choices"])
-            raise Refused(f"{key} must be one of: {shown}")
-        if "min" in bound and value < bound["min"]:
-            raise Refused(f"{key} must be at least {bound['min']}")
-        if "max" in bound and value > bound["max"]:
-            raise Refused(f"{key} must be at most {bound['max']}")
+        try:
+            if "choices" in bound and value not in bound["choices"]:
+                shown = ", ".join(str(c) for c in bound["choices"])
+                raise Refused(f"{key} must be one of: {shown}")
+            if "min" in bound and value < bound["min"]:
+                raise Refused(f"{key} must be at least {bound['min']}")
+            if "max" in bound and value > bound["max"]:
+                raise Refused(f"{key} must be at most {bound['max']}")
+        except TypeError:
+            raise Refused(f"bounds for {key!r} do not fit its value, {value!r}") from None
 
 
 def hyperparameters(kind, given, bounds=None):
@@ -219,6 +222,8 @@ def dataset(given, workspace, base=None, limits=None):
     if base is None or not isinstance(given, dict):
         raise Refused("Choose a dataset: the id of one in this workspace")
     limits = limits or {}
+    if not isinstance(limits, dict):
+        raise Refused("limits is {max_bytes, max_rows}")
     max_bytes, max_rows = limits.get("max_bytes"), limits.get("max_rows")
     if "train" not in given or "questions" not in given:
         raise Refused("A dataset names its questions and its train file")
@@ -242,6 +247,8 @@ def dataset(given, workspace, base=None, limits=None):
     except (ValueError, TypeError) as error:
         raise Refused(str(error)) from None
     expected = given.get("expected") or {}
+    if not isinstance(expected, dict):
+        raise Refused("expected is {rows, sha256}: what the checked dataset was")
     for key in ("rows", "sha256"):
         if key in expected and expected[key] != report[key]:
             raise Refused(
@@ -614,17 +621,21 @@ def run(config, workspace=None, result=None, stream=None):
         if train["state"] != "done":
             error = {"stage": "train", **train.get("error", {"message": "Cancelled"})}
             return finish(train["state"], 143 if train["state"] == "cancelled" else 1, error=error)
-        for spec in prepared["exports"]:
-            name = f"export:{spec['target']}"
+        for export in prepared["exports"]:
+            target = export["target"]
             if runner.cancelled:
-                outcome["exports"].append({**spec, "state": "cancelled"})
+                outcome["exports"].append({**export, "state": "cancelled"})
                 continue
             done = runner.stage(
-                name, "export", spec, f"export-{spec['target']}-{run_id}", f"Export {run_id}"
+                f"export:{target}",
+                "export",
+                export,
+                f"export-{target}-{run_id}",
+                f"Export {run_id}",
             )
             outcome["stages"].append(done)
             outcome["exports"].append(
-                {**spec, "state": done["state"], "result": done["result"]}
+                {**export, "state": done["state"], "result": done["result"]}
                 | ({"error": done["error"]} if "error" in done else {})
             )
         outcome["outputs"] = manifest(run_dir)

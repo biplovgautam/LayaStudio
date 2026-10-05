@@ -125,6 +125,8 @@ BAD = {
     "outside the platform's choices": lambda c: c.spec(
         hyperparameters={"lora_rank": 12}, bounds={"lora_rank": {"choices": [8, 16, 32]}}
     ),
+    "bounds for a key the trainer lacks": lambda c: c.spec(bounds={"nope": {"max": 1}}),
+    "bounds that do not fit the value": lambda c: c.spec(bounds={"method": {"min": 1}}),
 }
 
 
@@ -236,6 +238,7 @@ def test_a_run_file_brings_its_dataset_split_as_the_studio_splits_it(context, tm
         ({**given, "seed": "5"}, "seed is a whole number"),
         ({k: v for k, v in given.items() if k != "train"}, "names its questions and its train"),
         ({**given, "questions": {"q": {"type": "rank"}}}, "Unknown question type"),
+        ({**given, "expected": [1]}, "expected is"),
     ):
         with pytest.raises(cloud.Refused, match=message):
             cloud.prepare_run({"dataset": bad, "base_model": c.laya}, c.workspace, base=tmp_path)
@@ -243,6 +246,10 @@ def test_a_run_file_brings_its_dataset_split_as_the_studio_splits_it(context, tm
     with pytest.raises(cloud.Refused, match="the limit is"):
         cloud.prepare_run(
             {"dataset": given, "base_model": c.laya, "limits": limits}, c.workspace, base=tmp_path
+        )
+    with pytest.raises(cloud.Refused, match="limits is"):
+        cloud.prepare_run(
+            {"dataset": given, "base_model": c.laya, "limits": [1]}, c.workspace, base=tmp_path
         )
     with pytest.raises(cloud.Refused, match="the limit is 49"):
         cloud.prepare_run(
