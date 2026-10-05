@@ -204,24 +204,20 @@ def create_dataset(
     seed=13,
     workspace=WORKSPACE,
     example=None,
-    max_bytes=None,
-    max_rows=None,
-    reuse=False,
 ):
-    """Check, split and save a dataset as datasets/<id>: questions.json, rows.jsonl, meta.json.
-
-    The checks, the split and the statistics are datasets.validate's, the same wherever a
-    dataset is made. reuse: the same rows saved before are that dataset, not an error."""
+    """Check, split and save a dataset: datasets.validate, then save_dataset."""
     questions, rows, report = datasets.validate(
-        questions,
-        train_text,
-        train_name,
-        test_text,
-        test_name,
-        seed,
-        max_bytes=max_bytes,
-        max_rows=max_rows,
+        questions, train_text, train_name, test_text, test_name, seed
     )
+    files = {"train": train_name, "test": test_name}
+    return save_dataset(name, questions, rows, report, files, workspace, example)
+
+
+def save_dataset(
+    name, questions, rows, report, files, workspace=WORKSPACE, example=None, reuse=False
+):
+    """Save a checked dataset (datasets.validate) as datasets/<id>: questions.json,
+    rows.jsonl and meta.json. reuse: the same rows saved before are that dataset, not an error."""
     dataset_id = f"{slugify(name, 'dataset')}-{report['sha256'][:8]}"
     path = workspace / "datasets" / dataset_id
     if path.exists():
@@ -239,7 +235,7 @@ def create_dataset(
         "name": name,
         "example": example,
         "created": now(),
-        "files": {"train": train_name, "test": test_name},
+        "files": files,
         **report,
     }
     write_json(path / "meta.json", meta)
@@ -1507,6 +1503,34 @@ def limit_mlx_cache():
     from . import runtime
 
     runtime.limit_cache()
+
+
+def write_job(workspace, job_id, kind, spec, title):
+    """jobs/<id>: the job's spec.json, which run_job reads, and job.json, which lists it."""
+    path = workspace / "jobs" / check_id(job_id)
+    path.mkdir(parents=True)
+    write_json(path / "spec.json", {**spec, "kind": kind, "workspace": str(workspace)})
+    write_json(path / "job.json", {"id": job_id, "kind": kind, "title": title, "created": now()})
+    return path
+
+
+def start_job(job_dir, kind, log, env=None):
+    """`python -m layastudio.engine run <job_dir>` as a child process, the way every job runs,
+    from the UI or headless (cloud.py): a crash, a cancel or an out-of-memory error ends the
+    child, never its caller, and the GPU's memory goes back when it exits. Training and
+    evaluation run offline. env: more variables for the child."""
+    import subprocess
+
+    env = {**os.environ, **(env or {}), "HF_HUB_DISABLE_TELEMETRY": "1", "PYTHONUNBUFFERED": "1"}
+    if kind in ("train", "evaluate"):
+        env["HF_HUB_OFFLINE"] = "1"
+    return subprocess.Popen(
+        [sys.executable, "-m", "layastudio.engine", "run", str(job_dir)],
+        cwd=str(PACKAGE.parent),
+        env=env,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
 
 
 def run_job(job_dir):

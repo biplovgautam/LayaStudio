@@ -26,7 +26,6 @@ import re
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 import webbrowser
@@ -36,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import engine, kinds, noulxp_package
+from . import cloud, engine, kinds, noulxp_package
 from .account import Account
 from .bootstrap import DEFAULT_MODEL, Bootstrap
 from .examples import catalog
@@ -113,27 +112,10 @@ class Jobs:
             running = next((j for j, p in self.procs.items() if p.poll() is None), None)
             if running:
                 raise ApiError(HTTPStatus.CONFLICT, f"Job {running} is still running")
-            path = self.root / engine.check_id(job_id)
-            path.mkdir(parents=True)
-            engine.write_json(
-                path / "spec.json", {**spec, "kind": kind, "workspace": str(self.workspace)}
-            )
-            engine.write_json(
-                path / "job.json",
-                {"id": job_id, "kind": kind, "title": title, "created": engine.now()},
-            )
+            path = engine.write_job(self.workspace, job_id, kind, spec, title)
             self.before_start()
-            env = {**os.environ, "HF_HUB_DISABLE_TELEMETRY": "1", "PYTHONUNBUFFERED": "1"}
-            if kind in ("train", "evaluate"):
-                env["HF_HUB_OFFLINE"] = "1"
             log = open(path / "output.log", "w")
-            self.procs[job_id] = subprocess.Popen(
-                [sys.executable, "-m", "layastudio.engine", "run", str(path)],
-                cwd=str(PACKAGE.parent),
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
+            self.procs[job_id] = engine.start_job(path, kind, log)
         return job_id
 
     def events(self, job_id, since=0):
@@ -760,47 +742,17 @@ class Studio:
             )
         stamp = time.strftime("%m%d-%H%M%S")
         if kind == "train":
-            questions, _, meta = engine.load_dataset(body["dataset"], self.workspace)
-            base_dir = engine.resolve_model_ref(body["base_model"], self.workspace)
-            model_kind = kinds.check(base_dir)
-            self.trainable(body["base_model"])
-            defaults = engine.hyperparameters(model_kind)
-            hp = {k: v for k, v in (body.get("hyperparameters") or {}).items() if k in defaults}
+            # The checks every fine-tune starts with, here and in the cloud: cloud.prepare_run.
             try:
-                engine.check_lora_variants(hp)
-                if model_kind == kinds.DECIDER:
-                    from .decider_engine import check_hyperparameters
-
-                    check_hyperparameters({**defaults, **hp})
-            except ValueError as error:
+                run = cloud.prepare_run(body, self.workspace, stamp)
+            except cloud.Refused as error:
                 raise ApiError(HTTPStatus.BAD_REQUEST, str(error)) from None
-            name = (body.get("name") or f"{meta['name']} · {hp.get('method', 'lora')}").strip()
-            run_id = f"{engine.slugify(name, 'run')[:40]}-{stamp}"
-            spec = {
-                "run_id": run_id,
-                "dataset": body["dataset"],
-                "base_model": body["base_model"],
-                "hyperparameters": hp,
-                "baseline": bool(body.get("baseline", True)),
-            }
-            engine.write_json(
-                self.workspace / "runs" / run_id / "run.json",
-                {
-                    "id": run_id,
-                    "name": name,
-                    "dataset": body["dataset"],
-                    "dataset_name": meta["name"],
-                    "base_model": body["base_model"],
-                    "kind": model_kind,
-                    "hyperparameters": {**defaults, **hp},
-                    "created": engine.now(),
-                    "questions": list(questions),
-                },
-            )
             try:
-                return self.jobs.start("train", spec, run_id, f"Fine-tune: {name}")
+                return self.jobs.start(
+                    "train", run["job"], run["run_id"], f"Fine-tune: {run['name']}"
+                )
             except ApiError:
-                shutil.rmtree(self.workspace / "runs" / run_id, ignore_errors=True)
+                shutil.rmtree(self.workspace / "runs" / run["run_id"], ignore_errors=True)
                 raise
         if kind == "evaluate":
             engine.load_dataset(body["dataset"], self.workspace)
@@ -914,19 +866,6 @@ class Studio:
             raise ApiError(
                 HTTPStatus.CONFLICT, noulxp_package.tooling_message(missing, kind) + skip
             )
-
-    def trainable(self, ref):
-        """Refuse a base model whose licence does not allow derivatives (families.py)."""
-        from . import families
-
-        repo = (
-            ref.split(":", 1)[1]
-            if ref.startswith("hub:")
-            else noulxp_package.base_model(ref, self.workspace)
-        )
-        known = families.find(repo or "")
-        if known and not families.trainer_status(known)["ready"]:
-            raise ApiError(HTTPStatus.BAD_REQUEST, families.trainer_status(known)["reason"])
 
     # --- runs
 
@@ -1241,7 +1180,8 @@ def find_port(preferred, host="127.0.0.1", tries=20):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="layastudio", description="Fine-tune Laya on your own data, on your own machine"
+        prog="layastudio",
+        description="Fine-tune Laya on your own data, on your own machine",
     )
     parser.add_argument("--port", type=int, default=8765, help="Default 8765, or the next free")
     parser.add_argument(
