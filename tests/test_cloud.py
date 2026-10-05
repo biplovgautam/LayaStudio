@@ -121,6 +121,9 @@ BAD = {
     "decider rlcd objective": lambda c: hp(objective="rlcd")(c, "decider"),
     "decider 8-bit": lambda c: hp(quantization="8bit")(c, "decider"),
     "decider no batch tokens": lambda c: hp(batch_tokens=0)(c, "decider"),
+    "a dropout of more than 1": hp(lora_dropout=1.5),
+    "a head dropout of 1": lambda c: hp(head_dropout=1.0)(c, "julia"),
+    "a warm-up of more than every update": lambda c: hp(warmup=1.5)(c, "decider"),
     "julia with no question it answers": lambda c: {**c.spec("julia"), "dataset": c.wide},
     "julia with no row on the question it answers": lambda c: {
         **c.spec("julia"),
@@ -146,6 +149,9 @@ BAD = {
     ),
     "bounds for a key the trainer lacks": lambda c: c.spec(bounds={"nope": {"max": 1}}),
     "bounds that do not fit the value": lambda c: c.spec(bounds={"method": {"min": 1}}),
+    "a change the bounds do not name": lambda c: c.spec(
+        hyperparameters={"epochs": 2, "batch_size": 512}, bounds={"epochs": {"max": 5}}
+    ),
 }
 
 

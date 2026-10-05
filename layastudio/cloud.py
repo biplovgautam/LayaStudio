@@ -82,6 +82,10 @@ COUNTS = (
     "max_state_tokens",
 )
 AT_LEAST_ONE = ("epochs", "batch_size", "grad_accum", "lora_rank", "batch_tokens")
+# Fractions: a dropout is below 1 (PyTorch and MLX refuse 1 and more, after the baseline), and
+# warm-up is a share of the updates.
+BELOW_ONE = ("lora_dropout", "head_dropout")
+AT_MOST_ONE = ("warmup",)
 # The precision an export gets when the run does not say (as `python -m layastudio.export`).
 DEFAULT_PRECISION = {"gguf": "bf16", "mlx": "int4"}
 # Outputs of a run, in the result's manifest: the checkpoint, its NoulXP package (only one that
@@ -138,6 +142,10 @@ def check_value(key, value, default):
         least = 1 if key in AT_LEAST_ONE else 0
         if value < least:
             raise Refused(f"{key} must be at least {least}")
+        if key in BELOW_ONE and value >= 1:
+            raise Refused(f"{key} must be below 1")
+        if key in AT_MOST_ONE and value > 1:
+            raise Refused(f"{key} must be at most 1")
         return value
     allowed = CHOICES.get(key)
     if not isinstance(value, str) or (allowed and value not in allowed):
@@ -145,13 +153,20 @@ def check_value(key, value, default):
     return value
 
 
-def check_bounds(hp, bounds):
+def check_bounds(hp, overrides, bounds):
     """The platform's limits for a template, on the run's final values:
-    {key: {"min": a, "max": b} or {"choices": [...]}}."""
+    {key: {"min": a, "max": b} or {"choices": [...]}}. With bounds, the run changes only the
+    keys they name: a template's own settings come bounded too ({"choices": [one]})."""
     if bounds is None:
         return
     if not isinstance(bounds, dict):
         raise Refused("bounds must be an object of {key: {min, max} or {choices}}")
+    unbounded = sorted(k for k in overrides if k not in bounds)
+    if unbounded:
+        raise Refused(
+            f"This run may change {', '.join(sorted(bounds)) or 'no hyperparameter'}, "
+            f"not {', '.join(unbounded)}"
+        )
     for key, bound in bounds.items():
         if key not in hp or not isinstance(bound, dict):
             raise Refused(f"bounds for {key!r}: not a hyperparameter of this trainer")
@@ -187,7 +202,7 @@ def hyperparameters(kind, given, bounds=None):
     except ValueError as error:
         raise Refused(str(error)) from None
     merged = {**defaults, **overrides}
-    check_bounds(merged, bounds)
+    check_bounds(merged, overrides, bounds)
     return merged, overrides, ignored
 
 
