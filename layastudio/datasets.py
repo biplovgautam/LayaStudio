@@ -181,23 +181,42 @@ def argmax(values):
     return max(range(len(values)), key=values.__getitem__)
 
 
-def fits(questions):
-    """Why each checkpoint kind's trainer would leave a question out: {kind: [reasons]}.
+def left_out(questions):
+    """The questions each checkpoint kind's trainer leaves out, and why: {kind: {qid: reason}}.
 
     The trainers' own rules: Julia 1 answers 2 to 20 options (julia.encode_items), Decider 2 to
     255 choice options and 2 to 10 score levels (decider.render_question). Laya has no count
     limit; its options share a token budget, which only its tokenizer can measure (the
-    dataset analysis does)."""
-    out = {"laya": [], "julia": [], "decider": []}
+    dataset analysis does, and the trainers refuse a run none of whose rows fit it before
+    the baseline)."""
+    out = {"laya": {}, "julia": {}, "decider": {}}
     for qid, qdef in questions.items():
         count = len(julia.option_texts(qdef))
         if not 2 <= count <= julia.MAX_OPTIONS:
-            out["julia"].append(f"{qid}: {count} options; Julia 1 answers 2 to {julia.MAX_OPTIONS}")
+            out["julia"][qid] = f"{count} options; Julia 1 answers 2 to {julia.MAX_OPTIONS}"
         try:
             decider.render_question(qdef)
         except ValueError as error:
-            out["decider"].append(f"{qid}: {error}")
+            out["decider"][qid] = str(error)
     return out
+
+
+def fits(questions):
+    """Why each checkpoint kind's trainer would leave a question out: {kind: ["qid: reason"]}."""
+    return {
+        kind: [f"{qid}: {reason}" for qid, reason in reasons.items()]
+        for kind, reasons in left_out(questions).items()
+    }
+
+
+def decisions(rows, questions, kind=None):
+    """Decisions per split, {"train", "val", "test"}: on every question, or on the questions a
+    checkpoint kind's trainer answers (left_out)."""
+    skip = left_out(questions)[kind] if kind else {}
+    counts = {"train": 0, "val": 0, "test": 0}
+    for row in rows:
+        counts[row["split"]] += sum(qid not in skip for qid in row["targets"])
+    return counts
 
 
 # ----------------------------------------------------------------------------- rows
@@ -388,7 +407,7 @@ def validate(
         "sha256": digest(questions, rows),
         "size_bytes": size,
         "rows": counts,
-        "decisions": {s: sum(len(r["targets"]) for r in rows if r["split"] == s) for s in counts},
+        "decisions": decisions(rows, questions),
         "labels": label_counts(rows, questions),
         "questions": {
             qid: {"type": qdef["type"], "options": len(option_labels(qdef))}

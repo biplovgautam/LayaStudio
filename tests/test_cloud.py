@@ -65,6 +65,17 @@ class Context:
         engine.write_json(
             workspace / "imports.json", [{"ref": self.tev1, "repo": "together-ai/tev1"}]
         )
+        # Two questions, and only the one Julia 1 leaves out (25 options) labeled.
+        rows = [{"state": f"red {i}", "answers": {"wide": f"l{i % 25}"}} for i in range(30)]
+        self.wide_only = engine.create_dataset(
+            "wide-only",
+            {**WIDE, "flag": QUESTIONS["flag"]},
+            jsonl(rows),
+            "w.jsonl",
+            workspace=workspace,
+        )["id"]
+        self.job = "export-1006-120000"
+        (workspace / "jobs" / self.job).mkdir(parents=True)
 
     def spec(self, base="laya", **extra):
         return {"dataset": self.dataset, "base_model": getattr(self, base), **extra}
@@ -111,6 +122,10 @@ BAD = {
     "decider 8-bit": lambda c: hp(quantization="8bit")(c, "decider"),
     "decider no batch tokens": lambda c: hp(batch_tokens=0)(c, "decider"),
     "julia with no question it answers": lambda c: {**c.spec("julia"), "dataset": c.wide},
+    "julia with no row on the question it answers": lambda c: {
+        **c.spec("julia"),
+        "dataset": c.wide_only,
+    },
     "name not text": lambda c: c.spec(name=7),
     "run id not an id": lambda c: c.spec(run_id="Not An Id"),
     "export the kind does not have": lambda c: c.spec(exports=[{"target": "gguf"}]),

@@ -205,3 +205,26 @@ def test_the_report_says_which_kinds_answer_the_questions():
     assert [p.split(":")[0] for p in problems["decider"]] == ["deep", "lone", "blank"]
     huge = {**wide, "criteria": [f"label{i}" for i in range(256)]}
     assert datasets.fits({"huge": huge})["decider"] == ["huge: choice criteria: 2..255 options"]
+
+
+def test_decisions_count_what_each_kind_can_learn_from():
+    """A kind that leaves a question out has only the other questions' decisions: the platform
+    and prepare_run count them the same way, and refuse a template with none."""
+    wide = {"type": "choice", "instructions": "Which?", "criteria": [f"l{i}" for i in range(25)]}
+    questions = {"wide": wide, "flag": QUESTIONS["flag"]}
+    rows = [
+        {
+            "state": f"red {i}",
+            "answers": {"wide": f"l{i % 25}", **({"flag": True} if i < 3 else {})},
+        }
+        for i in range(30)
+    ]
+    questions, rows, report = datasets.validate(questions, jsonl(rows), "t.jsonl")
+    assert datasets.left_out(questions)["julia"] == {"wide": "25 options; Julia 1 answers 2 to 20"}
+    every = datasets.decisions(rows, questions)
+    assert every == report["decisions"] and sum(every.values()) == 33
+    julia = datasets.decisions(rows, questions, "julia")
+    assert sum(julia.values()) == 3 and julia == {
+        s: sum("flag" in r["targets"] for r in rows if r["split"] == s) for s in julia
+    }
+    assert datasets.decisions(rows, questions, "laya") == every

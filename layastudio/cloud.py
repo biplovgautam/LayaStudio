@@ -12,7 +12,7 @@ one place those rules live:
   (decider_engine.check_hyperparameters) apply;
 - the dataset is one this workspace has, or files read, checked and split by
   datasets.validate: the same split the platform computed when it checked the upload, which
-  the run can be told to expect;
+  the run can be told to expect; and the kind's trainer has decisions to learn from in it;
 - the exports are ones the kind has, at a precision it takes, with the tooling installed.
 
 Then it writes the run's record, runs/<id>/run.json, and returns the jobs to start.
@@ -341,6 +341,26 @@ def check_export(kind, item, run_id):
     return spec
 
 
+def check_decisions(kind, questions, rows):
+    """Refuse a dataset a kind's trainer has nothing to learn from: no training or validation
+    decision on the questions it answers (it picks its best epoch and calibrates on the
+    validation split). Returns the warnings for the questions it leaves out."""
+    name = kinds.NAME[kind]
+    left_out = datasets.left_out(questions)[kind]
+    reasons = [f"{qid}: {why}" for qid, why in left_out.items()]
+    if len(left_out) == len(questions):
+        raise Refused(f"{name} cannot train on any of these questions: {reasons[0]}")
+    answered = ", ".join(qid for qid in questions if qid not in left_out)
+    counts = datasets.decisions(rows, questions, kind)
+    for split, label in (("train", "training"), ("val", "validation")):
+        if not counts[split]:
+            raise Refused(
+                f"{name} has nothing to learn from: no {label} row answers {answered}"
+                + (f" (it leaves out {'; '.join(reasons)})" if reasons else "")
+            )
+    return [f"{name} leaves out {reason}" for reason in reasons]
+
+
 def run_id_for(spec, name, workspace, stamp=None):
     run_id = spec.get("run_id") or (
         f"{engine.slugify(name, 'run')[:40]}-{stamp or time.strftime('%m%d-%H%M%S')}"
@@ -374,11 +394,7 @@ def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
     ref = spec.get("base_model")
     _, kind = base_model(ref, workspace)
     hp, overrides, ignored = hyperparameters(kind, spec.get("hyperparameters"), spec.get("bounds"))
-
-    left_out = datasets.fits(questions)[kind]
-    if len(left_out) == len(questions):
-        raise Refused(f"{kinds.NAME[kind]} cannot train on any of these questions: {left_out[0]}")
-    warnings = [f"{kinds.NAME[kind]} leaves out {reason}" for reason in left_out]
+    warnings = check_decisions(kind, questions, rows)
     if ignored:
         warnings.append(
             f"Not hyperparameters of the {kinds.NAME[kind]} trainer: {', '.join(ignored)}"
