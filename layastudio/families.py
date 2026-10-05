@@ -20,7 +20,10 @@ Decider sizes re-read on 2026-10-04.
 
 from dataclasses import asdict, dataclass, field
 
-CLOUD_STUDIO = "https://studio.systemonemodels.tech"
+# The cloud studio: fine-tunes on a rented GPU, paid from credit on systemonemodels.ai, where it
+# lives at /studio (the registry moved from .tech to .ai; studio.systemonemodels.tech was never
+# served). It opens to a beta list first, so the warning below says "coming".
+CLOUD_STUDIO = "https://systemonemodels.ai/studio"
 
 # trainer: ready (every model with weights and a licence that allows it trains here) |
 # partial (some models train here today, the others' trainers come later) |
@@ -542,9 +545,12 @@ def assess(model: CatalogModel, training_memory_gb: float | None, accelerator: s
         )
     else:
         fit = "too-big"
+        # The cloud studio trains what the studio trains (its templates are Laya, Julia 1 and
+        # Decider), so only those are pointed at it.
+        cloud = f", or the cloud studio at {CLOUD_STUDIO} (coming)" if status["ready"] else ""
         warnings.append(
             f"Needs about {best:g} GB to fine-tune; this machine has {have:g} GB. Use a machine with a "
-            f"bigger GPU, or the cloud studio at {CLOUD_STUDIO} (coming)."
+            f"bigger GPU{cloud}."
         )
     if accelerator == "cpu" and model.params_b >= 1.0 and fit != "too-big":
         warnings.append("No GPU was found: a model this size trains very slowly on the CPU.")

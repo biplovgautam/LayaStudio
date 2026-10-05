@@ -12,7 +12,9 @@ def test_nothing_is_hidden_and_big_models_warn():
         m for m in small["letter"]["models"] if m["repo"] == "bespokelabs/Bespoke-Nimble-9B"
     )
     assert nimble["fit"] == "too-big"
-    assert any("studio.systemonemodels.tech" in w for w in nimble["warnings"])
+    assert any("bigger GPU" in w for w in nimble["warnings"])
+    # The cloud studio trains what the studio trains: Nimble has no trainer yet, so no pointer.
+    assert not any("systemonemodels.ai/studio" in w for w in nimble["warnings"])
 
 
 def test_licences_warn():
@@ -65,6 +67,7 @@ def test_decider_says_when_it_is_too_big_and_when_qlora_fits():
     assert tight["fit"] == "qlora" and any("4-bit QLoRA" in w for w in tight["warnings"])
     small = assess(decider, 4, "cuda")
     assert small["fit"] == "too-big" and any(
-        "studio.systemonemodels.tech" in w for w in small["warnings"]
+        "the cloud studio at https://systemonemodels.ai/studio (coming)" in w
+        for w in small["warnings"]
     )
     assert assess(find("SupersonicLabs/Julia-1"), 4, "cpu")["fit"] == "fits"
