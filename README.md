@@ -497,6 +497,12 @@ here is refused there too. Every event is printed to stdout as one JSON line, an
 `result.json` (beside the config) says how the run ended, with its measurements and its output
 files, each with its size and SHA-256. It is what the cloud studio's GPUs run.
 
+The exit code says how it ended: 0 trained and exported, 3 trained but an export failed (the
+result's `failed_exports` names it), 1 failed, 2 refused before anything ran, 143 cancelled.
+The last event, `finished`, carries the same state, exit code and error. A base model
+downloaded at a pinned revision is `hub:<repo>@<revision>`, so its licence is checked and its
+NoulXP package names it.
+
 ## Privacy and security
 
 - Binds to `127.0.0.1` only, rejects other host names (DNS rebinding) and cross-origin requests, and accepts JSON bodies only, so a web page cannot drive it.

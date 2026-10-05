@@ -521,12 +521,142 @@ def test_a_run_file_that_cannot_train_ends_with_a_refusal(tmp_path):
     events = [json.loads(line) for line in out.getvalue().splitlines()]
     assert [e["type"] for e in events] == ["refused", "finished"]
     assert "not downloaded yet" in events[0]["message"]
+    # The last event says why, as the result file does.
+    assert events[1]["exit_code"] == 2 and events[1]["error"]["stage"] == "prepare"
+    assert events[1]["error"]["message"] == events[0]["message"]
     result = json.loads((tmp_path / "run/result.json").read_text())
     assert result["state"] == "refused" and result["error"]["stage"] == "prepare"
+    assert result["exit_code"] == 2
     assert not (tmp_path / "run/ws/runs").exists()  # nothing was written for it
-    config.write_text("{not json")
-    assert cloud.run(config, result=tmp_path / "r.json", stream=io.StringIO()) == 2
-    assert json.loads((tmp_path / "r.json").read_text())["state"] == "refused"
+    for text in (
+        "{not json",
+        json.dumps({"workspace": 5}),
+        json.dumps({"dataset": {"questions": 5, "train": 5}}),
+    ):
+        config.write_text(text)  # refused, with a result file, whatever is wrong with it
+        assert cloud.run(config, result=tmp_path / "r.json", stream=io.StringIO()) == 2
+        assert json.loads((tmp_path / "r.json").read_text())["state"] == "refused"
+
+
+# A job that only writes events, as the scripted plan for its kind says: what the headless
+# runner does with a job's events and exit code, with no model and no training.
+CHILD = """
+import json, sys, time
+from pathlib import Path
+job = Path(sys.argv[1])
+plan = json.loads(sys.argv[2])[json.loads((job / "spec.json").read_text())["kind"]]
+with open(job / "events.jsonl", "ab", buffering=0) as out:
+    for step in plan["steps"]:
+        if isinstance(step, (int, float)):
+            time.sleep(step)
+        else:
+            out.write(bytes.fromhex(step))
+sys.exit(plan["exit"])
+"""
+
+
+def scripted(monkeypatch, **plan):
+    """engine.start_job, replaced by CHILD with this plan. Returns the processes started."""
+    started = []
+
+    def start_job(job_dir, kind, log, env=None):
+        command = [sys.executable, "-c", CHILD, str(job_dir), json.dumps(plan)]
+        started.append(subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT))
+        return started[-1]
+
+    monkeypatch.setattr(engine, "start_job", start_job)
+    return started
+
+
+def line(type_, **data):
+    return (json.dumps({"t": 0, "type": type_, **data}, ensure_ascii=False) + "\n").encode()
+
+
+def scripted_run(tmp_path, **extra):
+    base = fake_checkpoint(tmp_path / "laya", kinds.LAYA)
+    return write_run(tmp_path / "run", base, **extra)[0]
+
+
+TRAINED = {"steps": [line("result", accuracy=0.9).hex(), line("done").hex()], "exit": 0}
+
+
+def test_a_run_whose_export_fails_ends_partial(tmp_path, monkeypatch):
+    """Trained, but an export failed: exit 3 and state partial, never success, with the
+    failed exports named in the result and in the last event."""
+    failed = {"steps": [line("error", message="RuntimeError: no package").hex()], "exit": 1}
+    scripted(monkeypatch, train=TRAINED, export=failed)
+    config = scripted_run(tmp_path, exports=[{"target": "onnx"}])
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 3
+    last = json.loads(out.getvalue().splitlines()[-1])
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert last["type"] == "finished" and last["state"] == result["state"] == "partial"
+    assert last["exit_code"] == result["exit_code"] == 3
+    assert last["failed_exports"] == result["failed_exports"] == ["onnx"]
+    assert (
+        last["error"]
+        == result["error"]
+        == {"stage": "export:onnx", "message": "RuntimeError: no package"}
+    )
+    assert result["exports"][0]["state"] == "failed" and "outputs" in result
+
+
+def test_an_event_read_in_the_middle_of_a_character_arrives_whole(tmp_path, monkeypatch):
+    whole = line("phase", phase="train", message="Training ✅ · epoch 1")
+    cut = whole.index("✅".encode()) + 1  # inside the check mark's three bytes
+    train = {"steps": [whole[:cut].hex(), 0.6, whole[cut:].hex(), line("done").hex()], "exit": 0}
+    scripted(monkeypatch, train=train)
+    out = io.StringIO()
+    assert cloud.run(scripted_run(tmp_path), stream=out) == 0
+    events = [json.loads(e) for e in out.getvalue().splitlines()]
+    assert any(e.get("message") == "Training ✅ · epoch 1" for e in events)
+
+
+def test_a_signal_during_the_checks_cancels_before_anything_runs(tmp_path, monkeypatch):
+    started = scripted(monkeypatch, train=TRAINED)
+    prepare = cloud.prepare_run
+
+    def signalled(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)  # handled: the checks finish, nothing starts
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(cloud, "prepare_run", signalled)
+    before = signal.getsignal(signal.SIGTERM)
+    out = io.StringIO()
+    assert cloud.run(scripted_run(tmp_path), stream=out) == 143
+    assert started == []
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "cancelled" and result["error"]["stage"] == "prepare"
+    assert not list((tmp_path / "run/ws/runs").iterdir())  # the record of a run that never ran
+    assert json.loads(out.getvalue().splitlines()[-1])["state"] == "cancelled"
+    assert signal.getsignal(signal.SIGTERM) == before  # the caller's handler is back
+
+
+class Broken(io.StringIO):
+    """stdout whose reader went away after a few lines."""
+
+    def __init__(self, lines):
+        super().__init__()
+        self.left = lines
+
+    def write(self, text):
+        if self.left == 0:
+            raise BrokenPipeError(32, "Broken pipe")
+        self.left -= 1
+        return super().write(text)
+
+
+def test_a_job_is_never_left_running(tmp_path, monkeypatch):
+    """Whatever ends the following of a job's events, the job is stopped and waited for."""
+    train = {"steps": [line("phase", phase="train", message="Training").hex(), 60], "exit": 0}
+    started = scripted(monkeypatch, train=train)
+    config = scripted_run(tmp_path)
+    with pytest.raises(BrokenPipeError):  # "prepared" and "stage" are written, then no more
+        cloud.run(config, stream=Broken(2))
+    [child] = started
+    assert child.returncode is not None  # stopped (SIGTERM), long before its 60 s
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "failed" and result["error"]["stage"] == "run"
 
 
 def tiny_base(kind, folder):
@@ -577,6 +707,7 @@ def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
     assert process.returncode == 0, stderr[-3000:]
     events = [json.loads(line) for line in stdout.splitlines()]  # every line is one JSON event
     assert events[0]["type"] == "prepared" and events[-1]["type"] == "finished"
+    assert events[-1]["exit_code"] == 0 and "error" not in events[-1]
     assert events[0]["dataset"]["rows"] == checked["rows"]
     stages = [(e["stage"], e["state"]) for e in events if e["type"] == "stage"]
     expected = [("train", "running"), ("train", "done")]

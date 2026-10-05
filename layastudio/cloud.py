@@ -44,6 +44,25 @@ The config, with paths relative to its own folder:
       "exports": [{"target": "noulxp", "gguf": "bf16"}],
       "run_id": "...", "baseline": true, "workspace": "..."
     }
+
+- base_model: a model downloaded at a pinned revision is hub:<repo>@<revision>, which is how
+  its licence is checked and its packages name it (source.model, source.revision). A path:
+  folder has a published name only when it was imported from the registry (imports.json);
+  any other is trained with a warning, unchecked, and its packages name no base model.
+- A dataset file is a path, or {"path", "name", "sha256"}: name, the file's own name, whose
+  extension chooses the reader (when it was saved under another); sha256, its bytes', which
+  must match. expected: what the dataset was when it was checked: its rows per split, and its
+  digest, the report's sha256 (its questions and split rows, not a file's bytes).
+- bounds: with any, the run may change only the hyperparameters they name, each within its
+  {"min", "max"} or its {"choices"}.
+- The config is the agent's, never a user's: its paths are read as given (absolute ones and
+  "..", too). A GPU image sets $LAYASTUDIO_TOOLS to the llama.cpp converter it bakes in
+  (gguf.py), or Decider's GGUF fetches it beside the workspace.
+
+The exit code, also the result's exit_code: 0 when it trained and made every export; 3
+(partial) when it trained but an export failed, which the result's failed_exports names (the
+checkpoint and the other exports are there); 1 when it failed; 2 when it was refused before
+anything ran; 143 when it was cancelled (SIGTERM or Ctrl+C).
 """
 
 import argparse
@@ -51,7 +70,9 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -551,17 +572,21 @@ def _tail(path, lines=50):
 class Headless:
     """One prepared run's jobs, one after another, each a child process whose events are
     forwarded as they are written. SIGTERM or Ctrl+C cancels the job that is running (SIGTERM,
-    then SIGKILL after 30 s) and starts no other."""
+    then SIGKILL after 30 s) and starts no other. A child is never left running: whatever
+    ends the following of its events, it is stopped and waited for."""
 
     KILL_AFTER = 30
 
     def __init__(self, workspace, emit):
         self.workspace = workspace
         self.emit = emit
-        # The jobs' workspace is the run's, for the files they keep beside it too.
-        self.env = {"LAYASTUDIO_HOME": str(workspace)}
         self.process = None
         self.cancelled = False
+
+    @property
+    def env(self):
+        # The jobs' workspace is the run's, for the files they keep beside it too.
+        return {"LAYASTUDIO_HOME": str(self.workspace)}
 
     def cancel(self, *_):
         self.cancelled = True
@@ -577,14 +602,17 @@ class Headless:
         result = error = None
         with open(path / "output.log", "w") as log:
             self.process = engine.start_job(path, kind, log, self.env)
-            if self.cancelled:
-                self.process.terminate()
-            for event in self._follow(path / "events.jsonl"):
-                self.emit.line({**event, "stage": stage})
-                if event.get("type") == "result":
-                    result = {k: v for k, v in event.items() if k not in ("t", "type")}
-                elif event.get("type") == "error":
-                    error = event
+            try:
+                if self.cancelled:
+                    self.process.terminate()
+                for event in self._follow(path / "events.jsonl"):
+                    self.emit.line({**event, "stage": stage})
+                    if event.get("type") == "result":
+                        result = {k: v for k, v in event.items() if k not in ("t", "type")}
+                    elif event.get("type") == "error":
+                        error = event
+            finally:
+                self._stop()
         code, self.process = self.process.returncode, None
         state = "done" if code == 0 else "cancelled" if code == 143 or self.cancelled else "failed"
         outcome = {
@@ -604,18 +632,30 @@ class Headless:
         self.emit("stage", **{k: v for k, v in outcome.items() if k != "result"})
         return outcome
 
+    def _stop(self):
+        """The child, ended: at once when it has exited, else SIGTERM, then SIGKILL."""
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(self.KILL_AFTER)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process.wait()
+
     def _follow(self, events_path):
-        """The child's events as they are written, until it exits."""
-        position, pending, stop_at = 0, "", None
+        """The child's events as they are written, until it exits. Read as bytes and decoded a
+        whole line at a time: a read can end inside a character the child is still writing."""
+        position, pending, stop_at = 0, b"", None
         while True:
             done = self.process.poll() is not None
             if events_path.exists():
-                with open(events_path, encoding="utf-8") as handle:
+                with open(events_path, "rb") as handle:
                     handle.seek(position)
                     pending += handle.read()
                     position = handle.tell()
-                *complete, pending = pending.split("\n")
-                for line in complete:
+                *complete, pending = pending.split(b"\n")
+                for raw in complete:
+                    line = raw.decode("utf-8", errors="replace")
                     if line.strip():
                         try:
                             yield json.loads(line)
@@ -640,9 +680,11 @@ def _summaries(run_dir):
 
 
 def run(config, workspace=None, result=None, stream=None):
-    """Run the fine-tune a config file describes, end to end. Returns the exit code: 0 when it
-    trained (each export's own state is in the result), 1 when it failed, 2 when it was
-    refused, 143 when it was cancelled. The result file is written whatever happens."""
+    """Run the fine-tune a config file describes, end to end, and return its exit code (this
+    module's docstring). The result file is written whatever happens, and the last event,
+    "finished", says how the run ended: its state, exit code and result file, and the error
+    (its stage and message) when it did not succeed. SIGTERM and Ctrl+C cancel it from the
+    start: during the checks they stop it before anything trains."""
     emit = Printer(stream or sys.stdout)
     config = Path(config).resolve()
     result = Path(result).resolve() if result else config.parent / "result.json"
@@ -650,31 +692,53 @@ def run(config, workspace=None, result=None, stream=None):
     outcome = {"state": "failed", "config": str(config), "started": engine.now()}
 
     def finish(state, code, **fields):
-        outcome.update(fields, state=state, finished=engine.now())
+        outcome.update(fields, state=state, exit_code=code, finished=engine.now())
         outcome["seconds"] = round(time.time() - started, 1)
         engine.write_json(result, outcome)
-        emit("finished", state=state, result=str(result))
+        why = {k: outcome[k] for k in ("error", "failed_exports") if k in outcome}
+        emit("finished", state=state, exit_code=code, result=str(result), **why)
         return code
+
+    runner = Headless(None, emit)
+    previous = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.signal(sig, runner.cancel)
+    except ValueError:  # not the main thread: the caller handles signals
+        pass
+    try:
+        return _run(config, workspace, runner, emit, outcome, finish)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _run(config, workspace, runner, emit, outcome, finish):
+    def refuse(message):
+        emit("refused", message=message)
+        return finish("refused", 2, error={"stage": "prepare", "message": message})
 
     try:
         spec = json.loads(config.read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
-        emit("refused", message=f"Cannot read the config: {error}")
-        return finish("refused", 2, error={"stage": "prepare", "message": str(error)})
+        return refuse(f"Cannot read the config: {error}")
     if not isinstance(spec, dict):
-        emit("refused", message="The config is a JSON object")
-        return finish("refused", 2, error={"stage": "prepare", "message": "not a JSON object"})
+        return refuse("The config is a JSON object")
     where = workspace or spec.get("workspace")
+    if where is not None and not isinstance(where, (str, Path)):
+        return refuse("workspace is a folder's path")
     workspace = (config.parent / where).resolve() if where else engine.WORKSPACE
     outcome["workspace"] = str(workspace)
+    runner.workspace = workspace
     ref = spec.get("base_model")
     if isinstance(ref, str) and ref.startswith("path:"):  # a folder beside the config, too
         spec["base_model"] = f"path:{(config.parent / Path(ref[5:]).expanduser()).resolve()}"
     try:
         prepared = prepare_run(spec, workspace, base=config.parent)
     except Refused as error:
-        emit("refused", message=str(error))
-        return finish("refused", 2, error={"stage": "prepare", "message": str(error)})
+        return refuse(str(error))
+    except KeyboardInterrupt:
+        return finish("cancelled", 143, error={"stage": "prepare", "message": "Cancelled"})
     except Exception as error:  # noqa: BLE001 - the result file says what went wrong
         message = f"{type(error).__name__}: {error}"
         emit("error", message=message)
@@ -682,6 +746,9 @@ def run(config, workspace=None, result=None, stream=None):
 
     run_id = prepared["run_id"]
     run_dir = workspace / "runs" / run_id
+    if runner.cancelled:  # during the checks: nothing ran, and the run's record goes
+        shutil.rmtree(run_dir, ignore_errors=True)
+        return finish("cancelled", 143, error={"stage": "prepare", "message": "Cancelled"})
     meta = prepared["dataset"]
     outcome.update(
         run_id=run_id,
@@ -706,8 +773,6 @@ def run(config, workspace=None, result=None, stream=None):
         warnings=prepared["warnings"],
     )
 
-    runner = Headless(workspace, emit)
-    previous = {sig: signal.signal(sig, runner.cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         train = runner.stage(
             "train", "train", prepared["job"], run_id, f"Fine-tune: {prepared['name']}"
@@ -737,14 +802,20 @@ def run(config, workspace=None, result=None, stream=None):
         outcome["outputs"] = manifest(run_dir)
         if runner.cancelled:
             return finish("cancelled", 143, error={"stage": "export", "message": "Cancelled"})
+        failed = [e for e in outcome["exports"] if e["state"] == "failed"]
+        if failed:  # trained, and the other outputs are there: the caller decides what to keep
+            first = failed[0]
+            return finish(
+                "partial",
+                3,
+                failed_exports=[e["target"] for e in failed],
+                error={"stage": f"export:{first['target']}", "message": first["error"]["message"]},
+            )
         return finish("succeeded", 0)
     except Exception as error:  # noqa: BLE001 - the result file says what went wrong
         return finish(
             "failed", 1, error={"stage": "run", "message": f"{type(error).__name__}: {error}"}
         )
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
 
 
 def main(argv=None):
