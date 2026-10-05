@@ -807,8 +807,9 @@ def main(argv=None):
     )
     parser.add_argument(
         "--gguf",
-        choices=("q8_0", "bf16", "f16"),
-        help="noulxp, Decider: the GGUF the package carries (default q8_0, as Decider's own)",
+        choices=("bf16", "q8_0", "f16"),
+        help="noulxp, Decider: the GGUF the package carries (default bf16, the exact weights; "
+        "q8_0 is half the size and changes some answers)",
     )
     args = parser.parse_args(argv)
     precision = args.precision

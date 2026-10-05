@@ -19,8 +19,9 @@ runtime that noulxp has for the run's checkpoint kind (kinds.py):
 
 1. `noulxp export <kind>` writes it from the run's checkpoint: for the encoders an ONNX graph
    over the checkpoint's own weights file, the tokenizer, template.json and calibration.json;
-   for Decider the run's GGUF (gguf.py: converted with a pinned llama.cpp, q8_0 by default, as
-   Decider's own package ships), its tokenizer, prompt.json and calibration.json.
+   for Decider the run's GGUF (gguf.py: converted with a pinned llama.cpp; bf16 by default, the
+   merged weights exactly; q8_0, as Decider's own package ships, on request), its tokenizer,
+   prompt.json and calibration.json.
 2. `noulxp conformance generate` records the fine-tune's own answers, from the model's own
    runtime on the CPU, to NoulXP's request set (52 requests in 11 languages, the coverage the
    standard asks for). Rows of the run's test split, asked the questions the run was tuned for,
@@ -98,7 +99,9 @@ NEEDS = {
 NEEDED = NEEDS["laya"]
 EXTRAS = {"laya": "export", "julia": "export", "decider": "export --extra gguf"}
 RUNTIME = {"laya": "the `laya` package", "julia": "Julia's own inference", "decider": "Decider's"}
-GGUF_PRECISION = "q8_0"  # the GGUF in a Decider package: half of bf16, as Decider's own package
+GGUF_PRECISION = "bf16"  # the GGUF in a Decider package: the merged weights exactly. q8_0 is
+# half the size but changes answers (21 of 2,000 typed-decisions questions on Decider 2B, 16
+# beyond ties), so it is an opt-in (--gguf q8_0).
 # noulxp refuses to export an encoder with an older transformers: older releases compute
 # ModernBERT differently, and the package would not give the model's own answers.
 MIN_TRANSFORMERS = (5, 2)
