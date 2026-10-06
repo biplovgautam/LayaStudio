@@ -118,8 +118,41 @@ def converter(workspace=WORKSPACE, emit=None):
     return root
 
 
+def _run_converter(args, env):
+    """The converter (`python <script> args`) behind children.WATCH, so that it ends with this
+    job even when the job is killed outright: its stdin is a pipe nobody writes to, held until
+    it has ended. Its stdout and stderr go to files, never pipes, so nothing waits on a full
+    pipe while stdin stays open (subprocess.run's communicate() would close it at once). Any
+    exception here, a cancel included, kills it first, as subprocess.run did. Returns (exit
+    code, stdout, stderr)."""
+    import tempfile
+
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen(
+            children.command(args),
+            stdin=subprocess.PIPE,  # children.WATCH: never written to
+            stdout=out,
+            stderr=err,
+            env=children.child_env(env),
+        )
+        try:
+            code = process.wait()
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            children.close_stdin(process)
+        texts = []
+        for handle in (out, err):
+            handle.seek(0)
+            texts.append(handle.read().decode(errors="replace"))
+    return code, texts[0], texts[1]
+
+
 def convert(model_dir, out_file, precision="bf16", workspace=WORKSPACE, emit=None):
-    """convert_hf_to_gguf.py on a Decider checkpoint folder, in a process of its own."""
+    """convert_hf_to_gguf.py on a Decider checkpoint folder, in a process of its own that ends
+    with this job (_run_converter)."""
     emit = emit or (lambda *a, **k: None)
     if precision not in PRECISIONS:
         raise ValueError(f"GGUF precision is one of {PRECISIONS}")
@@ -138,8 +171,7 @@ def convert(model_dir, out_file, precision="bf16", workspace=WORKSPACE, emit=Non
         "PYTHONUNBUFFERED": "1",
         "NO_LOCAL_GGUF": "",
     }
-    command = [
-        sys.executable,
+    args = [
         str(tool / "convert_hf_to_gguf.py"),
         str(model_dir),
         "--outfile",
@@ -156,12 +188,12 @@ def convert(model_dir, out_file, precision="bf16", workspace=WORKSPACE, emit=Non
         message=f"Converting to GGUF ({precision}) with llama.cpp",
         device="cpu",
     )
-    process = subprocess.run(command, env=env, capture_output=True, text=True, errors="replace")
-    for line in (process.stdout + process.stderr).splitlines()[-12:]:
+    code, stdout, stderr = _run_converter(args, env)
+    for line in (stdout + stderr).splitlines()[-12:]:
         if line.strip():
             emit("log", message=line.strip())
-    if process.returncode or not out_file.is_file():
-        tail = (process.stderr or process.stdout).strip().splitlines()[-1:] or ["no output"]
+    if code or not out_file.is_file():
+        tail = (stderr or stdout).strip().splitlines()[-1:] or ["no output"]
         raise RuntimeError(f"convert_hf_to_gguf.py failed: {tail[0]}")
     with open(out_file, "rb") as handle:
         if handle.read(4) != b"GGUF":

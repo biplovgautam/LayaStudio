@@ -8,8 +8,9 @@ after asking it to stop, a cloud run 30 s after) runs none of that, so:
 - each child process watches for it itself (WATCH): it exits when its stdin, a pipe the job
   holds and never writes to, closes, which happens when the job dies (a job already gone
   before the child starts reading included: the first read is EOF), and on Linux also on
-  PR_SET_PDEATHSIG. A NoulXP step runs as `python -c RUN <its own arguments>` (command());
-  gguf_reference.py calls watch_parent(). The interpreter need not be the job's own child:
+  PR_SET_PDEATHSIG. A NoulXP step and llama.cpp's GGUF converter run as
+  `python -c RUN <their own arguments>` (command()); gguf_reference.py calls watch_parent().
+  The interpreter need not be the job's own child:
   in a Windows virtual environment sys.executable is a launcher that starts the base
   interpreter as its child and waits for it, and the stdin pipe reaches it all the same;
 - a scratch folder in a run's folder carries the pid of the job that made it (scratch()), and
@@ -69,7 +70,9 @@ _watch_parent()
 del _watch_parent
 """
 # A step's own arguments after the watch, run as Python runs them: "-m <module> args..." as
-# `python -m` does (sys.argv[0] its file), "-c <code> args..." as `python -c` does.
+# `python -m` does (sys.argv[0] its file), "-c <code> args..." as `python -c` does, and
+# "<script> args..." as `python <script>` does (its folder first on the path, unless -P or
+# PYTHONSAFEPATH keeps it off; __file__ and sys.argv[0] its absolute path).
 RUN = (
     WATCH
     + """
@@ -86,8 +89,17 @@ elif _args[:1] == ["-c"] and len(_args) > 1:
     _code = _args[1]
     del _args
     exec(compile(_code, "<string>", "exec"), globals())  # __main__'s, as `python -c` runs it
+elif _args and not _args[0].startswith("-"):
+    import os, runpy
+
+    _script = os.path.abspath(_args[0])
+    sys.argv = _args
+    if not sys.flags.safe_path and sys.path[:1] == [""]:  # `python -c`'s current folder
+        sys.path[0] = os.path.dirname(os.path.realpath(_script))
+    del _args
+    runpy.run_path(_script, run_name="__main__")
 else:
-    sys.exit("usage: python -c RUN (-m module | -c code) [arguments]")
+    sys.exit("usage: python -c RUN (-m module | -c code | script) [arguments]")
 """
 )
 
@@ -99,7 +111,8 @@ def watch_parent():
 
 def command(args):
     """The argv of a child that ends with this job: `python -c RUN` and its own arguments,
-    "-m <module> ..." or "-c <code> ...". Started with child_env() and stdin=subprocess.PIPE."""
+    "-m <module> ...", "-c <code> ..." or "<script> ...". Started with child_env() and
+    stdin=subprocess.PIPE."""
     return [sys.executable, "-c", RUN, *args]
 
 

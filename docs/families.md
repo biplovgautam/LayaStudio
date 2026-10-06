@@ -175,9 +175,10 @@ on the GPU while the converter runs (`LAYASTUDIO_SERIAL_VERIFY=1` keeps it after
 is the container's limit less what the kernel cannot reclaim: the page cache, which the
 checkpoints just read and written fill, counts as free. Each gate's decision, the gate that
 made it and what it read are in the report (`steps.conformance.overlap_gate`, and the GGUF's
-`timings.overlap_gate`). Every step's process ends with the job, even a job killed outright (it
-exits when the job's end closes its stdin, and on Linux on PR_SET_PDEATHSIG), and the next
-build or GGUF export of the run removes the scratch folders such a job left. `noulxp-report.json` says what each step took (`steps`: seconds, CPU
+`timings.overlap_gate`). Every step's process, llama.cpp's converter and the GGUF's float32
+reference included, ends with the job, even a job killed outright (it exits when the job's end
+closes its stdin, and on Linux on PR_SET_PDEATHSIG), and the next build or GGUF export of the
+run removes the scratch folders such a job left. `noulxp-report.json` says what each step took (`steps`: seconds, CPU
 seconds, threads, the container's CPU throttling, peak threads and memory of each step's
 process) and on what machine (`machine`). Thread counts move answers by rounding only: Laya's
 and Julia's recordings at 1 thread and at several agree within 1e-4, and the check's tolerance

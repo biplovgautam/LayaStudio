@@ -236,6 +236,148 @@ def test_a_child_behind_a_launcher_ends_when_its_job_is_killed_outright():
         pytest.fail("the child outlived its job")
 
 
+# ----------------------------------------------------------------------------- the GGUF converter
+
+# A stand-in for llama.cpp's convert_hf_to_gguf.py: it writes its pid where FAKE_CONVERTER_PID
+# says, then a GGUF's magic to --outfile; FAKE_CONVERTER=sleep sleeps instead, =fail fails.
+FAKE_CONVERTER = """\
+import os, sys, time
+from pathlib import Path
+
+Path(os.environ["FAKE_CONVERTER_PID"]).write_text(str(os.getpid()))
+mode = os.environ.get("FAKE_CONVERTER", "")
+if mode == "sleep":
+    time.sleep(600)
+if mode == "fail":
+    print("loading the model", flush=True)
+    print("KeyError: no such tensor", file=sys.stderr)
+    sys.exit(2)
+first = sys.path[0] == str(Path(__file__).resolve().parent)
+print("argv", sys.argv[1:], __name__, Path(__file__).name, first)
+print("written", file=sys.stderr)
+Path(sys.argv[sys.argv.index("--outfile") + 1]).write_bytes(b"GGUF" + bytes(8))
+"""
+
+
+def fake_tools(root):
+    """LAYASTUDIO_TOOLS holding llama.cpp's converter at the pinned commit as converter() finds
+    a verified one, FAKE_CONVERTER in place of the real script."""
+    from layastudio import gguf
+
+    tool = root / f"llama.cpp-{gguf.LLAMA_CPP_COMMIT[:12]}"
+    for name in gguf.PINNED:
+        (tool / name).parent.mkdir(parents=True, exist_ok=True)
+        (tool / name).write_text("")
+    (tool / "convert_hf_to_gguf.py").write_text(FAKE_CONVERTER)
+    (tool / ".verified").write_text(gguf.LLAMA_CPP_COMMIT + "\n")
+    return tool
+
+
+def converter_pid(path, within=30):
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        text = path.read_text().strip() if path.is_file() else ""
+        if text.isdigit():
+            return int(text)
+        time.sleep(0.05)
+    pytest.fail(f"the converter did not start within {within} s")
+
+
+def test_the_converter_runs_as_python_runs_a_script(tmp_path, monkeypatch):
+    """Behind children.WATCH, the converter still sees its own argv, __name__ and __file__, and
+    its folder first on its path as `python <script>` puts it there; its output reaches the
+    job's log, and a failure names the last line it wrote to stderr."""
+    from layastudio import gguf
+
+    tools = tmp_path / "tools"
+    fake_tools(tools)
+    monkeypatch.setenv("LAYASTUDIO_TOOLS", str(tools))
+    monkeypatch.setenv("FAKE_CONVERTER_PID", str(tmp_path / "pid"))
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    monkeypatch.delenv("FAKE_CONVERTER", raising=False)
+    events = []
+    out = gguf.convert(
+        tmp_path / "model",
+        tmp_path / "out" / "m.gguf",
+        "bf16",
+        tmp_path / "w",
+        lambda kind, **data: events.append((kind, data)),
+    )
+    assert out.read_bytes()[:4] == b"GGUF"
+    logged = [data["message"] for kind, data in events if kind == "log"]
+    args = [str(tmp_path / "model"), "--outfile", str(out), "--outtype", "bf16", "--no-mtp"]
+    assert f"argv {args} __main__ convert_hf_to_gguf.py True" in logged
+    assert "written" in logged
+    monkeypatch.setenv("FAKE_CONVERTER", "fail")
+    with pytest.raises(RuntimeError, match="convert_hf_to_gguf.py failed: KeyError: no such"):
+        gguf.convert(tmp_path / "model", tmp_path / "out" / "n.gguf", "bf16", tmp_path / "w")
+
+
+def converter_job(tmp_path, on_term=False):
+    """A job running gguf.convert with a converter that sleeps, and the converter's pid. With
+    on_term, SIGTERM raises in the job as engine.run_job's handler makes it (a cancel)."""
+    tools = tmp_path / "tools"
+    fake_tools(tools)
+    pid_file = tmp_path / "pid"
+    handler = (
+        "import signal\n"
+        "def on_term(*_):\n"
+        "    raise SystemExit(143)\n"
+        "signal.signal(signal.SIGTERM, on_term)\n"
+        if on_term
+        else ""
+    )
+    job = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import sys\nsys.path.insert(0, {str(REPO)!r})\n{handler}"
+            "from layastudio import gguf\n"
+            f"gguf.convert({str(tmp_path / 'model')!r}, {str(tmp_path / 'm.gguf')!r}, 'bf16')\n",
+        ],
+        env={
+            **os.environ,
+            "LAYASTUDIO_TOOLS": str(tools),
+            "FAKE_CONVERTER_PID": str(pid_file),
+            "FAKE_CONVERTER": "sleep",
+        },
+    )
+    try:
+        child = converter_pid(pid_file)
+    except BaseException:
+        job.kill()
+        job.wait()
+        raise
+    return job, child
+
+
+@needs_posix
+def test_a_converter_ends_when_its_job_is_killed_outright(tmp_path):
+    """SIGKILL during the GGUF conversion: no handler runs in the job, and the converter (half
+    a minute or more on a 2B Decider, writing the run's GGUF) is gone within 5 s all the same."""
+    job, child = converter_job(tmp_path)
+    time.sleep(0.3)
+    assert alive(child)
+    os.kill(job.pid, signal.SIGKILL)
+    job.wait()
+    if not gone(child):
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("the converter outlived its job")
+
+
+@needs_posix
+def test_a_cancelled_conversion_ends_its_converter(tmp_path):
+    """SIGTERM raising in the job during the conversion (a cancel): the converter is ended
+    before the job's exception goes on."""
+    job, child = converter_job(tmp_path, on_term=True)
+    time.sleep(0.3)
+    os.kill(job.pid, signal.SIGTERM)
+    assert job.wait(timeout=30) == 143
+    if not gone(child):
+        os.kill(child, signal.SIGKILL)
+        pytest.fail("the converter outlived its cancelled job")
+
+
 # ----------------------------------------------------------------------------- scratch folders
 
 
