@@ -59,8 +59,6 @@ import os
 import re
 import shutil
 import subprocess
-import sys
-import tempfile
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -177,6 +175,7 @@ LAYA_THREADS = "OMP_NUM_THREADS and MKL_NUM_THREADS (laya's runtime takes no thr
 # kills a job 15 s after asking, a cloud run 30 s after).
 END_AFTER = 10
 GLOG = re.compile(r"^[WIEF]\d{4} ")  # torch's own warnings, e.g. "W1004 15:17:08 ..."
+SCRATCH = ".noulxp-"  # a build's scratch folder in the run's folder (children.scratch)
 
 
 # ----------------------------------------------------------------------------- tooling
@@ -401,11 +400,14 @@ def _write_jsonl(path, rows):
 
 
 def _child_env(threads=None):
-    """A step process's environment: offline, unbuffered, and, with a thread count, the
-    BLAS/OpenMP caps (THREAD_VARS) at that count. A cap the machine already sets wins
-    (setdefault): report the effective values (thread_env), not the count asked for. Only step
-    processes get these; the job's own process (training, the GPU) keeps its own."""
-    env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"}
+    """A step process's environment: offline, unbuffered, naming this job (children.PARENT),
+    and, with a thread count, the BLAS/OpenMP caps (THREAD_VARS) at that count. A cap the
+    machine already sets wins (setdefault): report the effective values (thread_env), not the
+    count asked for. Only step processes get these; the job's own process (training, the GPU)
+    keeps its own."""
+    from .children import child_env
+
+    env = child_env({**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"})
     if threads:
         for name in THREAD_VARS:
             env.setdefault(name, str(int(threads)))
@@ -438,14 +440,18 @@ def _end(processes, timeout=END_AFTER):
 def _python(args, emit, progress=False, threads=None, companions=()):
     """One step in a process of its own, its output into the job's log.
 
-    threads: the BLAS/OpenMP caps of its environment (_child_env). companions: processes
-    running beside it (the model's own runtime recording during the export), stopped with it
-    when the job is cancelled or the step's following fails. Returns (exit code, the last
-    lines it printed). Cancelling the job stops the step."""
+    args: Python's own, "-m <module> ..." or "-c <code> ...", run behind children.WATCH, so
+    the step ends with the job even when the job is killed outright. threads: the thread caps
+    of its environment (_child_env). companions: processes running beside it (the model's own
+    runtime recording during the export), stopped with it when the job is cancelled or the
+    step's following fails. Returns (exit code, the last lines it printed). Cancelling the job
+    stops the step."""
+    from .children import close_stdin, command
     from .telemetry import Sampler
 
     process = subprocess.Popen(
-        [sys.executable, *args],
+        command(args),
+        stdin=subprocess.PIPE,  # children.WATCH: never written to, closed once it has ended
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -473,6 +479,8 @@ def _python(args, emit, progress=False, threads=None, companions=()):
     except BaseException:
         _end([*companions, process])
         raise
+    finally:
+        close_stdin(process)
     return code, list(tail)
 
 
@@ -620,9 +628,11 @@ class Native:
     """`noulxp conformance generate` started beside the export, into a stub package of its own
     (a manifest of "{}", nothing else): the model's own runtime reads only the checkpoint view,
     never the export, so running it during the export changes none of its inputs. A daemon
-    thread forwards its output through the Locked emit and keeps its last lines."""
+    thread forwards its output through the Locked emit and keeps its last lines. Like every
+    step, it runs behind children.WATCH: it ends with the job, even one killed outright."""
 
     def __init__(self, stub, checkpoint, requests, emit, runtime, threads):
+        from .children import command
         from .telemetry import Sampler
 
         self.stub, self.requests_path = Path(stub), Path(requests)
@@ -632,7 +642,8 @@ class Native:
         self.started = time.perf_counter()
         self.seconds = None
         self.process = subprocess.Popen(
-            [sys.executable, *_generate_args(stub, checkpoint, requests, runtime, threads)],
+            command(_generate_args(stub, checkpoint, requests, runtime, threads)),
+            stdin=subprocess.PIPE,  # children.WATCH
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -665,17 +676,23 @@ class Native:
 
     def wait(self):
         """Its exit code, once it has ended and its output has been read."""
+        from .children import close_stdin
+
         code = self.process.wait()
         self.seconds = round(time.perf_counter() - self.started, 2)
         self.reader.join(timeout=10)
         self.sampler.stop()
+        close_stdin(self.process)
         return code
 
     def stop(self):
         """Ended and reaped (SIGTERM, then SIGKILL), its output read: safe to call twice."""
+        from .children import close_stdin
+
         _end([self.process])
         self.reader.join(timeout=10)
         self.sampler.stop()
+        close_stdin(self.process)
 
 
 def _reported(described):
@@ -792,7 +809,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
 
     Raises when the package does not pass, after keeping it as runs/<id>/noulxp-failed: a
     failing package never replaces the run's package, and is never published."""
-    from . import kinds, telemetry
+    from . import children, kinds, telemetry
     from .runtime import cpu_budget
 
     emit = Locked(emit or (lambda *a, **k: None))
@@ -813,6 +830,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     threads = budget["threads"]
     staging, kept, failed = run_dir / BUILDING, run_dir / PACKAGE, run_dir / FAILED
     shutil.rmtree(staging, ignore_errors=True)
+    children.sweep(run_dir, SCRATCH)  # those of a build killed outright (SIGKILL)
     # Built in a folder named as it is published, so the check's report names it so too.
     building = staging / PACKAGE
     staging.mkdir()
@@ -839,7 +857,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     steps = telemetry.Steps(report, emit=emit)
     native = None
     try:
-        with tempfile.TemporaryDirectory(prefix=".noulxp-", dir=run_dir) as scratch:
+        with children.scratch(run_dir, SCRATCH) as scratch:
             scratch = Path(scratch)
             try:
                 source = provenance(run, run_id, workspace)

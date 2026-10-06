@@ -3,17 +3,21 @@ recorded beside the export: with stand-ins for the step processes, so they run a
 
 The guards here keep what a package certifies where it is: the check always hashes every file
 (validate may skip that only because the check does it), always runs on the CPU, at the same
-thread count as the recording, and never with a serving option."""
+thread count as the recording, and never with a serving option. Every step runs behind
+children.WATCH, with its own arguments after it."""
 
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 
 import pytest
 
-from layastudio import engine, gguf, noulxp_package
+from layastudio import children, engine, gguf, noulxp_package
+
+WATCHED = [sys.executable, "-c", children.RUN]  # what every step's argv starts with
 
 
 def quiet(*_args, **_kwargs):
@@ -30,6 +34,7 @@ class FakePopen:
 
     def __init__(self, args, **kwargs):
         self.args, self.env = list(args), dict(kwargs.get("env") or {})
+        self.stdin_given = kwargs.get("stdin")  # children.WATCH reads a pipe
         self.pid, self.returncode = 999999, 0
         self.stdout = io.StringIO("")
         FakePopen.seen.append(self)
@@ -61,7 +66,7 @@ def test_the_check_runs_exactly_so(tmp_path, steps):
     assert report["passed"]
     [check] = steps
     assert check.args == [
-        sys.executable,
+        *WATCHED,
         "-m",
         "noulxp",
         "check",
@@ -81,6 +86,8 @@ def test_the_check_runs_exactly_so(tmp_path, steps):
         "LAYASTUDIO_THREADS": "6",
     }
     assert check.env["HF_HUB_OFFLINE"] == "1"
+    assert check.env[children.PARENT] == str(os.getpid())
+    assert check.stdin_given is subprocess.PIPE
 
 
 def test_validate_leaves_the_hashes_to_the_check_and_only_to_it(tmp_path, steps):
@@ -90,7 +97,8 @@ def test_validate_leaves_the_hashes_to_the_check_and_only_to_it(tmp_path, steps)
     assert noulxp_package.validate_package(package, emit) == []
     noulxp_package.check_package(package, emit, threads=2)
     validate, check = steps
-    assert validate.args[1:] == ["-m", "noulxp", "validate", str(package), "--no-hashes"]
+    assert validate.args[:3] == WATCHED
+    assert validate.args[3:] == ["-m", "noulxp", "validate", str(package), "--no-hashes"]
     assert "--threads" not in validate.args and "OMP_NUM_THREADS" not in validate.env
     assert "--no-hashes" not in check.args
 
@@ -100,7 +108,7 @@ def test_the_recording_gets_the_same_threads_and_every_request(tmp_path, steps):
         tmp_path / "pkg", tmp_path / "view", tmp_path / "r.jsonl", print, "decider", threads=6
     )
     [generate] = steps
-    assert generate.args[1:] == [
+    assert generate.args[:3] == WATCHED and generate.args[3:] == [
         "-m",
         "noulxp",
         "conformance",
@@ -136,8 +144,9 @@ def test_a_cap_the_machine_sets_wins_and_is_what_is_reported(tmp_path, steps, mo
 def test_the_export_caps_its_threads_and_runs_its_exporter(tmp_path, steps):
     noulxp_package.export_package(tmp_path, tmp_path / "out", "n", {}, print, "julia", threads=1)
     [export] = steps
-    assert export.args[1] == "-c" and export.args[2] == noulxp_package.EXPORT
-    assert export.args[2].startswith(noulxp_package.ORT_THREADS)
+    assert export.args[:3] == WATCHED
+    assert export.args[3] == "-c" and export.args[4] == noulxp_package.EXPORT
+    assert export.args[4].startswith(noulxp_package.ORT_THREADS)
     assert export.env["LAYASTUDIO_THREADS"] == "1" and export.env["OMP_NUM_THREADS"] == "1"
 
 

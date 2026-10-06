@@ -715,6 +715,58 @@ def test_a_cancel_during_the_export_ends_both_processes(built, tmp_path, monkeyp
     assert report["error"].startswith("Cancelled") and report["steps"]["export"]["failed"]
 
 
+@needs_tooling
+@pytest.mark.skipif(os.name == "nt", reason="SIGKILL")
+def test_a_build_killed_outright_leaves_no_process_and_the_next_one_sweeps(
+    built, tmp_path, monkeypatch
+):
+    """SIGKILL while the export and the recording run (no handler runs in the job): both end
+    on their own within 5 s (their stdin closes; on Linux, PR_SET_PDEATHSIG too). The job's
+    staging and scratch folders stay behind, and the run's next build removes them."""
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = CANCELLED_BUILD.format(
+        repo=str(Path(__file__).resolve().parents[1]),
+        marks=str(marks),
+        export_pid=str(marks / "export"),
+        run=RUN,
+        workspace=str(workspace),
+    )
+    build = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "LAYASTUDIO_PARALLEL_CONFORMANCE": "1"},
+    )
+    deadline = time.monotonic() + 60
+    while not ((marks / "export").exists() and (marks / "native").exists()):
+        assert time.monotonic() < deadline and build.poll() is None
+        time.sleep(0.1)
+    time.sleep(0.3)
+    pids = [int((marks / name).read_text()) for name in ("export", "native")]
+    assert all(alive(pid) for pid in pids)
+    build.kill()
+    build.wait()
+    deadline = time.monotonic() + 5
+    while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    left = [pid for pid in pids if alive(pid)]
+    for pid in left:
+        os.kill(pid, signal.SIGKILL)
+    assert not left, "a step process outlived its job"
+    [scratch] = run_dir.glob(".noulxp-*")
+    assert scratch.name.startswith(f".noulxp-{build.pid}-")
+    assert (run_dir / noulxp_package.BUILDING).is_dir()
+
+    def export_package(*args, **kwargs):
+        raise RuntimeError("noulxp export laya failed: stopped here")
+
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
+    monkeypatch.setattr(noulxp_package, "export_package", export_package)
+    with pytest.raises(RuntimeError, match="stopped here"):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    assert not list(run_dir.glob(".noulxp-*")) and not (run_dir / noulxp_package.BUILDING).exists()
+
+
 def test_the_card_says_when_a_version_has_no_package():
     line = noulxp_package.card_line(None)
     assert "without a NoulXP package" in line and "compatibility" in line

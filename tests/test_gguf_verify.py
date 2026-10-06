@@ -172,6 +172,25 @@ def test_the_reference_starts_before_the_converter(tmp_path, checkpoint, stand_i
     assert "timings" not in result and "source_sha256" not in result
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the sweep keeps every folder on Windows")
+def test_an_export_removes_what_a_killed_one_left(tmp_path, checkpoint, stand_ins, monkeypatch):
+    """A job killed outright leaves its .gguf-verify-<pid>-* folder; the run's next export
+    removes it once that pid is gone, and leaves one whose job still runs."""
+    workspace, run_dir = run_workspace(tmp_path, checkpoint)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    stale = run_dir / f"{gguf.SCRATCH}{gone.pid}-x1"
+    running = run_dir / f"{gguf.SCRATCH}{os.getppid()}-x2"
+    for folder in (stale, running):
+        folder.mkdir()
+        (folder / "rows.json").write_text("[]")
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_VERIFY", "1")
+    report = gguf.export(f"run:{RUN}", workspace, threads=2)
+    assert report["timings"]["overlap"] and report["verification"]["rows"] > 0
+    assert not stale.exists() and running.is_dir()
+    assert [p.name for p in run_dir.glob(f"{gguf.SCRATCH}*")] == [running.name]
+
+
 def test_serial_and_overlapped_measurements_agree(tmp_path, checkpoint, stand_ins, monkeypatch):
     """The real reference (decider.Agent in float32, on the CPU here) in this process and in a
     process of its own: the same rows, the same numbers."""

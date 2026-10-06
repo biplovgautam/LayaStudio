@@ -8,51 +8,18 @@ safetensors in float32 (decider.Agent, PyTorch, this machine's device), row_logi
 same (ids, n) rows in the same order and chunks. It writes {"device", "logits", ...} to
 out.json (written whole, then renamed), its logits as Python floats, unrounded.
 
-It ends with the job that started it: when its stdin (a pipe the job never writes to) closes,
-and on Linux when its parent dies (PR_SET_PDEATHSIG), so a job killed outright leaves no float32
-model on the GPU. SIGTERM ends it as it ends any Python process.
+It ends with the job that started it (children.WATCH): when its stdin (a pipe the job never
+writes to) closes, and on Linux when its parent dies (PR_SET_PDEATHSIG), so a job killed
+outright leaves no float32 model on the GPU. SIGTERM ends it as it ends any Python process.
 """
 
-import ctypes
 import json
 import os
 import sys
-import threading
 import time
 from pathlib import Path
 
-PARENT = "LAYASTUDIO_REFERENCE_PARENT"
-PR_SET_PDEATHSIG = 1
-SIGKILL = 9
-
-
-def watch_parent():
-    """Exit as soon as the process that started this one is gone."""
-    parent = os.environ.get(PARENT, "")
-    if sys.platform.startswith("linux"):
-        try:
-            ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, SIGKILL)
-        except (OSError, AttributeError):
-            pass
-    if parent.isdigit() and os.getppid() != int(parent):
-        os._exit(1)  # the parent ended before this process was watching
-
-    try:
-        stdin = sys.stdin.fileno()
-    except (AttributeError, OSError, ValueError):
-        return
-
-    def wait_for_eof():
-        # The file descriptor, not sys.stdin: a daemon thread blocked in a buffered read holds
-        # its lock, and the interpreter cannot shut down past that.
-        try:
-            while os.read(stdin, 4096):
-                pass
-        except OSError:
-            pass
-        os._exit(1)
-
-    threading.Thread(target=wait_for_eof, name="parent-watch", daemon=True).start()
+from .children import watch_parent
 
 
 def main(argv):

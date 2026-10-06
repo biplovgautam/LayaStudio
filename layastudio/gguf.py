@@ -32,12 +32,12 @@ import shutil
 import subprocess
 import sys
 import tarfile
-import tempfile
 import threading
 import time
 import urllib.request
 from pathlib import Path
 
+from . import children
 from .engine import PACKAGE, WORKSPACE, now, read_json, write_json
 
 LLAMA_CPP_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"  # vendored by llama-cpp-python 0.3.35
@@ -395,7 +395,8 @@ class Hasher:
         return self.digests
 
 
-PARENT = "LAYASTUDIO_REFERENCE_PARENT"  # the pid a reference process belongs to
+PARENT = children.PARENT  # the pid a reference process belongs to
+SCRATCH = ".gguf-verify-"  # a measurement's scratch folders in the run's folder (children.scratch)
 
 
 class Reference:
@@ -420,7 +421,7 @@ class Reference:
             # Its CPU work is small (the GPU computes); the readout has the CPU.
             "OMP_NUM_THREADS": "2",
             "MKL_NUM_THREADS": "2",
-            PARENT: str(os.getpid()),
+            PARENT: str(os.getpid()),  # children.WATCH
         }
         self.waited = None
         self.log = open(self.log_path, "wb")
@@ -559,6 +560,7 @@ def export(
         raise ValueError("GGUF exports are for decoder fine-tunes (Decider)")
     out_dir = run_dir / "exports"
     target = out_dir / FILE.format(precision=precision)
+    children.sweep(run_dir, SCRATCH)  # those of a job killed outright (SIGKILL)
     rows = verify_rows(precision) if rows is None else int(rows)
     threads = int(threads) if threads else cpu_threads()
     started = time.perf_counter()
@@ -574,7 +576,7 @@ def export(
             items, sample = verify_items(model_ref, workspace, rows)
             timings["test_rows_s"] = round(time.perf_counter() - timed, 2)
             if items:
-                scratch = tempfile.TemporaryDirectory(prefix=".gguf-verify-", dir=run_dir)
+                scratch = children.scratch(run_dir, SCRATCH)
                 reference = Reference(model_dir, items, scratch.name)
         if source_sha256 is None:
             hasher = Hasher(sorted(model_dir.glob("*.safetensors")))
