@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""System One Studio (formerly Laya Studio): fine-tune System One decision models on
+"""System One Studio (formerly LayaStudio): fine-tune System One decision models on
 your own data, on your own machine.
 
-    layastudio                    # or: uv run layastudio
-    layastudio train --config run.json    # one fine-tune with no UI (cloud.py)
+    systemone-studio                            # or: uv run systemone-studio
+    systemone-studio train --config run.json    # one fine-tune with no UI (cloud.py)
+
+`layastudio`, the command's name before the rename, still starts the same program.
 
 One command. The server answers immediately and finishes setting itself up in the
 background: it detects this machine, checks the training runtime (MLX on Apple silicon,
@@ -12,8 +14,8 @@ reporting every step on the page.
 
 Frontend (HTML, CSS, JavaScript) and backend (JSON API) live in this one file and use only
 the Python standard library, so there is nothing to build. Training, evaluation and
-downloads run as child processes of layastudio.engine; this server schedules them, streams
-their progress and serves the results.
+downloads run as child processes of systemone_studio.engine; this server schedules them,
+streams their progress and serves the results.
 
 Privacy: the server binds to 127.0.0.1, the page loads no external scripts, fonts or
 analytics, and training/evaluation jobs run with HF_HUB_OFFLINE=1. Datasets, runs and
@@ -37,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import cloud, engine, kinds, noulxp_package
+from . import REPOSITORY, cloud, engine, environment, kinds, noulxp_package
 from .account import Account
 from .bootstrap import DEFAULT_MODEL, Bootstrap
 from .examples import catalog
@@ -748,7 +750,7 @@ class Studio:
         if kind == "train":
             # The checks every fine-tune starts with, here and in the cloud: cloud.prepare_run.
             # Only what the Train button sends: a run's id, bounds, limits and exports are a
-            # run file's (layastudio train --config), which the studio does not take here.
+            # run file's (systemone-studio train --config), which the studio does not take here.
             spec = {k: body[k] for k in TRAIN_FIELDS if k in body}
             try:
                 run = cloud.prepare_run(spec, self.workspace, stamp)
@@ -1004,7 +1006,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "SystemOneStudio/1"
 
     def log_message(self, fmt, *args):
-        if os.environ.get("LAYA_STUDIO_VERBOSE"):
+        if environment.get("VERBOSE"):
             super().log_message(fmt, *args)
 
     def _allowed(self):
@@ -1185,10 +1187,11 @@ def main(argv=None):
 
         return train(argv[1:])
     parser = argparse.ArgumentParser(
-        prog="layastudio",
-        description="Fine-tune Laya on your own data, on your own machine",
-        epilog="layastudio train --config run.json runs one fine-tune with no UI "
-        "(layastudio train --help)",
+        prog="systemone-studio",
+        description="System One Studio: fine-tune System One decision models (Laya, Julia 1, "
+        "Decider) on your own data, on your own machine",
+        epilog="systemone-studio train --config run.json runs one fine-tune with no UI "
+        "(systemone-studio train --help). `layastudio`, the command's old name, runs the same.",
     )
     parser.add_argument("--port", type=int, default=8765, help="Default 8765, or the next free")
     parser.add_argument(
@@ -1205,7 +1208,7 @@ def main(argv=None):
 
     workspace = args.workspace.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("LAYASTUDIO_HOME", str(workspace))
+    environment.setdefault("HOME", workspace)
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     engine.WORKSPACE = workspace
 
@@ -1891,7 +1894,7 @@ function buildNav() {
     <div class="side-foot">
       <div class="machine" id="syschip"><span>Checking this machine…</span></div>
       <button class="acct" id="acctchip" type="button" hidden>Sign in</button>
-      <div class="side-links"><a href="https://systemonemodels.tech" target="_blank" rel="noreferrer">systemonemodels.tech</a><a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub</a></div>
+      <div class="side-links"><a href="https://systemonemodels.tech" target="_blank" rel="noreferrer">systemonemodels.tech</a><a href="__REPOSITORY__" target="_blank" rel="noreferrer">GitHub</a></div>
     </div>`;
   const toggle = $("#menutoggle");
   toggle.innerHTML = icon("menu") + "<span>Menu</span>";
@@ -2068,9 +2071,9 @@ async function viewHome() {
         <p>Fine-tune System One decision models on your own data, on your own machine, and prove the result before you ship it.</p>
       </div>
       <div><h4>Project</h4><ul>
-        <li><a href="https://github.com/biplovgautam/LayaStudio" target="_blank" rel="noreferrer">GitHub</a></li>
-        <li><a href="https://github.com/biplovgautam/LayaStudio#readme" target="_blank" rel="noreferrer">Documentation</a></li>
-        <li><a href="https://github.com/biplovgautam/LayaStudio/issues" target="_blank" rel="noreferrer">Issues</a></li>
+        <li><a href="__REPOSITORY__" target="_blank" rel="noreferrer">GitHub</a></li>
+        <li><a href="__REPOSITORY__#readme" target="_blank" rel="noreferrer">Documentation</a></li>
+        <li><a href="__REPOSITORY__/issues" target="_blank" rel="noreferrer">Issues</a></li>
         <li><a href="#/guide">How it works</a></li>
       </ul></div>
       <div><h4>System One Models</h4><ul>
@@ -3000,6 +3003,8 @@ route();
 </body>
 </html>
 """
+# The links to the source repository, named once (REPOSITORY).
+PAGE = PAGE.replace("__REPOSITORY__", REPOSITORY)
 
 if __name__ == "__main__":
     main()

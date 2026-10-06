@@ -1,7 +1,7 @@
 """GGUF exports of Decider fine-tunes, through llama.cpp's own converter at a pinned commit.
 
-    python -m layastudio.export run:<id> --target gguf                 # bf16, the merged weights
-    python -m layastudio.export run:<id> --target gguf --precision q8_0
+    python -m systemone_studio.export run:<id> --target gguf     # bf16, the merged weights
+    python -m systemone_studio.export run:<id> --target gguf --precision q8_0
 
 The converter is convert_hf_to_gguf.py from ggml-org/llama.cpp at the commit llama-cpp-python
 0.3.35 vendors (LLAMA_CPP_COMMIT), so the files are written by the same llama.cpp that later
@@ -19,8 +19,8 @@ The measurement is System One Studio's own report on the export (exports/gguf-<p
 part of a NoulXP package. On a CUDA machine with memory to spare, its float32 half runs in a
 process of its own (gguf_reference.py), started before the converter, so the GPU reads the rows
 while the converter and llama.cpp use the CPU: the same rows, the same reference, the same
-comparison, in a different order. LAYASTUDIO_SERIAL_VERIFY=1 keeps everything in this process,
-one after the other.
+comparison, in a different order. SYSTEMONE_STUDIO_SERIAL_VERIFY=1 (or its old name,
+LAYASTUDIO_SERIAL_VERIFY=1) keeps everything in this process, one after the other.
 """
 
 import ctypes
@@ -37,7 +37,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import children
+from . import children, environment
 from .engine import PACKAGE, WORKSPACE, now, read_json, write_json
 
 LLAMA_CPP_COMMIT = "4df29be4f4c3673f428170fda944a5b19f743bb8"  # vendored by llama-cpp-python 0.3.35
@@ -59,7 +59,7 @@ N_CTX = 8192
 FULL_VERIFY_ROWS = 60
 VERIFY_ROWS = FULL_VERIFY_ROWS
 # The float32 reference in a process of its own (gguf_reference.py), and how long it may take.
-REFERENCE = ("-m", "layastudio.gguf_reference")
+REFERENCE = ("-m", "systemone_studio.gguf_reference")
 REFERENCE_WAIT = 20 * 60
 # Free memory the overlap needs: the converter's and the float32 load's (about 4 + 8 GB for a 2B
 # Decider) beside what the job already holds.
@@ -68,7 +68,7 @@ OVERLAP_MEMORY = 24 * 2**30
 
 def tools_dir(workspace=WORKSPACE):
     """Where downloaded tools live: beside the workspace, never inside a run."""
-    return Path(os.environ.get("LAYASTUDIO_TOOLS") or Path(workspace).parent / "tools")
+    return Path(environment.get("TOOLS") or Path(workspace).parent / "tools")
 
 
 def _sha256(path, chunk=1 << 22):
@@ -545,12 +545,13 @@ def verify_gate():
     OVERLAP_MEMORY free (telemetry.available_memory: the page cache counts as free) it does
     ("reason": "gates"); anywhere else the measurement runs in this process after the
     conversion (today's order): "device" or "memory" says which gate kept it there.
-    LAYASTUDIO_SERIAL_VERIFY=1 asks for that too; LAYASTUDIO_PARALLEL_VERIFY=1 skips both
-    gates (tests). The report records it (timings.overlap_gate); it certifies nothing."""
-    if os.environ.get("LAYASTUDIO_SERIAL_VERIFY", "").strip() == "1":
-        return {"overlap": False, "reason": "LAYASTUDIO_SERIAL_VERIFY"}
-    if os.environ.get("LAYASTUDIO_PARALLEL_VERIFY", "").strip() == "1":
-        return {"overlap": True, "reason": "LAYASTUDIO_PARALLEL_VERIFY"}
+    SYSTEMONE_STUDIO_SERIAL_VERIFY=1 asks for that too; SYSTEMONE_STUDIO_PARALLEL_VERIFY=1 skips
+    both gates (tests); either under its old name, LAYASTUDIO_..., as well, and "reason" names
+    the variable that decided. The report records it (timings.overlap_gate); it certifies
+    nothing."""
+    for key, overlap in (("SERIAL_VERIFY", False), ("PARALLEL_VERIFY", True)):
+        if environment.get(key, "").strip() == "1":
+            return {"overlap": overlap, "reason": environment.source(key)}
     from .runtime import torch_device
 
     try:

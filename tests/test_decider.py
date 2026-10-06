@@ -21,8 +21,8 @@ pytest.importorskip("transformers")
 import tiny  # noqa: E402
 from common import QUESTIONS, make_rows  # noqa: E402
 
-from layastudio import decider, engine, kinds, noulxp_package  # noqa: E402
-from layastudio.export import export  # noqa: E402
+from systemone_studio import decider, engine, kinds, noulxp_package  # noqa: E402
+from systemone_studio.export import export  # noqa: E402
 
 
 def importable(module):
@@ -42,7 +42,8 @@ TOKENIZER = Path(
         / "hub/models--Mapika--decider-2b/snapshots/533964dae8be954c5b5e19fa4948e48408094c1e",
     )
 )
-# llama.cpp's converter knows Qwen's real tokenizer only, and is fetched into LAYASTUDIO_TOOLS.
+# llama.cpp's converter knows Qwen's real tokenizer only, and is fetched into LAYASTUDIO_TOOLS
+# (conftest.py moves SYSTEMONE_STUDIO_TOOLS there).
 GGUF_READY = (
     importable("llama_cpp")
     and (TOKENIZER / "tokenizer.json").is_file()
@@ -50,8 +51,8 @@ GGUF_READY = (
 )
 needs_gguf = pytest.mark.skipif(
     not GGUF_READY,
-    reason="needs llama-cpp-python, LAYASTUDIO_TOOLS and Decider's tokenizer (DECIDER_TOKENIZER"
-    " or the HF cache): README, Project layout",
+    reason="needs llama-cpp-python, SYSTEMONE_STUDIO_TOOLS (or LAYASTUDIO_TOOLS) and Decider's"
+    " tokenizer (DECIDER_TOKENIZER or the HF cache): README, Project layout",
 )
 
 MORE = {
@@ -214,7 +215,7 @@ def check_written(base, out, summary):
 
 @needs_peft
 def test_pytorch_lora_writes_a_decider_checkpoint(checkpoint, tmp_path, monkeypatch):
-    from layastudio import decider_engine
+    from systemone_studio import decider_engine
 
     monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
     workspace, meta = workspace_with_data(tmp_path)
@@ -233,7 +234,7 @@ def test_pytorch_lora_writes_a_decider_checkpoint(checkpoint, tmp_path, monkeypa
 
 def test_qlora_off_cuda_is_refused_before_the_baseline(monkeypatch):
     """4-bit QLoRA needs CUDA on PyTorch: said before the baseline evaluates anything."""
-    from layastudio import decider_engine
+    from systemone_studio import decider_engine
 
     monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
     hp = {**decider.HYPERPARAMETERS, "quantization": "4bit"}
@@ -245,7 +246,7 @@ def test_qlora_off_cuda_is_refused_before_the_baseline(monkeypatch):
 
 @needs_mlx_lm
 def test_mlx_lora_writes_the_same_checkpoint_format(checkpoint, tmp_path):
-    from layastudio import decider_mlx
+    from systemone_studio import decider_mlx
 
     workspace, meta = workspace_with_data(tmp_path)
     summary, out = train(decider_mlx.fit, checkpoint, workspace, meta, "dm", dora=True)
@@ -264,7 +265,7 @@ WIDE = {
 
 
 def wide_rows(n=90):
-    from layastudio import datasets
+    from systemone_studio import datasets
 
     text = "\n".join(
         json.dumps({"state": f"red {i}", "answers": {"wide": f"l{i % 25}"}}) for i in range(n)
@@ -338,7 +339,7 @@ def check_steps(events, epochs):
 
 @needs_peft
 def test_pytorch_training_reports_its_progress_in_steps(checkpoint, tmp_path, monkeypatch):
-    from layastudio import decider_engine
+    from systemone_studio import decider_engine
 
     monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
     check_steps(step_events(decider_engine.torch_fit, checkpoint, tmp_path), 2)
@@ -346,14 +347,14 @@ def test_pytorch_training_reports_its_progress_in_steps(checkpoint, tmp_path, mo
 
 @needs_mlx_lm
 def test_mlx_training_reports_its_progress_in_steps(checkpoint, tmp_path):
-    from layastudio import decider_mlx
+    from systemone_studio import decider_mlx
 
     check_steps(step_events(decider_mlx.fit, checkpoint, tmp_path), 2)
 
 
 @needs_mlx_lm
 def test_the_mlx_export_is_measured(checkpoint, tmp_path):
-    from layastudio import decider_mlx
+    from systemone_studio import decider_mlx
 
     workspace, meta = workspace_with_data(tmp_path, 60)
     run_dir = workspace / "runs" / "dq"
@@ -387,7 +388,7 @@ def real_tokenizer_checkpoint(tmp_path_factory):
 
 @needs_gguf
 def test_gguf_conversion_reads_the_same_letters(real_tokenizer_checkpoint, tmp_path):
-    from layastudio import gguf
+    from systemone_studio import gguf
 
     ck = real_tokenizer_checkpoint
     out = gguf.convert(ck, tmp_path / "tiny.gguf", "bf16")
@@ -464,7 +465,7 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(
     # A publish dry run carries Decider's own files, the package (its GGUF) and a Decider card.
     from common import fake_systemone
 
-    from layastudio import publish_systemone
+    from systemone_studio import publish_systemone
 
     command, seen = fake_systemone(tmp_path)
     publish_systemone.cli_command, saved = (lambda: command), publish_systemone.cli_command

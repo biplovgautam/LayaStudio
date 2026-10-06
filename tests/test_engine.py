@@ -12,7 +12,7 @@ from laya_mlx.model import DecisionModel, EncoderConfig, sanitize_weights  # noq
 from mlx.utils import tree_flatten  # noqa: E402
 from tokenizers import Tokenizer, models, pre_tokenizers  # noqa: E402
 
-from layastudio import engine  # noqa: E402
+from systemone_studio import engine  # noqa: E402
 
 
 @pytest.fixture

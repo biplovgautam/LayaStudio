@@ -7,7 +7,7 @@ the studio must not import laya_mlx's plain-Python parts the usual way there.
 import subprocess
 import sys
 
-from layastudio.laya_mlx_free import laya_mlx_module
+from systemone_studio.laya_mlx_free import laya_mlx_module
 
 NO_MLX = "import sys; sys.modules['mlx'] = None; sys.modules['mlx.core'] = None; sys.modules['mlx.nn'] = None; "
 
@@ -26,7 +26,7 @@ def test_laya_mlx_itself_cannot_be_imported_without_mlx():
 
 def test_the_studio_imports_without_mlx():
     out = run(
-        "import layastudio.engine, layastudio.export, layastudio.snake, layastudio.server; print('ok')"
+        "import systemone_studio.engine, systemone_studio.export, systemone_studio.snake, systemone_studio.server; print('ok')"
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "ok"
@@ -34,7 +34,7 @@ def test_the_studio_imports_without_mlx():
 
 def test_the_plain_python_parts_load_from_their_files_without_mlx():
     code = (
-        "from layastudio.laya_mlx_free import laya_mlx_module as m; "
+        "from systemone_studio.laya_mlx_free import laya_mlx_module as m; "
         "c = m('common'); t = m('tokenizer'); g = m('snake.game'); "
         "print(sorted(c.QTYPES)[:1], callable(c.build_sequence), t.Tokenizer.__name__, g.SnakeGame.__name__)"
     )

@@ -18,7 +18,7 @@ import pytest
 from common import QUESTIONS, make_rows
 from test_server import call, studio  # noqa: F401 - studio is a fixture
 
-from layastudio import cloud, datasets, engine, kinds
+from systemone_studio import cloud, datasets, engine, kinds
 
 # A checkpoint folder of each kind, as far as the checks look: its files, not its weights.
 FILES = {
@@ -134,7 +134,7 @@ BAD = {
     },
     "name not text": lambda c: c.spec(name=7),
 }
-# What only a run file brings (layastudio train --config): the studio's server takes the Train
+# What only a run file brings (systemone-studio train --config): the studio's server takes the Train
 # button's fields alone, so prepare_run refuses these and the server never sees them.
 BAD_RUN_FILE = {
     "run id not an id": lambda c: c.spec(run_id="Not An Id"),
@@ -320,7 +320,7 @@ def hub_cache(tmp_path, monkeypatch, repo, kind):
 def test_a_base_pinned_to_a_revision_is_found_licence_checked_and_named(
     context, tmp_path, monkeypatch
 ):
-    from layastudio import noulxp_package
+    from systemone_studio import noulxp_package
 
     _, c = context
     commit = hub_cache(tmp_path, monkeypatch, "Mapika/decider-2b", kinds.DECIDER)
@@ -480,7 +480,7 @@ def test_the_converter_finds_its_own_modules_with_pythonsafepath(tmp_path, monke
     """The trainer image sets PYTHONSAFEPATH=1, which keeps a script's own folder off the
     import path: the converter's conversion/ package comes from PYTHONPATH, and the current
     folder is not on its path."""
-    from layastudio import gguf
+    from systemone_studio import gguf
 
     tool = tmp_path / "tool"
     for package in ("conversion", "gguf-py/gguf"):
@@ -500,11 +500,11 @@ def test_the_converter_finds_its_own_modules_with_pythonsafepath(tmp_path, monke
 
 def test_an_export_job_passes_the_gguf_choice_on(tmp_path, monkeypatch):
     """A Decider package's GGUF (bf16 or q8_0) reaches the export from a job's spec."""
-    import layastudio.export
+    import systemone_studio.export
 
     monkeypatch.setattr(signal, "signal", lambda *a: None)  # run_job's SIGTERM handler
     seen = {}
-    monkeypatch.setattr(layastudio.export, "export", lambda *a, **k: seen.update(k))
+    monkeypatch.setattr(systemone_studio.export, "export", lambda *a, **k: seen.update(k))
     job = tmp_path / "job"
     for gguf in ("q8_0", None):
         engine.write_json(
@@ -821,9 +821,9 @@ def tiny_base(kind, folder):
 
 
 def headless(config, env, *args):
-    """`python -m layastudio.cloud --config <file>`, as a cloud GPU's agent calls it."""
+    """`python -m systemone_studio.cloud --config <file>`, as a cloud GPU's agent calls it."""
     return subprocess.Popen(
-        [sys.executable, "-m", "layastudio.cloud", "--config", str(config), *args],
+        [sys.executable, "-m", "systemone_studio.cloud", "--config", str(config), *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -837,7 +837,7 @@ def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
     """End to end with no UI: baseline, training and evaluation, then a NoulXP package where
     this machine has the tooling, and the card; every event a JSON line, the training's
     progress in step events, the result file at the end."""
-    from layastudio import noulxp_package
+    from systemone_studio import noulxp_package
 
     ref, env = tiny_base(kind, tmp_path / "models")
     packaged = noulxp_package.missing_tooling(kind) is None and (kind != "decider" or gguf_ready())
@@ -1095,7 +1095,7 @@ def test_a_run_file_refuses_a_base_not_pinned_to_a_commit(tmp_path, hub, revisio
 
 
 def test_a_run_file_checks_the_licence_before_it_downloads(tmp_path, hub):
-    from layastudio import families
+    from systemone_studio import families
 
     config, _ = write_run(tmp_path / "run", f"hub:together-ai/tev1@{COMMIT}")
     out = io.StringIO()
@@ -1225,7 +1225,7 @@ def test_a_cancel_during_the_checks_downloads_nothing(tmp_path, monkeypatch, hub
     assert result["state"] == "cancelled" and result["error"]["stage"] == "prepare"
 
 
-# `layastudio train` (cloud.main) with a hub whose download never ends, as a checkpoint's
+# `systemone-studio train` (cloud.main) with a hub whose download never ends, as a checkpoint's
 # gigabytes on a slow link: on worker threads of a pool, as huggingface_hub downloads, which
 # the interpreter's exit waits for. The cache lookup finds nothing.
 ENDLESS_DOWNLOAD = """
@@ -1241,13 +1241,13 @@ def snapshot_download(repo, revision=None, local_files_only=False, **options):
         pool.submit(time.sleep, 600).result()
 
 huggingface_hub.snapshot_download = snapshot_download
-from layastudio.cloud import main
+from systemone_studio.cloud import main
 sys.exit(main(sys.argv[1:]))
 """
 
 
 def test_a_cancelled_download_ends_the_process_at_once(tmp_path):
-    """As the pod agent stops a run: SIGTERM to `layastudio train` while its base model
+    """As the pod agent stops a run: SIGTERM to `systemone-studio train` while its base model
     downloads. The process exits 143 within seconds, its result file written, instead of
     downloading on until the agent's SIGKILL 30 s later, with no result."""
     config, _ = write_run(tmp_path / "run", f"hub:aac6fef/laya-mlx@{COMMIT}", cache_dir="cache")

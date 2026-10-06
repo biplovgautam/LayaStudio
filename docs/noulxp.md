@@ -15,14 +15,14 @@ NoulXP exporter. Today that is every fine-tune the studio writes: Laya and Julia
 
 ```bash
 uv sync --extra export
-python -m layastudio.export run:<id> --target noulxp     # or Export → NoulXP package
-python -m layastudio.publish_systemone run:<id>          # or Publish to System One
+python -m systemone_studio.export run:<id> --target noulxp     # or Export → NoulXP package
+python -m systemone_studio.publish_systemone run:<id>          # or Publish to System One
 ```
 
 1. `noulxp export laya` (or `julia`) writes the package from the run's checkpoint: an ONNX graph
    whose weights are the checkpoint's own `model.safetensors`, the tokenizer, `template.json` and
    `calibration.json`. For a Decider fine-tune, `noulxp export decider` packages the run's GGUF
-   (`layastudio/gguf.py` converts it with llama.cpp's converter at a pinned commit; bf16 by
+   (`systemone_studio/gguf.py` converts it with llama.cpp's converter at a pinned commit; bf16 by
    default, the exact weights; `--gguf q8_0` halves the size but changes some answers) with the
    tokenizer, `prompt.json` and the fine-tune's temperatures as `calibration.json`.
 2. `noulxp conformance generate` records the fine-tune's own answers, from the model's own runtime

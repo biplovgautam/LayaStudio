@@ -11,7 +11,7 @@ pytest.importorskip("mlx.core")  # the parity tests compare against MLX
 
 from test_engine import QUESTIONS, checkpoint, make_rows  # noqa: E402, F401 - fixture
 
-from layastudio import engine, torch_engine  # noqa: E402
+from systemone_studio import engine, torch_engine  # noqa: E402
 
 
 @pytest.mark.parametrize("dora", [False, True])

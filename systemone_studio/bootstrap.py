@@ -1,7 +1,7 @@
 """Everything that has to be true before the first fine-tuning run, done in the background.
 
 The server answers requests immediately; this module runs beside it and reports progress to
-the page, so `layastudio` is the only command anyone has to type:
+the page, so `systemone-studio` is the only command anyone has to type:
 
   1. machine   - what this machine is (CPU, memory, GPUs, OS) and what it can train
   2. runtime   - the training stack is importable: MLX and laya-mlx on Apple silicon,
@@ -408,7 +408,7 @@ class Bootstrap:
                 "warning",
                 "Could not fetch "
                 + ", ".join(missing)
-                + ". Fine-tune your own, or publish one with layastudio.publish.",
+                + ". Fine-tune your own, or publish one with systemone_studio.publish.",
             )
 
     def _examples(self):

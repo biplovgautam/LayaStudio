@@ -22,8 +22,8 @@ pytest.importorskip("mlx.core")  # the tiny Laya run is built with MLX
 from common import QUESTIONS, WORDS, fake_systemone, make_rows  # noqa: E402
 from test_server import call, studio  # noqa: E402, F401 - studio is a fixture
 
-from layastudio import engine, families, noulxp_package, publish_systemone
-from layastudio.export import export
+from systemone_studio import engine, families, noulxp_package, publish_systemone
+from systemone_studio.export import export
 
 TOOLING = noulxp_package.missing_tooling()
 needs_tooling = pytest.mark.skipif(TOOLING is not None, reason=f"NoulXP tooling: {TOOLING}")
@@ -575,7 +575,7 @@ def test_a_cancel_during_the_machine_probe_still_reports_and_cleans_up(
 ):
     """Decider's llama.cpp probe (telemetry.machine) runs inside the build's try: a cancel there
     replaces the previous attempt's report and leaves no staging or scratch folder."""
-    from layastudio import telemetry
+    from systemone_studio import telemetry
 
     workspace, run_dir = fresh_workspace(built, tmp_path)
     (run_dir / noulxp_package.REPORT).write_text(json.dumps({"created": "earlier"}))
@@ -595,7 +595,7 @@ def test_a_cancel_during_the_machine_probe_still_reports_and_cleans_up(
 
 @needs_tooling
 def test_the_package_is_the_same_with_telemetry_off_or_failing(built, tmp_path, monkeypatch):
-    from layastudio import telemetry
+    from systemone_studio import telemetry
 
     monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
     monkeypatch.setenv("PYTHONHASHSEED", "0")  # reproducible graphs (same_package)
@@ -753,8 +753,8 @@ CANCELLED_BUILD = """
 import json, os, signal, sys, time
 sys.path.insert(0, {repo!r})
 from pathlib import Path
-from layastudio import engine, noulxp_package
-from layastudio.export import export
+from systemone_studio import engine, noulxp_package
+from systemone_studio.export import export
 
 marks = Path({marks!r})
 def on_term(*_):
@@ -880,7 +880,7 @@ def test_the_card_says_when_a_version_has_no_package():
 
 
 def test_the_cli_names_the_target(capsys):
-    from layastudio.export import PRECISIONS, TARGETS, main
+    from systemone_studio.export import PRECISIONS, TARGETS, main
 
     assert "noulxp" in TARGETS and PRECISIONS["noulxp"] == ("float",)
     with pytest.raises(SystemExit):

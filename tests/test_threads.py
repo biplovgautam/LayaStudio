@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from layastudio import runtime
+from systemone_studio import runtime
 
 PERIOD = 100000
 

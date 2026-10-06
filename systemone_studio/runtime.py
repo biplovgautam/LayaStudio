@@ -10,12 +10,14 @@ Two backends train and evaluate the same checkpoints (Laya, Julia 1 and Decider)
 Checkpoints are interchangeable: a model trained on one backend loads on the other,
 because both write the upstream PyTorch parameter names.
 
-$LAYASTUDIO_BACKEND (mlx | torch) and $LAYASTUDIO_DEVICE (cuda, mps, xpu, cpu, ...)
-override the choice.
+$SYSTEMONE_STUDIO_BACKEND (mlx | torch) and $SYSTEMONE_STUDIO_DEVICE (cuda, mps, xpu, cpu,
+...) override the choice, as their old names $LAYASTUDIO_BACKEND and $LAYASTUDIO_DEVICE still do
+(environment.py: the new name wins).
 
 cpu_threads() is how many CPU threads a CPU-bound step (a NoulXP package's steps, a GGUF's
 readout) should use here: a container's CPU quota (cgroup cpu.max) when it has one, so the
-steps neither oversubscribe the quota nor leave it idle. $LAYASTUDIO_THREADS overrides it.
+steps neither oversubscribe the quota nor leave it idle. $SYSTEMONE_STUDIO_THREADS (or
+$LAYASTUDIO_THREADS) overrides it.
 """
 
 import importlib.util
@@ -25,6 +27,8 @@ import platform
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+
+from . import environment
 
 
 def _has(module):
@@ -40,7 +44,7 @@ def apple_silicon():
 
 def backend():
     """'mlx' or 'torch' — the stack jobs on this machine use."""
-    wanted = os.environ.get("LAYASTUDIO_BACKEND", "").strip().lower()
+    wanted = environment.get("BACKEND", "").strip().lower()
     if wanted in ("mlx", "torch"):
         return wanted
     if apple_silicon() and _has("mlx") and _has("laya_mlx"):
@@ -53,7 +57,7 @@ def torch_device():
     DirectML, or cpu."""
     import torch
 
-    wanted = os.environ.get("LAYASTUDIO_DEVICE", "").strip().lower()
+    wanted = environment.get("DEVICE", "").strip().lower()
     if wanted == "directml" or (not wanted and _directml_only(torch)):
         import torch_directml  # type: ignore[import-not-found]
 
@@ -343,14 +347,16 @@ def _unquoted():
 def cpu_budget(root=CGROUP, proc=PROC_CGROUP, environ=None):
     """{"threads", "quota", "source", "affinity"}: the threads a CPU-bound step uses here.
 
-    In order: $LAYASTUDIO_THREADS (a positive integer; anything else is ignored, said once);
+    In order: $SYSTEMONE_STUDIO_THREADS, else $LAYASTUDIO_THREADS (a positive integer;
+    anything else is ignored, said once);
     the container's quota, cgroup v2 cpu.max (the smallest from this process's cgroup up to
     the root) or cgroup v1's cfs quota, floored (8.5 CPUs gives 8, under 1 gives 1), no more
     than the CPUs this process may run on, and at most 32; else min(8, CPUs) (see
     UNQUOTED_THREADS). quota is the raw quota in CPUs, or None. Never raises."""
     environ = os.environ if environ is None else environ
     cpus = affinity()
-    raw = str(environ.get("LAYASTUDIO_THREADS", "") or "").strip()
+    name = environment.source("THREADS", environ)
+    raw = str(environ.get(name, "") or "").strip() if name else ""
     if raw:
         try:
             wanted = int(raw)
@@ -358,7 +364,7 @@ def cpu_budget(root=CGROUP, proc=PROC_CGROUP, environ=None):
             wanted = 0
         if wanted > 0:
             return {"threads": wanted, "quota": None, "source": "env", "affinity": cpus}
-        _warn_once(f"LAYASTUDIO_THREADS={raw!r} is not a positive integer; ignored")
+        _warn_once(f"{name}={raw!r} is not a positive integer; ignored")
     paths = _cgroups(proc)
     quota, source = _v2_quota(root, paths.get("", "/")), "cgroup2"
     if quota is None:

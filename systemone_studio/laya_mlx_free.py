@@ -22,7 +22,7 @@ def laya_mlx_module(name: str) -> ModuleType:
         return importlib.import_module(f"laya_mlx.{name}")
     except ImportError:
         pass
-    alias = "_layastudio_laya_mlx_" + name.replace(".", "_")
+    alias = "_systemone_studio_laya_mlx_" + name.replace(".", "_")
     if alias in sys.modules:
         return sys.modules[alias]
     found = importlib.util.find_spec("laya_mlx")  # locates the package without running it

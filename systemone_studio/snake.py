@@ -11,8 +11,8 @@ the labels. This module does the harder, honest thing:
   * the benchmark runs the model **unassisted** - top-1 move, no safety shield - so an
     illegal move ends the game, exactly as it would for any other decision engine.
 
-    python -m layastudio.snake dataset          # generate and register the dataset
-    python -m layastudio.snake bench --model run:<id> --games 10
+    python -m systemone_studio.snake dataset      # generate and register the dataset
+    python -m systemone_studio.snake bench --model run:<id> --games 10
 
 The board and the rules come from laya_mlx.snake, the same game the demo uses.
 """

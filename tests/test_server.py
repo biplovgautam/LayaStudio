@@ -17,8 +17,8 @@ except (ImportError, pytest.skip.Exception):
     HAS_MLX = False
 needs_mlx = pytest.mark.skipif(not HAS_MLX, reason="the Laya fixture needs MLX")
 
-from layastudio import engine, server  # noqa: E402
-from layastudio.bootstrap import Bootstrap  # noqa: E402
+from systemone_studio import engine, server  # noqa: E402
+from systemone_studio.bootstrap import Bootstrap  # noqa: E402
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def test_page_and_state(studio):
     status, state = call(base, "/api/state")
     assert status == 200 and state["datasets"] == []
     # The base models: Laya's own, and every other catalogue model the studio trains.
-    from layastudio import families
+    from systemone_studio import families
 
     others = [m for m in families.trainable() if m["repo"] not in engine.BASE_MODELS]
     bases = [m for m in state["models"] if not m.get("demo")]
@@ -179,7 +179,7 @@ def test_other_kinds_train_through_the_api(studio, tmp_path, kind):
     if kind == "decider":
         import importlib.util
 
-        from layastudio import runtime
+        from systemone_studio import runtime
 
         needed = "mlx_lm" if runtime.backend() == "mlx" else "peft"
         if importlib.util.find_spec(needed) is None:

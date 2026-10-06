@@ -4,20 +4,20 @@ A System One Studio checkpoint is already a standard Laya checkpoint, so the ups
 runtime loads it as-is on Linux and NVIDIA. This module goes one step further and writes a
 graph other runtimes can execute without any Laya code at all:
 
-    python -m layastudio.export run:<id> --target onnx
+    python -m systemone_studio.export run:<id> --target onnx
 
 Every export is verified, not assumed: the exported graph answers the same questions as
 this machine's MLX runtime, and the report records the agreement and the largest
 probability difference. Needs the optional extra:  uv sync --extra export
 
-    python -m layastudio.export run:<id> --target noulxp
+    python -m systemone_studio.export run:<id> --target noulxp
 
 builds the run's NoulXP package: the open standard's package (ONNX for Laya and Julia 1, GGUF
 for Decider), with a conformance file of the fine-tune's own answers, checked on the CPU and
 kept with the run, which publishes it. noulxp_package.py has the details.
 
-    python -m layastudio.export run:<id> --target gguf --precision bf16    # Decider: gguf.py
-    python -m layastudio.export run:<id> --target mlx --precision int4     # Decider, Apple silicon
+    python -m systemone_studio.export run:<id> --target gguf --precision bf16   # Decider: gguf.py
+    python -m systemone_studio.export run:<id> --target mlx --precision int4    # Decider, Mac
 
 Which targets a model takes depends on its kind (KIND_TARGETS): a Decider fine-tune is already
 merged safetensors, and adds GGUF and MLX-LM files.
@@ -696,7 +696,7 @@ def export_coreml(model_dir, out_dir, emit, model_ref, precision="float", worksp
                 f"{sys.version_info.major}.{sys.version_info.minor}. Run the export on a "
                 "supported interpreter, for example:\n"
                 "    uv run --python 3.12 --with 'coremltools>=8' --with torch --with laya "
-                "--with laya-mlx python -m layastudio.export <model> --target coreml"
+                "--with laya-mlx python -m systemone_studio.export <model> --target coreml"
             ) from None
         raise
 
@@ -784,7 +784,7 @@ logits = session.run(["logits"], {{
 }})[0]
 ```
 
-`layastudio/export.py` contains the batch builder used to verify this file.
+`systemone_studio/export.py` contains the batch builder used to verify this file.
 """
 
 

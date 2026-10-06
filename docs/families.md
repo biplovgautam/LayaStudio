@@ -2,9 +2,9 @@
 
 Every System One model reads a state and answers typed questions (choice, score, noul) in one
 pass, but the published models are built in seven different ways. A **family** is one of those
-ways (`layastudio/families.py`). Whether one model trains here depends on two things:
+ways (`systemone_studio/families.py`). Whether one model trains here depends on two things:
 
-- the studio has a trainer for its checkpoint format, its **kind** (`layastudio/kinds.py`);
+- the studio has a trainer for its checkpoint format, its **kind** (`systemone_studio/kinds.py`);
 - its licence allows derivatives (`families.LICENCE_POLICY`).
 
 The studio never hides a model. One that cannot train here, or will not fit this machine, is
@@ -159,30 +159,30 @@ default, an admin setting), so an admin asks for its check, or raises that limit
 
 ### Threads and timings of a NoulXP build
 
-A build's thread count, N, is the container's CPU quota (cgroup `cpu.max`, floored, 8 on the
-A40 pods' 8.5 CPUs), else at most 8, or `LAYASTUDIO_THREADS`. `noulxp check` always runs
-with N, and the GGUF readout too (two fewer while the float32 reference still reads its rows
-beside it); so do `noulxp export` and `noulxp conformance generate` when they run one after the
-other (Decider, or test rows). Without test rows, Laya and Julia record their
-own answers while `noulxp export` traces the graph: the recording with N-1 threads, the export
-with 1, when 3 threads or more and 12 GiB of memory are free (`LAYASTUDIO_PARALLEL_CONFORMANCE=0`
-runs them one after the other). Each step's process
-gets its count as `--threads` where the command takes one, and as `OMP_NUM_THREADS`,
-`MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `LAYASTUDIO_THREADS` and `NOULXP_THREADS` (Laya's own
-runtime takes no thread count; the exporter's informative graph-versus-torch comparison reads
-the last two). On a CUDA machine with 24 GiB free, the GGUF's float32 reference reads its rows
-on the GPU while the converter runs (`LAYASTUDIO_SERIAL_VERIFY=1` keeps it after). Free memory
-is the container's limit less what the kernel cannot reclaim: the page cache, which the
-checkpoints just read and written fill, counts as free. Each gate's decision, the gate that
-made it and what it read are in the report (`steps.conformance.overlap_gate`, and the GGUF's
-`timings.overlap_gate`). Every step's process, llama.cpp's converter and the GGUF's float32
-reference included, ends with the job, even a job killed outright (it exits when the job's end
-closes its stdin, and on Linux on PR_SET_PDEATHSIG), and the next build or GGUF export of the
-run removes the scratch folders such a job left. `noulxp-report.json` says what each step took (`steps`: seconds, CPU
-seconds, threads, the container's CPU throttling, peak threads and memory of each step's
-process) and on what machine (`machine`). Thread counts move answers by rounding only: Laya's
-and Julia's recordings at 1 thread and at several agree within 1e-4, and the check's tolerance
-is 0.01.
+A build's thread count, N, is the container's CPU quota (cgroup `cpu.max`, floored, 8 on the A40
+pods' 8.5 CPUs), else at most 8, or `SYSTEMONE_STUDIO_THREADS` (`LAYASTUDIO_THREADS`). `noulxp
+check` always runs with N, and the GGUF readout too (two fewer while the float32 reference still
+reads its rows beside it); so do `noulxp export` and `noulxp conformance generate` when they run one
+after the other (Decider, or test rows). Without test rows, Laya and Julia record their own answers
+while `noulxp export` traces the graph: the recording with N-1 threads, the export with 1, when 3
+threads or more and 12 GiB of memory are free (`SYSTEMONE_STUDIO_PARALLEL_CONFORMANCE=0`, or
+`LAYASTUDIO_PARALLEL_CONFORMANCE=0`, runs them one after the other). Each step's process gets its
+count as `--threads` where the command takes one, and as `OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+`OPENBLAS_NUM_THREADS`, `SYSTEMONE_STUDIO_THREADS` and `LAYASTUDIO_THREADS`, and `NOULXP_THREADS`
+(Laya's own runtime takes no thread count; the exporter's informative graph-versus-torch comparison
+reads the last three). On a CUDA machine with 24 GiB free, the GGUF's float32 reference reads its
+rows on the GPU while the converter runs (`SYSTEMONE_STUDIO_SERIAL_VERIFY=1`, or
+`LAYASTUDIO_SERIAL_VERIFY=1`, keeps it after). Free memory is the container's limit less what the
+kernel cannot reclaim: the page cache, which the checkpoints just read and written fill, counts as
+free. Each gate's decision, the gate that made it and what it read are in the report
+(`steps.conformance.overlap_gate`, and the GGUF's `timings.overlap_gate`). Every step's process,
+llama.cpp's converter and the GGUF's float32 reference included, ends with the job, even a job
+killed outright (it exits when the job's end closes its stdin, and on Linux on PR_SET_PDEATHSIG),
+and the next build or GGUF export of the run removes the scratch folders such a job left.
+`noulxp-report.json` says what each step took (`steps`: seconds, CPU seconds, threads, the
+container's CPU throttling, peak threads and memory of each step's process) and on what machine
+(`machine`). Thread counts move answers by rounding only: Laya's and Julia's recordings at 1 thread
+and at several agree within 1e-4, and the check's tolerance is 0.01.
 
 For scale, bfloat16 alone (the same weights in PyTorch on the GPU) moves Decider's answers by up
 to 0.017 against float32. A publish dry run of each fine-tune lists the maker's own files with

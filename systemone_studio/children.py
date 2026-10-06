@@ -24,13 +24,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-PARENT = "LAYASTUDIO_PARENT"  # the pid of the job a child process belongs to
+from . import environment
+
+# The pid of the job a child process belongs to, under its new name and its old one
+# (environment.py): child_env() sets both, the watch reads the new one first.
+PARENT, OLD_PARENT = environment.names("PARENT")
 
 # The watch, as source: it runs before a child's own code, so it needs nothing importable.
 WATCH = f"""\
 def _watch_parent():
     import ctypes, os, sys, threading
-    parent = os.environ.get({PARENT!r}, "")
+    parent = os.environ.get({PARENT!r}, os.environ.get({OLD_PARENT!r}, ""))
     if sys.platform.startswith("linux"):
         try:  # PR_SET_PDEATHSIG (1): SIGKILL (9) when the job dies
             ctypes.CDLL(None, use_errno=True).prctl(1, 9)
@@ -118,7 +122,7 @@ def command(args):
 
 def child_env(env=None):
     """An environment that names this process as the child's job."""
-    return {**(os.environ if env is None else env), PARENT: str(os.getpid())}
+    return {**(os.environ if env is None else env), **environment.both("PARENT", os.getpid())}
 
 
 def close_stdin(process):

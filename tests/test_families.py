@@ -1,4 +1,4 @@
-from layastudio.families import CATALOG, FAMILIES, assess, catalogue, find
+from systemone_studio.families import CATALOG, FAMILIES, assess, catalogue, find
 
 
 def test_every_model_is_in_a_known_family():
@@ -32,7 +32,7 @@ def test_laya_fits_a_16_gb_mac_and_finds_by_registry_name():
 
 
 def test_julia_and_decider_are_catalogued_with_their_trainers():
-    from layastudio.families import licence_allows, trainable, trainer_status
+    from systemone_studio.families import licence_allows, trainable, trainer_status
 
     julia = find("supersonic-labs/julia-1")
     assert julia and julia.repo == "SupersonicLabs/Julia-1" and julia.family == "laya"

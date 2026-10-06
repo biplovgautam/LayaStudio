@@ -1,6 +1,6 @@
 """The float32 reference of a GGUF export's measurement, in a process of its own.
 
-    python -m layastudio.gguf_reference <model_dir> <rows.json> <out.json>
+    python -m systemone_studio.gguf_reference <model_dir> <rows.json> <out.json>
 
 gguf.py starts it before the converter, on a CUDA machine, so the GPU reads the rows while the
 converter and llama.cpp use the CPU. It is the reference the measurement always had: the merged
@@ -24,7 +24,9 @@ from .children import watch_parent
 
 def main(argv):
     if len(argv) != 3:
-        sys.exit("usage: python -m layastudio.gguf_reference <model_dir> <rows.json> <out.json>")
+        sys.exit(
+            "usage: python -m systemone_studio.gguf_reference <model_dir> <rows.json> <out.json>"
+        )
     watch_parent()
     model_dir, rows_path, out_path = (Path(a) for a in argv)
     import torch

@@ -1,8 +1,8 @@
 """Publish a fine-tuned run to systemonemodels.tech, the System One model registry.
 
     pip install systemonemodels
-    systemone login                                   # once, in the browser
-    python -m layastudio.publish_systemone run:<id>   # or the Publish button in the studio
+    systemone login                                         # once, in the browser
+    python -m systemone_studio.publish_systemone run:<id>   # or the Publish button in the studio
 
 What goes up is the checkpoint System One Studio wrote - the safetensors, tokenizer,
 calibration and questions - plus a model card built from the run's own measured

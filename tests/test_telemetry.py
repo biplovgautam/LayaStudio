@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from layastudio import engine, telemetry
+from systemone_studio import engine, telemetry
 
 
 def cgroup2(root, quota_by_level, proc_path="/"):

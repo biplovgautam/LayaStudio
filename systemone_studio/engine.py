@@ -8,7 +8,7 @@ The web server runs every heavy task as a child process of this module, so a cra
 cancel or an out-of-memory error never takes the UI down, and GPU memory is returned to
 the system as soon as a job ends:
 
-    python -m layastudio.engine run <job_dir>     # reads spec.json, appends events.jsonl
+    python -m systemone_studio.engine run <job_dir>   # reads spec.json, appends events.jsonl
 
 Nothing here sends data anywhere. Training and evaluation jobs run with HF_HUB_OFFLINE=1;
 only explicit model downloads and the optional public example datasets use the network.
@@ -28,7 +28,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import datasets
+from . import datasets, environment
 from .datasets import (  # noqa: F401 - engine.<name> is how the trainers and the server reach them
     SPLITS,
     STATE_KEYS,
@@ -60,11 +60,14 @@ PACKAGE = Path(__file__).resolve().parent
 def default_workspace():
     """Where datasets, runs and checkpoints live.
 
-    $LAYASTUDIO_HOME wins; a git checkout keeps its workspace beside the code; an installed
-    copy uses ~/.layastudio so nothing is written into site-packages.
+    $SYSTEMONE_STUDIO_HOME (or its old name, $LAYASTUDIO_HOME) wins; a git checkout keeps its
+    workspace beside the code; an installed copy uses ~/.layastudio (the folder keeps its name
+    from before the rename, so existing datasets and runs stay where they are) so nothing is
+    written into site-packages.
     """
-    if os.environ.get("LAYASTUDIO_HOME"):
-        return Path(os.environ["LAYASTUDIO_HOME"]).expanduser().resolve()
+    home = environment.get("HOME")
+    if home:
+        return Path(home).expanduser().resolve()
     checkout = PACKAGE.parent
     if (checkout / "pyproject.toml").exists():
         return checkout / "workspace"
@@ -80,15 +83,16 @@ BASE_MODELS = {
     "aac6fef/laya-typed-decisions-mlx": "Typed-decisions · ModernBERT-large · 421M · 1,024 tokens",
 }
 # Fine-tuned checkpoints published from System One Studio runs, fetched at startup so the arena
-# works before anyone has trained anything. Override with $LAYASTUDIO_DEMO_MODELS
+# works before anyone has trained anything. Override with $SYSTEMONE_STUDIO_DEMO_MODELS (or
+# $LAYASTUDIO_DEMO_MODELS)
 # ("" disables them, or a comma-separated list of repositories).
 DEMO_MODELS = {
     "madhavbiplov/laya-snake-mlx": "Snake · fine-tuned in System One Studio (322M, multilingual base)",
 }
-if os.environ.get("LAYASTUDIO_DEMO_MODELS") is not None:
+if environment.get("DEMO_MODELS") is not None:
     DEMO_MODELS = {
         repo.strip(): "Fine-tuned demo"
-        for repo in os.environ["LAYASTUDIO_DEMO_MODELS"].split(",")
+        for repo in environment.get("DEMO_MODELS").split(",")
         if repo.strip()
     }
 
@@ -1602,7 +1606,7 @@ def write_job(workspace, job_id, kind, spec, title):
 
 
 def start_job(job_dir, kind, log, env=None):
-    """`python -m layastudio.engine run <job_dir>` as a child process, the way every job runs,
+    """`python -m systemone_studio.engine run <job_dir>` as a child process, the way every job runs,
     from the UI or headless (cloud.py): a crash, a cancel or an out-of-memory error ends the
     child, never its caller, and the GPU's memory goes back when it exits. Training and
     evaluation run offline. env: more variables for the child."""
@@ -1612,7 +1616,7 @@ def start_job(job_dir, kind, log, env=None):
     if kind in ("train", "evaluate"):
         env["HF_HUB_OFFLINE"] = "1"
     return subprocess.Popen(
-        [sys.executable, "-m", "layastudio.engine", "run", str(job_dir)],
+        [sys.executable, "-m", "systemone_studio.engine", "run", str(job_dir)],
         cwd=str(PACKAGE.parent),
         env=env,
         stdout=log,
@@ -1695,5 +1699,5 @@ def run_job(job_dir):
 if __name__ == "__main__":
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     if len(sys.argv) != 3 or sys.argv[1] != "run":
-        sys.exit("usage: python -m layastudio.engine run <job_dir>")
+        sys.exit("usage: python -m systemone_studio.engine run <job_dir>")
     sys.exit(run_job(sys.argv[2]))

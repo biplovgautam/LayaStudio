@@ -2,15 +2,16 @@
 
 Git is a poor place for datasets, so nothing is vendored: at startup (or on request) the
 files are downloaded from Hugging Face and turned into ordinary workspace datasets, in the
-same questions + rows format you would upload yourself. Point $LAYASTUDIO_EXAMPLES_URL at a
-JSON manifest of the same shape to publish your own catalog.
+same questions + rows format you would upload yourself. Point $SYSTEMONE_STUDIO_EXAMPLES_URL
+(or its old name, $LAYASTUDIO_EXAMPLES_URL) at a JSON manifest of the same shape to publish
+your own catalog.
 """
 
 import json
-import os
 import random
 import urllib.request
 
+from . import environment
 from .engine import WORKSPACE, create_dataset
 
 EXAMPLES = {
@@ -86,8 +87,9 @@ EXAMPLES = {
 
 
 def catalog():
-    """The example catalog: built in, or a JSON manifest named by $LAYASTUDIO_EXAMPLES_URL."""
-    url = os.environ.get("LAYASTUDIO_EXAMPLES_URL")
+    """The example catalog: built in, or a JSON manifest named by
+    $SYSTEMONE_STUDIO_EXAMPLES_URL (or $LAYASTUDIO_EXAMPLES_URL)."""
+    url = environment.get("EXAMPLES_URL")
     if not url:
         return EXAMPLES
     with urllib.request.urlopen(url, timeout=20) as response:

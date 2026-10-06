@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from layastudio import children
+from systemone_studio import children
 
 REPO = Path(__file__).resolve().parents[1]
 needs_posix = pytest.mark.skipif(os.name == "nt", reason="SIGKILL and os.kill(pid, 0)")
@@ -96,7 +96,7 @@ def test_a_watched_child_ends_when_its_job_is_killed_outright(tmp_path):
                 f"""
                 import subprocess, sys, time
                 sys.path.insert(0, {str(REPO)!r})
-                from layastudio import children
+                from systemone_studio import children
                 child = subprocess.Popen(
                     children.command(["-c", "import time; time.sleep(600)"]),
                     stdin=subprocess.PIPE,
@@ -132,7 +132,7 @@ def test_a_child_whose_job_is_gone_before_it_watches_ends_at_once():
                 f"""
                 import os, subprocess, sys
                 sys.path.insert(0, {str(REPO)!r})
-                from layastudio import children
+                from systemone_studio import children
                 child = subprocess.Popen(
                     children.command(["-c", "import time; time.sleep(600)"]),
                     stdin=subprocess.PIPE,
@@ -210,7 +210,7 @@ def test_a_child_behind_a_launcher_ends_when_its_job_is_killed_outright():
                 f"""
                 import subprocess, sys, time
                 sys.path.insert(0, {str(REPO)!r})
-                from layastudio import children
+                from systemone_studio import children
                 code = "import os, time; print(os.getpid(), flush=True); time.sleep(600)"
                 child = subprocess.Popen(
                     [sys.executable, "-c", {LAUNCHER!r}, *children.command(["-c", code])[1:]],
@@ -262,7 +262,7 @@ Path(sys.argv[sys.argv.index("--outfile") + 1]).write_bytes(b"GGUF" + bytes(8))
 def fake_tools(root):
     """LAYASTUDIO_TOOLS holding llama.cpp's converter at the pinned commit as converter() finds
     a verified one, FAKE_CONVERTER in place of the real script."""
-    from layastudio import gguf
+    from systemone_studio import gguf
 
     tool = root / f"llama.cpp-{gguf.LLAMA_CPP_COMMIT[:12]}"
     for name in gguf.PINNED:
@@ -287,7 +287,7 @@ def test_the_converter_runs_as_python_runs_a_script(tmp_path, monkeypatch):
     """Behind children.WATCH, the converter still sees its own argv, __name__ and __file__, and
     its folder first on its path as `python <script>` puts it there; its output reaches the
     job's log, and a failure names the last line it wrote to stderr."""
-    from layastudio import gguf
+    from systemone_studio import gguf
 
     tools = tmp_path / "tools"
     fake_tools(tools)
@@ -332,7 +332,7 @@ def converter_job(tmp_path, on_term=False):
             sys.executable,
             "-c",
             f"import sys\nsys.path.insert(0, {str(REPO)!r})\n{handler}"
-            "from layastudio import gguf\n"
+            "from systemone_studio import gguf\n"
             f"gguf.convert({str(tmp_path / 'model')!r}, {str(tmp_path / 'm.gguf')!r}, 'bf16')\n",
         ],
         env={

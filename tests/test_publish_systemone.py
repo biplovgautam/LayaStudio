@@ -1,6 +1,6 @@
 """The registry card keeps the Hub card's measurements and points its examples at the registry."""
 
-from layastudio.publish_systemone import QUESTIONS_MARK, registry_card
+from systemone_studio.publish_systemone import QUESTIONS_MARK, registry_card
 
 HUB_CARD = """---
 license: apache-2.0

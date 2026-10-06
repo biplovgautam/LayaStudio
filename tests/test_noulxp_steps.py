@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from layastudio import children, engine, gguf, noulxp_package
+from systemone_studio import children, engine, gguf, noulxp_package
 
 WATCHED = [sys.executable, "-c", children.RUN]  # what every step's argv starts with
 
@@ -83,6 +83,7 @@ def test_the_check_runs_exactly_so(tmp_path, steps):
         "OMP_NUM_THREADS": "6",
         "MKL_NUM_THREADS": "6",
         "OPENBLAS_NUM_THREADS": "6",
+        "SYSTEMONE_STUDIO_THREADS": "6",
         "LAYASTUDIO_THREADS": "6",
         "NOULXP_THREADS": "6",
     }
@@ -138,6 +139,7 @@ def test_a_cap_the_machine_sets_wins_and_is_what_is_reported(tmp_path, steps, mo
         "OMP_NUM_THREADS": "2",
         "MKL_NUM_THREADS": None,
         "OPENBLAS_NUM_THREADS": None,
+        "SYSTEMONE_STUDIO_THREADS": None,
         "LAYASTUDIO_THREADS": None,
         "NOULXP_THREADS": None,
     }
@@ -161,6 +163,7 @@ def test_the_export_caps_its_threads_and_runs_its_exporter(tmp_path, steps):
     assert export.args[3] == "-c" and export.args[4] == noulxp_package.EXPORT
     assert export.args[4].startswith(noulxp_package.ORT_THREADS)
     assert export.env["LAYASTUDIO_THREADS"] == "1" and export.env["OMP_NUM_THREADS"] == "1"
+    assert export.env["SYSTEMONE_STUDIO_THREADS"] == "1"
     assert export.env["NOULXP_THREADS"] == "1"
 
 
@@ -205,6 +208,16 @@ def test_ort_threads_caps_a_session_opened_without_a_count(ort_graph, monkeypatc
     assert intra(session) == 5
     session, _ = providers.ort_session(path, provider="cpu", optimization="disable")
     assert intra(session) == 3
+
+
+def test_ort_threads_reads_the_new_name_before_the_old_one(ort_graph, monkeypatch):
+    """SYSTEMONE_STUDIO_THREADS wins over LAYASTUDIO_THREADS, as everywhere (environment.py)."""
+    providers, path, original = ort_graph
+    monkeypatch.setenv("LAYASTUDIO_THREADS", "7")
+    monkeypatch.setenv("SYSTEMONE_STUDIO_THREADS", "2")
+    exec(noulxp_package.ORT_THREADS, {})
+    session, _ = providers.ort_session(path, provider="cpu")
+    assert intra(session) == 2
 
 
 @pytest.mark.parametrize("value", [None, "", "0", "-1", "8.5", "abc"])
@@ -456,7 +469,7 @@ def test_only_encoders_without_test_rows_record_beside_the_export(monkeypatch):
 def test_the_conformance_gate_says_what_decided_it(monkeypatch):
     """What the build records (steps.conformance.overlap_gate): the decision, the gate that
     made it and what that gate read, memory included (available_memory: page cache free)."""
-    from layastudio import telemetry
+    from systemone_studio import telemetry
 
     gate = noulxp_package.conformance_gate
     monkeypatch.delenv("LAYASTUDIO_PARALLEL_CONFORMANCE", raising=False)

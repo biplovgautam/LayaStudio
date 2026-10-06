@@ -22,7 +22,7 @@ pytest.importorskip("transformers")
 import tiny  # noqa: E402
 from common import QUESTIONS, make_rows  # noqa: E402
 
-from layastudio import engine, gguf, noulxp_package  # noqa: E402
+from systemone_studio import engine, gguf, noulxp_package  # noqa: E402
 
 RUN = "dv"
 REPO = Path(__file__).resolve().parents[1]
@@ -81,7 +81,7 @@ CHILD = textwrap.dedent(
     """
     import json, os, sys, time
     sys.path.insert(0, {repo!r})
-    from layastudio.gguf_reference import watch_parent
+    from systemone_studio.gguf_reference import watch_parent
     watch_parent()
     mode = os.environ.get("FAKE_REFERENCE", "ok")
     model_dir, rows_path, out = sys.argv[1:4]
@@ -194,7 +194,7 @@ def test_an_export_removes_what_a_killed_one_left(tmp_path, checkpoint, stand_in
 def test_serial_and_overlapped_measurements_agree(tmp_path, checkpoint, stand_ins, monkeypatch):
     """The real reference (decider.Agent in float32, on the CPU here) in this process and in a
     process of its own: the same rows, the same numbers."""
-    monkeypatch.setattr(gguf, "REFERENCE", ("-m", "layastudio.gguf_reference"))
+    monkeypatch.setattr(gguf, "REFERENCE", ("-m", "systemone_studio.gguf_reference"))
     workspace, run_dir = run_workspace(tmp_path, checkpoint)
     monkeypatch.setenv("LAYASTUDIO_SERIAL_VERIFY", "1")
     serial = gguf.export(f"run:{RUN}", workspace, threads=4)
@@ -223,7 +223,7 @@ def machine(monkeypatch):
     memory available_memory() reads (None: unknown). Records whether memory was read."""
     from types import SimpleNamespace
 
-    from layastudio import runtime, telemetry
+    from systemone_studio import runtime, telemetry
 
     seen = {"device": "cuda", "free": 25 * GIB, "reads": 0}
     monkeypatch.delenv("LAYASTUDIO_SERIAL_VERIFY", raising=False)
@@ -349,8 +349,8 @@ GGUF_READY = (
 
 @pytest.mark.skipif(
     not GGUF_READY,
-    reason="needs llama-cpp-python, LAYASTUDIO_TOOLS and Decider's tokenizer (DECIDER_TOKENIZER"
-    " or the HF cache): README, Project layout",
+    reason="needs llama-cpp-python, SYSTEMONE_STUDIO_TOOLS (or LAYASTUDIO_TOOLS) and Decider's"
+    " tokenizer (DECIDER_TOKENIZER or the HF cache): README, Project layout",
 )
 def test_the_real_overlap_measures_what_the_serial_one_does(tmp_path, monkeypatch):
     """The real converter, llama.cpp and float32 reference on the tiny checkpoint with Decider's
@@ -452,7 +452,7 @@ def test_a_reference_outlives_no_job(tmp_path, checkpoint):
                 f"""
                 import sys, time
                 sys.path.insert(0, {str(REPO)!r})
-                from layastudio import gguf
+                from systemone_studio import gguf
                 gguf.REFERENCE = ({str(script)!r},)
                 ref = gguf.Reference({str(checkpoint)!r}, [{{"ids": [1, 2], "n": 2}}], {str(folder)!r})
                 print(ref.process.pid, flush=True)

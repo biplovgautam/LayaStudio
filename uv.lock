@@ -592,114 +592,6 @@ wheels = [
 ]
 
 [[package]]
-name = "layastudio"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "laya-mlx" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pyarrow" },
-    { name = "tokenizers" },
-]
-
-[package.optional-dependencies]
-coreml = [
-    { name = "coremltools" },
-    { name = "laya" },
-    { name = "scikit-learn" },
-    { name = "torch" },
-]
-decoder = [
-    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "peft" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-dev = [
-    { name = "build" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-export = [
-    { name = "laya" },
-    { name = "noulxp", extra = ["export", "laya", "onnx"] },
-    { name = "onnx" },
-    { name = "onnxruntime" },
-    { name = "onnxscript" },
-    { name = "safetensors" },
-    { name = "torch" },
-]
-gguf = [
-    { name = "llama-cpp-python" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "protobuf" },
-    { name = "pyyaml" },
-    { name = "requests" },
-    { name = "sentencepiece" },
-    { name = "tqdm" },
-]
-shots = [
-    { name = "pillow" },
-]
-systemone = [
-    { name = "systemonemodels" },
-]
-torch = [
-    { name = "laya" },
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "transformers" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "build", marker = "extra == 'dev'", specifier = ">=1" },
-    { name = "coremltools", marker = "extra == 'coreml'", specifier = ">=8.0" },
-    { name = "huggingface-hub", specifier = ">=0.34,<2" },
-    { name = "laya", marker = "extra == 'coreml'", specifier = ">=0.1.6" },
-    { name = "laya", marker = "extra == 'export'", specifier = ">=0.1.6" },
-    { name = "laya", marker = "extra == 'torch'", specifier = ">=0.3.5" },
-    { name = "laya-mlx", specifier = ">=0.2,<0.3" },
-    { name = "llama-cpp-python", marker = "extra == 'gguf'", specifier = "==0.3.35", index = "https://abetlen.github.io/llama-cpp-python/whl/cpu" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.32.2,<0.33" },
-    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'decoder'", specifier = ">=0.32,<0.33" },
-    { name = "noulxp", extras = ["export", "laya", "onnx"], marker = "extra == 'export'", specifier = ">=0.4,<0.5" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "numpy", marker = "extra == 'gguf'", specifier = ">=1.26" },
-    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.16" },
-    { name = "onnxruntime", marker = "extra == 'export'", specifier = ">=1.18" },
-    { name = "onnxscript", marker = "extra == 'export'", specifier = ">=0.2" },
-    { name = "peft", marker = "extra == 'decoder'", specifier = ">=0.17" },
-    { name = "pillow", marker = "extra == 'shots'", specifier = ">=11" },
-    { name = "protobuf", marker = "extra == 'gguf'", specifier = ">=4.21" },
-    { name = "pyarrow", specifier = ">=18" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
-    { name = "pyyaml", marker = "extra == 'gguf'", specifier = ">=6" },
-    { name = "requests", marker = "extra == 'gguf'", specifier = ">=2.25" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
-    { name = "safetensors", marker = "extra == 'decoder'", specifier = ">=0.4" },
-    { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4" },
-    { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.4" },
-    { name = "scikit-learn", marker = "extra == 'coreml'", specifier = ">=1.4" },
-    { name = "sentencepiece", marker = "extra == 'gguf'", specifier = ">=0.2" },
-    { name = "systemonemodels", marker = "extra == 'systemone'", specifier = ">=0.2.4" },
-    { name = "tokenizers", specifier = ">=0.21,<1" },
-    { name = "torch", marker = "extra == 'coreml'", specifier = ">=2.4" },
-    { name = "torch", marker = "extra == 'decoder'", specifier = ">=2.4" },
-    { name = "torch", marker = "extra == 'export'", specifier = ">=2.4" },
-    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4" },
-    { name = "tqdm", marker = "extra == 'gguf'", specifier = ">=4.27" },
-    { name = "transformers", marker = "extra == 'decoder'", specifier = ">=5.2" },
-    { name = "transformers", marker = "extra == 'torch'", specifier = ">=5.2" },
-]
-provides-extras = ["dev", "torch", "decoder", "gguf", "export", "coreml", "shots", "systemone"]
-
-[[package]]
 name = "llama-cpp-python"
 version = "0.3.35"
 source = { registry = "https://abetlen.github.io/llama-cpp-python/whl/cpu" }
@@ -2347,6 +2239,114 @@ sdist = { url = "https://files.pythonhosted.org/packages/83/d3/803453b36afefb7c2
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/09/77d55d46fd61b4a135c444fc97158ef34a095e5681d0a6c10b75bf356191/sympy-1.14.0-py3-none-any.whl", hash = "sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5", size = 6299353, upload-time = "2025-04-27T18:04:59.103Z" },
 ]
+
+[[package]]
+name = "systemone-studio"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "laya-mlx" },
+    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pyarrow" },
+    { name = "tokenizers" },
+]
+
+[package.optional-dependencies]
+coreml = [
+    { name = "coremltools" },
+    { name = "laya" },
+    { name = "scikit-learn" },
+    { name = "torch" },
+]
+decoder = [
+    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "peft" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+dev = [
+    { name = "build" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+export = [
+    { name = "laya" },
+    { name = "noulxp", extra = ["export", "laya", "onnx"] },
+    { name = "onnx" },
+    { name = "onnxruntime" },
+    { name = "onnxscript" },
+    { name = "safetensors" },
+    { name = "torch" },
+]
+gguf = [
+    { name = "llama-cpp-python" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "protobuf" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "sentencepiece" },
+    { name = "tqdm" },
+]
+shots = [
+    { name = "pillow" },
+]
+systemone = [
+    { name = "systemonemodels" },
+]
+torch = [
+    { name = "laya" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "build", marker = "extra == 'dev'", specifier = ">=1" },
+    { name = "coremltools", marker = "extra == 'coreml'", specifier = ">=8.0" },
+    { name = "huggingface-hub", specifier = ">=0.34,<2" },
+    { name = "laya", marker = "extra == 'coreml'", specifier = ">=0.1.6" },
+    { name = "laya", marker = "extra == 'export'", specifier = ">=0.1.6" },
+    { name = "laya", marker = "extra == 'torch'", specifier = ">=0.3.5" },
+    { name = "laya-mlx", specifier = ">=0.2,<0.3" },
+    { name = "llama-cpp-python", marker = "extra == 'gguf'", specifier = "==0.3.35", index = "https://abetlen.github.io/llama-cpp-python/whl/cpu" },
+    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.32.2,<0.33" },
+    { name = "mlx-lm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'decoder'", specifier = ">=0.32,<0.33" },
+    { name = "noulxp", extras = ["export", "laya", "onnx"], marker = "extra == 'export'", specifier = ">=0.4,<0.5" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'gguf'", specifier = ">=1.26" },
+    { name = "onnx", marker = "extra == 'export'", specifier = ">=1.16" },
+    { name = "onnxruntime", marker = "extra == 'export'", specifier = ">=1.18" },
+    { name = "onnxscript", marker = "extra == 'export'", specifier = ">=0.2" },
+    { name = "peft", marker = "extra == 'decoder'", specifier = ">=0.17" },
+    { name = "pillow", marker = "extra == 'shots'", specifier = ">=11" },
+    { name = "protobuf", marker = "extra == 'gguf'", specifier = ">=4.21" },
+    { name = "pyarrow", specifier = ">=18" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pyyaml", marker = "extra == 'gguf'", specifier = ">=6" },
+    { name = "requests", marker = "extra == 'gguf'", specifier = ">=2.25" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },
+    { name = "safetensors", marker = "extra == 'decoder'", specifier = ">=0.4" },
+    { name = "safetensors", marker = "extra == 'export'", specifier = ">=0.4" },
+    { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.4" },
+    { name = "scikit-learn", marker = "extra == 'coreml'", specifier = ">=1.4" },
+    { name = "sentencepiece", marker = "extra == 'gguf'", specifier = ">=0.2" },
+    { name = "systemonemodels", marker = "extra == 'systemone'", specifier = ">=0.2.4" },
+    { name = "tokenizers", specifier = ">=0.21,<1" },
+    { name = "torch", marker = "extra == 'coreml'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'decoder'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'export'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4" },
+    { name = "tqdm", marker = "extra == 'gguf'", specifier = ">=4.27" },
+    { name = "transformers", marker = "extra == 'decoder'", specifier = ">=5.2" },
+    { name = "transformers", marker = "extra == 'torch'", specifier = ">=5.2" },
+]
+provides-extras = ["dev", "torch", "decoder", "gguf", "export", "coreml", "shots", "systemone"]
 
 [[package]]
 name = "systemonemodels"

@@ -662,7 +662,11 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     new_cfg = {**cfg, "temperature": temperature, "temperature_by_options": by_options}
     new_cfg["fine_tuned"] = {
         key: summary[key] for key in ("base_model", "dataset_sha256", "best_epoch", "created")
-    } | {"method": hp["method"], "objective": hp["objective"], "tool": "layastudio (pytorch)"}
+    } | {
+        "method": hp["method"],
+        "objective": hp["objective"],
+        "tool": "System One Studio (pytorch)",
+    }
     if lora_variants(hp):
         new_cfg["fine_tuned"]["lora_variants"] = lora_variants(hp)
     model.eval()

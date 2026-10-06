@@ -17,8 +17,8 @@ pytest.importorskip("laya")
 import tiny  # noqa: E402
 from common import QUESTIONS, make_rows  # noqa: E402
 
-from layastudio import engine, julia, kinds, noulxp_package, torch_engine  # noqa: E402
-from layastudio.export import export  # noqa: E402
+from systemone_studio import engine, julia, kinds, noulxp_package, torch_engine  # noqa: E402
+from systemone_studio.export import export  # noqa: E402
 
 try:
     import mlx.core  # noqa: F401
@@ -300,7 +300,7 @@ def test_a_julia_fine_tune_gets_a_noulxp_package_that_passes(checkpoint, tmp_pat
     # A publish dry run carries Julia's own files, the package and a Julia card.
     from common import fake_systemone
 
-    from layastudio import publish_systemone
+    from systemone_studio import publish_systemone
 
     command, seen = fake_systemone(tmp_path)
     publish_systemone.cli_command, saved = (lambda: command), publish_systemone.cli_command

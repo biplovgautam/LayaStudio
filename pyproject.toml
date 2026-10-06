@@ -3,10 +3,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "layastudio"
+name = "systemone-studio"
 version = "0.1.0"
-description = "Fine-tune System One decision models on your own data, on your own machine"
-keywords = ["laya", "julia", "decider", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai", "noulxp"]
+description = "System One Studio (formerly LayaStudio): fine-tune System One decision models on your own data, on your own machine"
+keywords = ["system-one", "systemone-studio", "laya", "julia", "decider", "mlx", "fine-tuning", "lora", "apple-silicon", "typed-decisions", "local-ai", "noulxp"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -45,7 +45,7 @@ decoder = [
   "mlx-lm>=0.32,<0.33; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # GGUF exports of decoder fine-tunes and their NoulXP packages: llama.cpp's converter at the
-# commit llama-cpp-python 0.3.35 vendors (fetched on first use, layastudio/gguf.py) with the
+# commit llama-cpp-python 0.3.35 vendors (fetched on first use, systemone_studio/gguf.py) with the
 # requirements of its gguf-py, and llama-cpp-python to run and check the files.
 gguf = [
   "llama-cpp-python==0.3.35",
@@ -73,7 +73,9 @@ shots = ["Pillow>=11"]
 systemone = ["systemonemodels>=0.2.4"]
 
 [project.scripts]
-layastudio = "layastudio.server:main"
+systemone-studio = "systemone_studio.server:main"
+# The command's name before the rename, kept as an alias: the same program.
+layastudio = "systemone_studio.server:main"
 
 [project.urls]
 Repository = "https://github.com/biplovgautam/LayaStudio"
@@ -82,7 +84,7 @@ Issues = "https://github.com/biplovgautam/LayaStudio/issues"
 "laya-mlx (runtime)" = "https://pypi.org/project/laya-mlx/"
 
 [tool.hatch.build.targets.wheel]
-packages = ["layastudio"]
+packages = ["systemone_studio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -95,7 +97,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 # llama-cpp-python publishes prebuilt CPU wheels (macOS, Linux, Windows) on its own index, not
 # on PyPI, where only the source is: take them, so no machine needs a C compiler. With pip:
-#   pip install "layastudio[gguf]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#   pip install "systemone-studio[gguf]" --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 [[tool.uv.index]]
 name = "llama-cpp-cpu"
 url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"

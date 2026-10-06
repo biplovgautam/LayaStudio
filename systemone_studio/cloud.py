@@ -18,13 +18,15 @@ one place those rules live:
 
 Then it writes the run's record, runs/<id>/run.json, and returns the jobs to start.
 
-    layastudio train --config run.json         # or: python -m layastudio.cloud --config run.json
+    systemone-studio train --config run.json
+    python -m systemone_studio.cloud --config run.json      # the same
 
 runs one fine-tune end to end with no UI: training (baseline, fit, evaluation, comparison),
 then each export, NoulXP packages included. Each is the child process the UI starts
-(python -m layastudio.engine run <job_dir>), so a run here is the run the studio makes. Every
-event is printed to stdout as one JSON line, and a result file says how the run ended, with
-its measurements and its output files (size and SHA-256). It is what a cloud GPU runs.
+(python -m systemone_studio.engine run <job_dir>), so a run here is the run the studio
+makes. Every event is printed to stdout as one JSON line, and a result file says how the run
+ended, with its measurements and its output files (size and SHA-256). It is what a cloud GPU
+runs.
 
 The config, with paths relative to its own folder:
 
@@ -80,8 +82,9 @@ The config, with paths relative to its own folder:
   told so in its warnings, since its card would be all it keeps.
 - template: recorded as it is, in the result and in card/finetune.json.
 - The config is the agent's, never a user's: its paths are read as given (absolute ones and
-  "..", too). A GPU image sets $LAYASTUDIO_TOOLS to the llama.cpp converter it bakes in
-  (gguf.py), or Decider's GGUF fetches it beside the workspace.
+  "..", too). A GPU image sets $SYSTEMONE_STUDIO_TOOLS (or its old name, $LAYASTUDIO_TOOLS) to
+  the llama.cpp converter it bakes in (gguf.py), or Decider's GGUF fetches it beside the
+  workspace.
 
 What a run makes, in runs/<id>/, each group listed in the result's outputs with every file's
 size and SHA-256: model/ (the checkpoint), noulxp/ (its NoulXP package, only one that passed),
@@ -124,7 +127,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import datasets, engine, kinds
+from . import datasets, engine, environment, kinds
 
 # The values a text hyperparameter takes (the trainers' own branches; Decider narrows method
 # and objective further in decider_engine.check_hyperparameters).
@@ -155,7 +158,7 @@ AT_LEAST_ONE = ("epochs", "batch_size", "grad_accum", "lora_rank", "batch_tokens
 # warm-up is a share of the updates.
 BELOW_ONE = ("lora_dropout", "head_dropout")
 AT_MOST_ONE = ("warmup",)
-# The precision an export gets when the run does not say (as `python -m layastudio.export`).
+# The precision an export gets when the run does not say (as `python -m systemone_studio.export`).
 DEFAULT_PRECISION = {"gguf": "bf16", "mlx": "int4"}
 # Outputs of a run, in the result's manifest: the checkpoint, its NoulXP package (only one that
 # passed its check), the exports (GGUF, MLX-LM) and the card (README.md, finetune.json).
@@ -166,7 +169,7 @@ CARD_REPO = "<namespace>/<name>"
 # A commit on the Hugging Face hub: what a downloaded base model pins (hub:<repo>@<commit>).
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # The thread a run from a file downloads its base model on (Headless.fetch).
-DOWNLOAD_THREAD = "layastudio-base-download"
+DOWNLOAD_THREAD = "systemone-studio-base-download"
 # What card/finetune.json keeps of the training summary (training.json): never a path.
 TRAINING_KEYS = (
     "train_decisions",
@@ -767,7 +770,7 @@ class Headless:
     def env(self):
         # The jobs' workspace is the run's, for the files they keep beside it too; their
         # Hugging Face cache, the run's, where its base model was downloaded.
-        env = {"LAYASTUDIO_HOME": str(self.workspace)}
+        env = environment.both("HOME", self.workspace)
         if self.cache_dir is not None:
             env["HF_HUB_CACHE"] = str(self.cache_dir)
         return env
@@ -1156,7 +1159,7 @@ def _card(run_id, workspace, meta, template, emit, outcome):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        prog="layastudio train",
+        prog="systemone-studio train",
         description="Run one fine-tune with no UI: training, then its exports. Events go to "
         "stdout as JSON lines; the result file says how it ended.",
     )

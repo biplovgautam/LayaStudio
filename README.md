@@ -7,7 +7,7 @@
 
 **Build your own decision engine on your own machine, in minutes.**
 
-*System One Studio was called Laya Studio until September 2026. The command, `layastudio`, and the workspace folder, `~/.layastudio`, keep their names.*
+*System One Studio, formerly LayaStudio. The command is `systemone-studio` and the Python package `systemone_studio` (distribution `systemone-studio`); the old names keep working as deprecated aliases — the `layastudio` command, `import layastudio` and `python -m layastudio`, and every `LAYASTUDIO_*` variable ([Environment variables](#environment-variables)) — and the workspace folder, `~/.layastudio`, keeps its name.*
 
 Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on your own data, locally — and prove the result is better before you ship it. For the decisions *your* product makes, a small model you tuned yourself can beat a general hosted API: more accurate on your labels, ~10× faster because there is no network, and free to run.
 
@@ -20,7 +20,7 @@ Fine-tune [Laya](https://github.com/NandhaKishorM/laya) typed-decision models on
 **[layastudio.biplovgautam.com.np](https://layastudio.biplovgautam.com.np)** · part of [System One Models](https://systemonemodels.tech) ([LinkedIn](https://www.linkedin.com/company/system-one-models/) · [X](https://x.com/SystemoneModels) · [Hugging Face](https://huggingface.co/systemonemodels) · [Instagram](https://www.instagram.com/systemonemodels.tech/) · ceo@systemonemodels.tech) · [the published Snake model](https://huggingface.co/madhavbiplov/laya-snake-mlx)
 
 ```bash
-git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
+git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run systemone-studio
 ```
 
 That is the whole setup. The browser opens, and the studio finishes preparing itself in the background — it detects your machine, checks its runtime (MLX on Apple silicon, PyTorch on Windows and Linux), downloads a base checkpoint and fetches the public example datasets, showing every step on the page.
@@ -105,12 +105,12 @@ By hand, on Apple silicon (M1 or newer), macOS 14+, Python 3.11+:
 
 ```bash
 # with uv (recommended — it creates the environment for you)
-git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run layastudio
+git clone https://github.com/biplovgautam/LayaStudio && cd LayaStudio && uv run systemone-studio
 
 # or with pip
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-layastudio
+systemone-studio      # `layastudio`, the old name, still works
 ```
 
 Useful flags: `--port 8800`, `--workspace ~/laya-work`, `--no-download` (never fetch a model), `--no-examples`, `--no-browser`.
@@ -141,7 +141,7 @@ model, that fine-tune and the four example datasets. Playing straight from the p
 copy: **196 moves, 25.7 apples, 99.4% legal moves, 40.7 decisions per second**.
 
 ```bash
-LAYASTUDIO_DEMO_MODELS="" uv run layastudio     # skip it, if you would rather not
+SYSTEMONE_STUDIO_DEMO_MODELS="" uv run systemone-studio     # skip it, if you would rather not
 ```
 
 ### Publishing your own run
@@ -154,7 +154,7 @@ hf auth login                              # your own token, once; "Manage repos
 ```
 
 ```bash
-uv run python -m layastudio.publish run:<run-id> --repo <you>/<name>   # --dry-run writes the card only
+uv run python -m systemone_studio.publish run:<run-id> --repo <you>/<name>   # --dry-run writes the card only
 ```
 
 The namespace has to be yours: publishing to someone else's returns a 403 before anything
@@ -169,7 +169,7 @@ pip install systemonemodels && systemone login          # once; approves this ma
 ```
 
 ```bash
-uv run python -m layastudio.publish_systemone run:<run-id>   # --repo <you>/<name> to choose the name
+uv run python -m systemone_studio.publish_systemone run:<run-id>   # --repo <you>/<name> to choose the name
 ```
 
 Or open the run in the studio and press **Publish to System One**. Both write a card from
@@ -181,8 +181,8 @@ one built and checked first, and nothing goes up if it fails; `--skip-noulxp` (o
 
 The card carries the before/after table, the significance test, the calibration
 temperatures, the hyperparameters and the dataset hash from that run, so what the Hub
-claims is what the studio measured. Add the repository to `LAYASTUDIO_DEMO_MODELS` (or
-`DEMO_MODELS` in `layastudio/engine.py`) and it will be fetched at startup like the one
+claims is what the studio measured. Add the repository to `SYSTEMONE_STUDIO_DEMO_MODELS` (or
+`DEMO_MODELS` in `systemone_studio/engine.py`) and it will be fetched at startup like the one
 above.
 
 ## Five-minute tour
@@ -275,9 +275,9 @@ You can watch this happen: the **Snake arena** in the studio plays both models s
 ![Snake run results](docs/snake.png)
 
 ```bash
-python -m layastudio.snake dataset                    # generate the boards locally
-python -m layastudio.snake bench --model run:<id>     # play unassisted
-python -m layastudio.snake teacher                    # the planner's own ceiling
+python -m systemone_studio.snake dataset                    # generate the boards locally
+python -m systemone_studio.snake bench --model run:<id>     # play unassisted
+python -m systemone_studio.snake teacher                    # the planner's own ceiling
 ```
 
 ## Screenshots
@@ -373,7 +373,7 @@ I was charged twice this month… [SEP]
 | **Head only** | Decision head, scorer, type embedding | Quick sanity check |
 | **Full top layers** | Top 4 encoder layers unfrozen, lower LR | Large datasets where LoRA plateaus |
 
-Advanced settings cover epochs, batch size, gradient accumulation, learning rates, LoRA rank/alpha, the LoRA variants (DoRA, rsLoRA, LoRA+ ratio), objective, class weighting, precision, option shuffling, patience and seed. Defaults are in `HYPERPARAMETERS` in [`layastudio/engine.py`](layastudio/engine.py), and the studio adapts batch size to the memory it finds.
+Advanced settings cover epochs, batch size, gradient accumulation, learning rates, LoRA rank/alpha, the LoRA variants (DoRA, rsLoRA, LoRA+ ratio), objective, class weighting, precision, option shuffling, patience and seed. Defaults are in `HYPERPARAMETERS` in [`systemone_studio/engine.py`](systemone_studio/engine.py), and the studio adapts batch size to the memory it finds.
 
 ## Performance and memory
 
@@ -414,8 +414,8 @@ Because the layout and tensor names match the original checkpoints, the same fol
 
 ```bash
 uv sync --extra export
-python -m layastudio.export run:<id> --target onnx                     # or pick it on the run page
-python -m layastudio.export run:<id> --target onnx --precision int8    # smaller
+python -m systemone_studio.export run:<id> --target onnx                     # or pick it on the run page
+python -m systemone_studio.export run:<id> --target onnx --precision int8    # smaller
 ```
 
 The export writes `model.onnx` (opset 18, dynamic batch, tokens and options) next to the tokenizer, the calibration temperatures and the questions the model was trained for — everything a server needs, with no Laya code required to run it. It goes wherever onnxruntime goes: Linux and Windows CPUs, NVIDIA CUDA, DirectML.
@@ -423,7 +423,7 @@ The export writes `model.onnx` (opset 18, dynamic batch, tokens and options) nex
 **NoulXP**, the open standard any NoulXP engine runs without Laya code:
 
 ```bash
-python -m layastudio.export run:<id> --target noulxp    # or Export → NoulXP package
+python -m systemone_studio.export run:<id> --target noulxp    # or Export → NoulXP package
 ```
 
 `noulxp export laya` writes the package from the checkpoint, the `laya` package records the
@@ -436,7 +436,7 @@ one on the CPU. The package is kept with the run as `runs/<id>/noulxp/` and publ
 
 ```bash
 uv run --python 3.12 --extra coreml --extra export \
-  python -m layastudio.export run:<id> --target coreml --precision int8
+  python -m systemone_studio.export run:<id> --target coreml --precision int8
 ```
 
 Three rewrites make the graph convertible, each checked against the original before
@@ -484,13 +484,13 @@ upstream `laya` on CPU gave **40/40 identical answers** against this MLX runtime
 ### A run without the UI
 
 ```bash
-layastudio train --config run.json       # or: python -m layastudio.cloud --config run.json
+systemone-studio train --config run.json   # or: python -m systemone_studio.cloud --config run.json
 ```
 
 runs one fine-tune end to end with no page open: the baseline, training, evaluation and
 comparison, then each export the run asks for, NoulXP packages included. The config names the
 base model, the dataset (one in the workspace, or its files beside the config), the
-hyperparameters and the exports; [`layastudio/cloud.py`](layastudio/cloud.py) documents every
+hyperparameters and the exports; [`systemone_studio/cloud.py`](systemone_studio/cloud.py) documents every
 field. Each step is the same child process the Train and Export buttons start, and the run is
 checked by the same function the Train button calls (`cloud.prepare_run`), so a run refused
 here is refused there too. Every event is printed to stdout as one JSON line, and
@@ -526,27 +526,52 @@ The Train button downloads nothing: there, a base model is one this machine alre
 - Training and evaluation run with `HF_HUB_OFFLINE=1`. The only network actions are model downloads and the public example datasets.
 - Your datasets, runs and checkpoints live in `workspace/`, which git ignores.
 
+## Environment variables
+
+Every variable has a new name, `SYSTEMONE_STUDIO_*`, and keeps its name from before the
+rename, `LAYASTUDIO_*`. The new name wins whenever it is set, even to an empty value; the old
+one is read only when the new one is not. When the studio sets one for a job or a step, it
+sets both names ([`environment.py`](systemone_studio/environment.py)).
+
+| Variable | Old name | What it does |
+|---|---|---|
+| `SYSTEMONE_STUDIO_HOME` | `LAYASTUDIO_HOME` | The workspace (datasets, runs, checkpoints); default `workspace/` in a checkout, `~/.layastudio/workspace` installed |
+| `SYSTEMONE_STUDIO_TOOLS` | `LAYASTUDIO_TOOLS` | Where llama.cpp's converter lives (GGUF exports); default `tools/` beside the workspace |
+| `SYSTEMONE_STUDIO_BACKEND` | `LAYASTUDIO_BACKEND` | `mlx` or `torch`, instead of the machine's own choice |
+| `SYSTEMONE_STUDIO_DEVICE` | `LAYASTUDIO_DEVICE` | The PyTorch device: `cuda`, `mps`, `xpu`, `cpu`, `directml`, ... |
+| `SYSTEMONE_STUDIO_THREADS` | `LAYASTUDIO_THREADS` | Threads for CPU-bound steps (NoulXP packages, GGUF readouts), instead of the container's quota |
+| `SYSTEMONE_STUDIO_DEMO_MODELS` | `LAYASTUDIO_DEMO_MODELS` | Fine-tunes fetched at startup, comma-separated; `""` fetches none |
+| `SYSTEMONE_STUDIO_EXAMPLES_URL` | `LAYASTUDIO_EXAMPLES_URL` | A JSON manifest of example datasets, instead of the built-in catalog |
+| `SYSTEMONE_STUDIO_SERIAL_VERIFY` | `LAYASTUDIO_SERIAL_VERIFY` | `1`: a GGUF's float32 reference runs after the converter, in the job's process |
+| `SYSTEMONE_STUDIO_PARALLEL_VERIFY` | `LAYASTUDIO_PARALLEL_VERIFY` | `1`: it runs beside the converter whatever the device and memory (tests) |
+| `SYSTEMONE_STUDIO_PARALLEL_CONFORMANCE` | `LAYASTUDIO_PARALLEL_CONFORMANCE` | `0`: a NoulXP package's conformance recording waits for its export; `1`: it runs beside it whatever the threads and memory (tests) |
+| `SYSTEMONE_STUDIO_VERBOSE` | `LAYA_STUDIO_VERBOSE` | Any value: the server logs every request |
+
+`SYSTEMONE_STUDIO_PARENT` (`LAYASTUDIO_PARENT`) is internal: the job a child process belongs to.
+
 ## Project layout
 
 | Path | What it is |
 |---|---|
-| [`layastudio/server.py`](layastudio/server.py) | The app in one file: JSON API + web UI, standard library only, no build step |
-| [`layastudio/engine.py`](layastudio/engine.py) | MLX engine: token analysis, LoRA training, calibration, evaluation, the job runner |
-| [`layastudio/datasets.py`](layastudio/datasets.py) | Datasets read, checked and split with the standard library alone, the same everywhere |
-| [`layastudio/cloud.py`](layastudio/cloud.py) | The checks every fine-tune starts with, and `layastudio train --config`, a run with no UI |
-| [`layastudio/examples.py`](layastudio/examples.py) | Public example datasets, fetched from their URLs |
-| [`layastudio/snake.py`](layastudio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
-| [`layastudio/export.py`](layastudio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
-| [`layastudio/noulxp_package.py`](layastudio/noulxp_package.py) | NoulXP packages: built, checked on the CPU, kept with the run, published with it |
-| [`layastudio/publish.py`](layastudio/publish.py) | Publishes a run to Hugging Face with a card built from its own numbers |
-| [`layastudio/bootstrap.py`](layastudio/bootstrap.py) | The background first-run setup |
+| [`systemone_studio/server.py`](systemone_studio/server.py) | The app in one file: JSON API + web UI, standard library only, no build step |
+| [`systemone_studio/engine.py`](systemone_studio/engine.py) | MLX engine: token analysis, LoRA training, calibration, evaluation, the job runner |
+| [`systemone_studio/datasets.py`](systemone_studio/datasets.py) | Datasets read, checked and split with the standard library alone, the same everywhere |
+| [`systemone_studio/cloud.py`](systemone_studio/cloud.py) | The checks every fine-tune starts with, and `systemone-studio train --config`, a run with no UI |
+| [`systemone_studio/examples.py`](systemone_studio/examples.py) | Public example datasets, fetched from their URLs |
+| [`systemone_studio/snake.py`](systemone_studio/snake.py) | The Snake task: board rendering, planner teacher, dataset generation, unassisted benchmark |
+| [`systemone_studio/export.py`](systemone_studio/export.py) | ONNX and Core ML exports, each verified against the MLX runtime |
+| [`systemone_studio/noulxp_package.py`](systemone_studio/noulxp_package.py) | NoulXP packages: built, checked on the CPU, kept with the run, published with it |
+| [`systemone_studio/publish.py`](systemone_studio/publish.py) | Publishes a run to Hugging Face with a card built from its own numbers |
+| [`systemone_studio/bootstrap.py`](systemone_studio/bootstrap.py) | The background first-run setup |
+| [`systemone_studio/environment.py`](systemone_studio/environment.py) | The environment variables, under their new names and their old ones |
+| [`layastudio/`](layastudio/__init__.py) | The package's name before the rename, a deprecated alias of `systemone_studio` ([`_alias.py`](systemone_studio/_alias.py)) |
 | `tests/` | Unit and end-to-end tests against a tiny random model |
 
-Jobs run as child processes of `layastudio.engine`, so a crash, a cancel or an out-of-memory error never takes the UI down, and GPU memory returns to the system when a job ends.
+Jobs run as child processes of `systemone_studio.engine`, so a crash, a cancel or an out-of-memory error never takes the UI down, and GPU memory returns to the system when a job ends.
 
 ```bash
 uv run --extra dev pytest -q    # no downloads; tests that need MLX or PyTorch skip without them
-uv run --extra dev ruff check layastudio && uv run --extra dev ruff format --check layastudio
+uv run --extra dev ruff check . && uv run --extra dev ruff format --check .
 ```
 
 Three Decider end-to-end tests also skip unless two variables are set, because llama.cpp's
@@ -554,15 +579,16 @@ converter only takes Qwen's real tokenizer: the GGUF conversion, the GGUF measur
 against overlapped, and a Decider fine-tune's NoulXP package built and checked. They need
 llama-cpp-python and:
 
-- `LAYASTUDIO_TOOLS`: the tools folder that holds llama.cpp's converter at the pinned commit
-  (`llama.cpp-4df29be4f4c3/`, as `layastudio.gguf.converter()` fetches and verifies it; set
-  to an empty folder, the first test downloads it there);
+- `SYSTEMONE_STUDIO_TOOLS` (or its old name, `LAYASTUDIO_TOOLS`): the tools folder that holds
+  llama.cpp's converter at the pinned commit (`llama.cpp-4df29be4f4c3/`, as
+  `systemone_studio.gguf.converter()` fetches and verifies it; set to an empty folder, the
+  first test downloads it there);
 - `DECIDER_TOKENIZER`: a snapshot of `Mapika/decider-2b` with its `tokenizer.json`, by default
   `$HF_HOME/hub/models--Mapika--decider-2b/snapshots/533964dae8be954c5b5e19fa4948e48408094c1e`.
   Only the tokenizer files are read: the checkpoint is still the tiny random one.
 
 ```bash
-LAYASTUDIO_TOOLS=/path/to/tools DECIDER_TOKENIZER=/path/to/decider-2b/snapshot \
+SYSTEMONE_STUDIO_TOOLS=/path/to/tools DECIDER_TOKENIZER=/path/to/decider-2b/snapshot \
   uv run --extra dev --extra torch --extra decoder --extra gguf --extra export pytest -q
 ```
 

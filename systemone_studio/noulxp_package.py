@@ -6,7 +6,7 @@ model version on systemonemodels.tech carries a package in a `noulxp/` folder, t
 engine checks it against the package's own conformance file, and a pass shows the model as
 NoulXP compatible.
 
-    python -m layastudio.export run:<id> --target noulxp
+    python -m systemone_studio.export run:<id> --target noulxp
 
 builds that package for one fine-tune with noulxp 0.4, the release the registry checks with,
 in the way the standard asks (SPEC.md, section 9), with the converter and the model's own
@@ -66,6 +66,7 @@ import threading
 import time
 from pathlib import Path, PurePosixPath
 
+from . import environment
 from .engine import (
     WORKSPACE,
     check_id,
@@ -131,14 +132,16 @@ FILE_KEYS = ("weights", "tokenizer", "template", "prompt", "calibration", "confo
 # torch comparison (source.export.verification) only: noulxp 0.4.0's compare_with_torch opens
 # its session with no thread count, which is one thread per host core on a pod (0.4.1's passes
 # the count NOULXP_THREADS gives it, THREAD_VARS, which this keeps). Installed before the
-# exporter is imported, and nothing unless LAYASTUDIO_THREADS (the step's own count: _child_env)
-# is a positive integer and noulxp 0.4's providers.ort_session exists. Only the install is
-# guarded: an error of the export or of a real session still fails the step.
+# exporter is imported, and nothing unless SYSTEMONE_STUDIO_THREADS, else LAYASTUDIO_THREADS
+# (the step's own count, under both names: _child_env) is a positive integer and noulxp 0.4's
+# providers.ort_session exists. Only the install is guarded: an error of the export or of a
+# real session still fails the step.
 ORT_THREADS = (
     "def _cap_ort_threads():\n"
     "    import os\n"
     "    try:\n"
-    "        n = int(os.environ.get('LAYASTUDIO_THREADS', ''))\n"
+    "        n = int(os.environ.get('SYSTEMONE_STUDIO_THREADS',"
+    " os.environ.get('LAYASTUDIO_THREADS', '')))\n"
     "    except ValueError:\n"
     "        return\n"
     "    if n <= 0:\n"
@@ -169,15 +172,16 @@ EXPORT = ORT_THREADS + (
 )
 CASES = re.compile(r"^\s*(\d+)/(\d+) cases\b")
 # The variables that cap a step process's BLAS and OpenMP threads (torch reads them at import),
-# LAYASTUDIO_THREADS, which the export's ORT_THREADS reads, and NOULXP_THREADS: noulxp 0.4.1
-# takes it as the count of anything it is not given one for (its exporters' graph-versus-torch
-# comparison: onnxruntime and torch alike), where it would otherwise read the container's quota
-# and run that comparison at N beside a recording. noulxp 0.4.0 does not read it.
+# SYSTEMONE_STUDIO_THREADS and its old name LAYASTUDIO_THREADS, which the export's ORT_THREADS
+# reads, and NOULXP_THREADS: noulxp 0.4.1 takes it as the count of anything it is not given
+# one for (its exporters' graph-versus-torch comparison: onnxruntime and torch alike), where it
+# would otherwise read the container's quota and run that comparison at N beside a recording.
+# noulxp 0.4.0 does not read it.
 THREAD_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
-    "LAYASTUDIO_THREADS",
+    *environment.names("THREADS"),
     "NOULXP_THREADS",
 )
 # Where the package's hashes are verified: once, by the check, on the final files.
@@ -416,17 +420,17 @@ def _child_env(threads=None):
     """A step process's environment: offline, unbuffered, naming this job (children.PARENT),
     and, with a thread count, the thread caps (THREAD_VARS) at that count. A cap the machine
     already sets wins (setdefault): report the effective values (thread_env), not the count
-    asked for. LAYASTUDIO_THREADS is the exception: the job's own was its budget
-    (runtime.cpu_budget), and a step's is always its own count (1 for an export beside the
-    recording). Only step processes get these; the job's own process (training, the GPU) keeps
-    its own."""
+    asked for. SYSTEMONE_STUDIO_THREADS and LAYASTUDIO_THREADS are the exception: the job's own
+    was its budget (runtime.cpu_budget), and a step's is always its own count (1 for an export
+    beside the recording), under both names. Only step processes get these; the job's own
+    process (training, the GPU) keeps its own."""
     from .children import child_env
 
     env = child_env({**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"})
     if threads:
         for name in THREAD_VARS:
             env.setdefault(name, str(int(threads)))
-        env["LAYASTUDIO_THREADS"] = str(int(threads))
+        env.update(environment.both("THREADS", int(threads)))
     return env
 
 
@@ -734,16 +738,18 @@ def conformance_gate(kind, test_rows, threads, free=None):
     own and need nothing from the export), with 3 threads or more and CONFORMANCE_MEMORY free
     (telemetry.available_memory: the page cache counts as free; `free` given, it is used
     instead). Anything else records after the export, as always: "kind", "test_rows",
-    "threads" or "memory" names the gate that decided. LAYASTUDIO_PARALLEL_CONFORMANCE=0
-    turns it off, =1 skips the thread and memory gates (tests). The build records it
+    "threads" or "memory" names the gate that decided. SYSTEMONE_STUDIO_PARALLEL_CONFORMANCE=0
+    (or LAYASTUDIO_PARALLEL_CONFORMANCE=0) turns it off, =1 skips the thread and memory gates
+    (tests), and "reason" names the variable. The build records it
     (steps.conformance.overlap_gate); it certifies nothing."""
     if kind not in ("laya", "julia"):
         return {"overlap": False, "reason": "kind"}
     if test_rows != 0:
         return {"overlap": False, "reason": "test_rows"}
-    flag = os.environ.get("LAYASTUDIO_PARALLEL_CONFORMANCE", "").strip()
+    flag = environment.get("PARALLEL_CONFORMANCE", "").strip()
     if flag in ("0", "1"):
-        return {"overlap": flag == "1", "reason": f"LAYASTUDIO_PARALLEL_CONFORMANCE={flag}"}
+        name = environment.source("PARALLEL_CONFORMANCE")
+        return {"overlap": flag == "1", "reason": f"{name}={flag}"}
     gate = {"overlap": False, "reason": "threads", "threads": threads}
     if threads < 3:
         return gate

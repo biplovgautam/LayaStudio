@@ -24,7 +24,7 @@ def julia_checkpoint(path, seed=3):
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import ModernBertConfig, ModernBertModel
 
-    from layastudio import julia
+    from systemone_studio import julia
 
     path = Path(path)
     (path / "encoder").mkdir(parents=True)

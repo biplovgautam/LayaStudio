@@ -11,7 +11,7 @@ import sys
 import pytest
 from common import QUESTIONS, make_rows
 
-from layastudio import datasets, engine
+from systemone_studio import datasets, engine
 
 
 def jsonl(rows):
@@ -20,7 +20,7 @@ def jsonl(rows):
 
 def test_nothing_heavy_is_imported():
     code = (
-        "import sys, layastudio.datasets\n"
+        "import sys, systemone_studio.datasets\n"
         "heavy = {'torch', 'mlx', 'numpy', 'transformers', 'laya_mlx', 'tokenizers'}\n"
         "print(sorted(heavy & {m.split('.')[0] for m in sys.modules}))\n"
     )

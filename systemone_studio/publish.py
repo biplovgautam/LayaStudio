@@ -1,7 +1,7 @@
 """Publish a fine-tuned run to Hugging Face, model card and all.
 
-    hf auth login                                     # once, with your own token
-    python -m layastudio.publish run:<id> --repo <you>/laya-snake-mlx
+    hf auth login                                         # once, with your own token
+    python -m systemone_studio.publish run:<id> --repo <you>/laya-snake-mlx
 
 The upload is the checkpoint System One Studio already wrote - FP16 safetensors with the original
 PyTorch parameter names, the tokenizer, the refitted calibration and the questions the
@@ -16,6 +16,7 @@ import argparse
 import json
 import sys
 
+from . import REPOSITORY
 from .engine import WORKSPACE, check_id, read_json, resolve_model_ref
 
 CARD = """---
@@ -28,14 +29,14 @@ tags:
 - mlx
 - apple-silicon
 - lora
-- layastudio
+- systemone-studio
 base_model: {base_repo}
 ---
 
 # {title}
 
 A [Laya](https://github.com/NandhaKishorM/laya) typed-decision model, fine-tuned with
-[System One Studio](https://github.com/biplovgautam/LayaStudio) on an Apple silicon Mac. It
+[System One Studio]({studio}) on an Apple silicon Mac. It
 answers the questions below in a single forward pass, with calibrated probabilities and
 **zero generated tokens**.
 
@@ -87,7 +88,7 @@ System One Studio can export it to ONNX.
 Apache-2.0. Laya and its pretrained weights are by
 [Convai Innovations](https://github.com/NandhaKishorM/laya); this checkpoint is a
 fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and published with
-[System One Studio](https://github.com/biplovgautam/LayaStudio).
+[System One Studio]({studio}).
 """
 
 
@@ -103,14 +104,14 @@ tags:
 - decision-model
 - lora
 - noulxp
-- layastudio
+- systemone-studio
 base_model: {base_repo}
 ---
 
 # {title}
 
 A [Julia 1](https://huggingface.co/SupersonicLabs/Julia-1) typed-decision model by Supersonic
-Labs, fine-tuned with [System One Studio](https://github.com/biplovgautam/LayaStudio). It answers
+Labs, fine-tuned with [System One Studio]({studio}). It answers
 the questions below in a single forward pass, with probabilities and **zero generated tokens**.
 
 Base model: `{base_repo}` · method: {method}, {objective} objective · trained in {minutes}
@@ -155,7 +156,7 @@ input, so changing them changes the task it was tuned for.
 Apache-2.0. Julia 1 and its pretrained weights are by
 [Supersonic Labs](https://huggingface.co/SupersonicLabs/Julia-1); this checkpoint is a
 fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and published with
-[System One Studio](https://github.com/biplovgautam/LayaStudio).
+[System One Studio]({studio}).
 """
 
 DECIDER_CARD = """---
@@ -168,14 +169,14 @@ tags:
 - decision-model
 - lora
 - noulxp
-- layastudio
+- systemone-studio
 base_model: {base_repo}
 ---
 
 # {title}
 
 A [Decider](https://huggingface.co/Mapika/decider-2b) typed-decision model by Mapika, fine-tuned
-with LoRA in [System One Studio](https://github.com/biplovgautam/LayaStudio) and merged into the
+with LoRA in [System One Studio]({studio}) and merged into the
 weights. It reads its answer from the option letters at an answer slot: no text is generated.
 
 Base model: `{base_repo}` · LoRA{variants}, {objective} objective · trained in {minutes} minutes on
@@ -218,7 +219,7 @@ input, so changing them changes the task it was tuned for.
 
 Apache-2.0. Decider and its weights are by [Mapika](https://github.com/Mapika/decider); this
 checkpoint is a fine-tune of `{base_repo}` and carries the same licence. Fine-tuned and
-published with [System One Studio](https://github.com/biplovgautam/LayaStudio).
+published with [System One Studio]({studio}).
 """
 
 
@@ -267,6 +268,7 @@ def build_card(run, training, comparison, repo, questions, kind="laya"):
     if kind == "decider":
         provenance["temperature_by_type"] = calibration.get("temperature_by_type")
     return template.format(
+        studio=REPOSITORY,
         title=run.get("name", "Laya fine-tune"),
         base_repo=base_repo,
         repo=repo,
