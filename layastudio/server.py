@@ -2463,7 +2463,7 @@ async function viewRun(id, _, token) {
     if (job.state === "running" && last) {
       const phaseMsg = events.filter(e => e.type === "phase").pop();
       let frac = null, detail = "";
-      if (last.type === "step") { frac = last.fraction ?? last.step / last.updates; detail = `update ${last.step}/${last.updates} · epoch ${last.epoch} · ${last.decisions_per_s} decisions/s · ${last.peak_gb} GB peak · ~${fmtTime(last.eta_s)} left`; }
+      if (last.type === "step") { frac = last.fraction ?? last.step / last.updates; detail = `update ${last.step}${last.step <= last.updates ? "/" + last.updates : ""} · epoch ${last.epoch} · ${last.decisions_per_s} decisions/s · ${last.peak_gb} GB peak · ~${fmtTime(last.eta_s)} left`; }
       else if (last.type === "progress") { frac = last.done / last.total; detail = `${last.done}/${last.total} rows${last.model ? " · " + modelName(last.model) : ""}`; }
       prog = `<div class="row" style="justify-content:space-between"><b>${esc(phaseMsg ? phaseMsg.message : "Starting")}</b><span class="muted">${esc(detail)}</span></div>${frac != null ? `<div class="bar" style="margin-top:8px"><i style="width:${(100 * frac).toFixed(1)}%"></i></div>` : ""}`;
     } else if (job.state === "failed" || job.state === "interrupted") prog = `<div class="notice bad"><b>Run ${esc(job.state)}.</b> ${esc(job.error || "")}</div>`;

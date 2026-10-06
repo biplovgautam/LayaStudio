@@ -83,9 +83,11 @@ exports/ (GGUF, MLX-LM) and card/, written once it trained (whether or not an ex
 
 Neither holds a row of the dataset or a path on the machine that trained.
 
-Training's "step" events (every trainer) carry the update, the epoch of epochs, and
+Training's "step" events (every trainer) carry the update (step), the epoch of epochs, and
 fraction: the share of the training done, which reaches 1 at the last update, with eta_s
-the seconds left at that pace.
+the seconds left at that pace. fraction is the progress to show. updates is the count
+planned before training, an estimate for Decider: it plans from one sample of the options
+and each epoch draws its own, so a run can end a few updates short of it or past it.
 
 The exit code, also the result's exit_code: 0 when it trained and made every export; 3
 (partial) when it trained but an export failed, which the result's failed_exports names (the
