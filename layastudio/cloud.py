@@ -61,9 +61,11 @@ The config, with paths relative to its own folder:
   cache_dir, relative to the config, else the environment's Hugging Face cache
   ($HF_HUB_CACHE, $HF_HOME/hub), which the pod agent points into the job's own folder. The
   run's jobs read the model there, offline. A "phase" event (download) comes before it; a
-  model that cannot be downloaded is refused (exit 2). path: and run: bases are used as
-  they are. The studio's Train button downloads nothing: a base model there is one this
-  machine has already.
+  model that cannot be downloaded is refused (exit 2). SIGTERM or Ctrl+C during the download
+  cancels the run at once (exit 143, the result file written): a download cannot be
+  interrupted, so it is left behind on its own thread and the process ends without waiting
+  for it. path: and run: bases are used as they are. The studio's Train button downloads
+  nothing: a base model there is one this machine has already.
 - A dataset file is a path, or {"path", "name", "sha256"}: name, the file's own name, whose
   extension chooses the reader (when it was saved under another); sha256, its bytes', which
   must match. expected: what the dataset was when it was checked: its rows per split, and its
@@ -118,6 +120,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -162,6 +165,8 @@ OUTPUTS = ("model", "noulxp", "exports", CARD)
 CARD_REPO = "<namespace>/<name>"
 # A commit on the Hugging Face hub: what a downloaded base model pins (hub:<repo>@<commit>).
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+# The thread a run from a file downloads its base model on (Headless.fetch).
+DOWNLOAD_THREAD = "layastudio-base-download"
 # What card/finetune.json keeps of the training summary (training.json): never a path.
 TRAINING_KEYS = (
     "train_decisions",
@@ -206,6 +211,12 @@ class Unavailable(Refused):
     """What this machine cannot make until something is installed. The server answers 409."""
 
 
+class Cancelled(BaseException):
+    """A run from a file cancelled (SIGTERM or Ctrl+C) while it downloads its base model:
+    Headless.fetch stops waiting for the download. A BaseException, as KeyboardInterrupt is,
+    so that no `except Exception` on its way turns it into a refusal or a failure."""
+
+
 # ----------------------------------------------------------------------------- the checks
 
 
@@ -235,17 +246,17 @@ def pinned(ref):
     return repo, revision
 
 
-def base_model(ref, workspace, download=False, cache_dir=None, emit=None):
+def base_model(ref, workspace, download=False, cache_dir=None, emit=None, fetch=None):
     """(checkpoint folder, kind) of a base model the studio may fine-tune, or Refused.
 
     download (a run from a file, this module's docstring): a hub: model must pin a commit,
     its licence is checked, and only then is it downloaded at that commit into cache_dir
-    (None: the environment's Hugging Face cache), emit announcing it. Otherwise only what is
-    on this machine is used."""
+    (None: the environment's Hugging Face cache), emit announcing it, fetch running the
+    download (engine.resolve_model_ref). Otherwise only what is on this machine is used."""
     if not isinstance(ref, str) or not ref:
         raise Refused("Choose a base model: hub:<repo>[@<revision>], path:<folder> or run:<id>")
-    fetch = download and ref.startswith("hub:")
-    if fetch:
+    downloads = download and ref.startswith("hub:")
+    if downloads:
         repo, commit = pinned(ref)
         check_licence(ref, workspace)  # before gigabytes are fetched for a run that is refused
         if emit is not None:
@@ -256,7 +267,11 @@ def base_model(ref, workspace, download=False, cache_dir=None, emit=None):
             )
     try:
         model_dir = engine.resolve_model_ref(
-            ref, workspace, allow_download=fetch, cache_dir=cache_dir if fetch else None
+            ref,
+            workspace,
+            allow_download=downloads,
+            cache_dir=cache_dir if downloads else None,
+            fetch=fetch if downloads else None,
         )
         kind = kinds.check(model_dir)
     except (FileNotFoundError, ValueError) as error:
@@ -544,6 +559,7 @@ def prepare_run(
     download=False,
     cache_dir=None,
     emit=None,
+    fetch=None,
 ):
     """Check one fine-tune and write its record, runs/<id>/run.json. Nothing is written for a
     run that is refused.
@@ -553,8 +569,8 @@ def prepare_run(
     paths are relative to; only a run from a file may bring its own dataset files.
     download: a cloud run's (run() passes it): a hub: base model must pin a commit, and is
     downloaded at it into cache_dir (None: the environment's Hugging Face cache), emit (a
-    Printer) saying so first. The Train button's runs leave it off: a base model is one this
-    machine has.
+    Printer) saying so first, fetch (Headless.fetch) running the download. The Train button's
+    runs leave it off: a base model is one this machine has.
 
     Returns {"run_id", "name", "kind", "job" (the train job's spec), "exports" (the export
     jobs' specs), "dataset" (its meta), "hyperparameters", "ignored", "warnings", "run"}.
@@ -566,7 +582,7 @@ def prepare_run(
         spec.get("dataset"), workspace, base, spec.get("limits")
     )
     ref = spec.get("base_model")
-    _, kind = base_model(ref, workspace, download, cache_dir, emit)
+    _, kind = base_model(ref, workspace, download, cache_dir, emit, fetch)
     hp, overrides, ignored = hyperparameters(kind, spec.get("hyperparameters"), spec.get("bounds"))
     warnings = check_decisions(kind, questions, rows)
     if ignored:
@@ -701,7 +717,8 @@ class Headless:
     """One prepared run's jobs, one after another, each a child process whose events are
     forwarded as they are written. SIGTERM or Ctrl+C cancels the job that is running (SIGTERM,
     then SIGKILL after 30 s) and starts no other. A child is never left running: whatever
-    ends the following of its events, it is stopped and waited for."""
+    ends the following of its events, it is stopped and waited for. Before the jobs, the base
+    model's download (fetch): a cancel stops the waiting for it at once."""
 
     KILL_AFTER = 30
 
@@ -725,6 +742,32 @@ class Headless:
         self.cancelled = True
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()
+
+    def fetch(self, download):
+        """download() (the base model's, engine.resolve_model_ref) on a thread of its own,
+        waited for until it ends or the run is cancelled; then Cancelled, at once. Nothing
+        stops a download from outside: huggingface_hub's worker threads finish the file they
+        are on, gigabytes for a checkpoint. So the thread is left behind (a daemon), and
+        main() ends the process without waiting for it once the run has said how it ended."""
+        if self.cancelled:  # during the checks: nothing is fetched for a run that is over
+            raise Cancelled
+        done = {}
+
+        def work():
+            try:
+                done["path"] = download()
+            except BaseException as error:  # noqa: BLE001 - raised again on the run's thread
+                done["error"] = error
+
+        thread = threading.Thread(target=work, name=DOWNLOAD_THREAD, daemon=True)
+        thread.start()
+        while thread.is_alive():
+            if self.cancelled:
+                raise Cancelled
+            thread.join(0.2)
+        if "error" in done:
+            raise done["error"]
+        return done["path"]
 
     def stage(self, stage, kind, spec, job_id, title):
         """Run one job. {"stage", "job", "state", "seconds", "result", "error"}"""
@@ -966,9 +1009,13 @@ def _run(config, workspace, runner, emit, outcome, finish):
             download=True,
             cache_dir=runner.cache_dir,
             emit=emit,
+            fetch=runner.fetch,
         )
     except Refused as error:
         return refuse(str(error))
+    except Cancelled:
+        message = "Cancelled while the base model was downloading"
+        return finish("cancelled", 143, error={"stage": "prepare", "message": message})
     except KeyboardInterrupt:
         return finish("cancelled", 143, error={"stage": "prepare", "message": "Cancelled"})
     except Exception as error:  # noqa: BLE001 - the result file says what went wrong
@@ -1091,7 +1138,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     workspace = args.workspace.expanduser().resolve() if args.workspace else None
-    return run(args.config, workspace, args.result)
+    code = run(args.config, workspace, args.result)
+    if any(t.name == DOWNLOAD_THREAD and t.is_alive() for t in threading.enumerate()):
+        # Cancelled during the base model's download, which goes on (Headless.fetch), and the
+        # interpreter's exit would wait for huggingface_hub's worker threads to finish their
+        # files. The run has written its result and its last event: the process ends now.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+    return code
 
 
 if __name__ == "__main__":

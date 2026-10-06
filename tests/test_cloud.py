@@ -10,6 +10,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -464,6 +466,38 @@ def test_a_file_is_read_as_its_bytes_and_by_its_own_name(context, tmp_path):
 # ----------------------------------------------------------------------------- jobs
 
 
+# llama.cpp's converter as far as its imports go: its own conversion/ package and gguf-py.
+CONVERTER = """
+import json, sys
+import conversion, gguf
+out = sys.argv[sys.argv.index("--outfile") + 1]
+with open(out, "wb") as handle:
+    handle.write(b"GGUF" + json.dumps(sys.path).encode())
+"""
+
+
+def test_the_converter_finds_its_own_modules_with_pythonsafepath(tmp_path, monkeypatch):
+    """The trainer image sets PYTHONSAFEPATH=1, which keeps a script's own folder off the
+    import path: the converter's conversion/ package comes from PYTHONPATH, and the current
+    folder is not on its path."""
+    from layastudio import gguf
+
+    tool = tmp_path / "tool"
+    for package in ("conversion", "gguf-py/gguf"):
+        (tool / package).mkdir(parents=True)
+        (tool / package / "__init__.py").write_text("")
+    (tool / "convert_hf_to_gguf.py").write_text(CONVERTER)
+    monkeypatch.setattr(gguf, "converter", lambda *args, **kwargs: tool)
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    (tmp_path / "here").mkdir()
+    monkeypatch.chdir(tmp_path / "here")
+    out = gguf.convert(tmp_path / "model", tmp_path / "out" / "model.gguf", "bf16")
+    path = json.loads(out.read_bytes()[4:])
+    assert path[:2] == [str(tool), str(tool / "gguf-py")]
+    assert str(tmp_path / "here") not in path and os.getcwd() not in path
+
+
 def test_an_export_job_passes_the_gguf_choice_on(tmp_path, monkeypatch):
     """A Decider package's GGUF (bf16 or q8_0) reaches the export from a job's spec."""
     import layastudio.export
@@ -898,10 +932,12 @@ class FakeHub:
     """huggingface_hub.snapshot_download with no network. A lookup in the cache
     (local_files_only) is the real one; a download writes a checkpoint of the kind into the
     cache as a download by commit leaves it (snapshots/<commit>), or raises `fail`. Every
-    call is kept."""
+    call is kept. With `hold` (an Event), a download sets `downloading` and then waits for
+    it (60 s at most), as a big file on a slow link does."""
 
     def __init__(self, real):
         self.real, self.fail, self.files, self.calls = real, None, None, []
+        self.hold, self.downloading = None, threading.Event()
 
     def __call__(self, repo, revision=None, allow_patterns=None, cache_dir=None, **options):
         import huggingface_hub.constants
@@ -918,6 +954,9 @@ class FakeHub:
         )
         if local:
             return self.real(repo, revision=revision, cache_dir=cache_dir, **options)
+        self.downloading.set()
+        if self.hold is not None:
+            self.hold.wait(60)
         if self.fail is not None:
             raise self.fail
         cache = Path(cache_dir or huggingface_hub.constants.HF_HUB_CACHE)
@@ -1102,3 +1141,115 @@ def test_a_run_file_trains_a_hub_base_from_its_own_cache(tmp_path):
     record = json.loads((run_dir / "card/finetune.json").read_text())
     assert record["base_model"]["repo"] == "SupersonicLabs/Julia-1"
     assert record["base_model"]["revision"] == COMMIT
+
+
+def test_a_cancel_during_the_base_download_ends_the_run_at_once(tmp_path, hub):
+    """SIGTERM while the base model downloads (no job is running yet): the run stops waiting
+    for the download at once, which goes on, left behind on its thread, and ends cancelled
+    (143) with its result file and last event; nothing is written for the run."""
+    hub.hold = threading.Event()
+    ref = f"hub:aac6fef/laya-mlx@{COMMIT}"
+    config, _ = write_run(tmp_path / "run", ref, cache_dir="cache")
+
+    def cancel():
+        if hub.downloading.wait(60):
+            os.kill(os.getpid(), signal.SIGTERM)  # cloud.run's handler: Headless.cancel
+
+    threading.Thread(target=cancel, daemon=True).start()
+    before = signal.getsignal(signal.SIGTERM)
+    out = io.StringIO()
+    began = time.monotonic()
+    try:
+        code = cloud.run(config, stream=out)
+        seconds = time.monotonic() - began
+        downloading = [t for t in threading.enumerate() if t.name == cloud.DOWNLOAD_THREAD]
+    finally:
+        hub.hold.set()  # the download "finishes" behind the run's back
+    assert code == 143 and seconds < 10  # not the 60 s the download is held for
+    assert [t.is_alive() for t in downloading] == [True]  # left behind, never waited for
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["type"] for e in events] == ["phase", "finished"]
+    message = "Cancelled while the base model was downloading"
+    assert events[1] == {
+        **events[1],
+        "state": "cancelled",
+        "exit_code": 143,
+        "error": {"stage": "prepare", "message": message},
+    }
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "cancelled" and result["exit_code"] == 143
+    assert result["error"] == {"stage": "prepare", "message": message}
+    assert len(hub.downloads) == 1 and not (tmp_path / "run/ws/runs").exists()
+    assert signal.getsignal(signal.SIGTERM) == before  # the caller's handler is back
+
+
+def test_a_cancel_during_the_checks_downloads_nothing(tmp_path, monkeypatch, hub):
+    """SIGTERM while the dataset is checked, before the download: nothing is fetched for a run
+    that is already over."""
+    checks = cloud.dataset
+
+    def signalled(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return checks(*args, **kwargs)
+
+    monkeypatch.setattr(cloud, "dataset", signalled)
+    config, _ = write_run(tmp_path / "run", f"hub:aac6fef/laya-mlx@{COMMIT}")
+    assert cloud.run(config, stream=io.StringIO()) == 143
+    assert hub.downloads == [] and not (tmp_path / "run/ws/runs").exists()
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "cancelled" and result["error"]["stage"] == "prepare"
+
+
+# `layastudio train` (cloud.main) with a hub whose download never ends, as a checkpoint's
+# gigabytes on a slow link: on worker threads of a pool, as huggingface_hub downloads, which
+# the interpreter's exit waits for. The cache lookup finds nothing.
+ENDLESS_DOWNLOAD = """
+import json, sys, time
+from concurrent.futures import ThreadPoolExecutor
+import huggingface_hub
+
+def snapshot_download(repo, revision=None, local_files_only=False, **options):
+    if local_files_only:
+        raise FileNotFoundError("not in the cache")
+    print(json.dumps({"t": 0, "type": "test", "message": "downloading"}), flush=True)
+    with ThreadPoolExecutor(2) as pool:
+        pool.submit(time.sleep, 600).result()
+
+huggingface_hub.snapshot_download = snapshot_download
+from layastudio.cloud import main
+sys.exit(main(sys.argv[1:]))
+"""
+
+
+def test_a_cancelled_download_ends_the_process_at_once(tmp_path):
+    """As the pod agent stops a run: SIGTERM to `layastudio train` while its base model
+    downloads. The process exits 143 within seconds, its result file written, instead of
+    downloading on until the agent's SIGKILL 30 s later, with no result."""
+    config, _ = write_run(tmp_path / "run", f"hub:aac6fef/laya-mlx@{COMMIT}", cache_dir="cache")
+    process = subprocess.Popen(
+        [sys.executable, "-c", ENDLESS_DOWNLOAD, "--config", str(config)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=str(engine.PACKAGE.parent),
+    )
+    try:
+        seen = []
+        for line in process.stdout:
+            seen.append(json.loads(line))
+            if seen[-1]["type"] == "test":  # the download has started
+                break
+        assert [e["type"] for e in seen] == ["phase", "test"]
+        began = time.monotonic()
+        process.send_signal(signal.SIGTERM)
+        rest, stderr = process.communicate(timeout=60)
+        seconds = time.monotonic() - began
+    finally:
+        process.kill()
+        process.wait()
+    assert process.returncode == 143, stderr[-3000:]
+    assert seconds < 15
+    last = json.loads(rest.splitlines()[-1])
+    assert last == {**last, "type": "finished", "state": "cancelled", "exit_code": 143}
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "cancelled" and result["error"]["stage"] == "prepare"

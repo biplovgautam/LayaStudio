@@ -514,9 +514,10 @@ base must be pinned to a commit, `hub:<repo>@<40-hex commit>` (a branch or tag i
 it can move between the platform's check and the GPU), its licence is checked first, and the
 files its kind needs are downloaded at that commit into the run's cache (`cache_dir` in the
 config, else `$HF_HUB_CACHE` / `$HF_HOME/hub`), where the training jobs read it offline. Its
-card and NoulXP package name that revision. A local folder (`path:`) or an earlier run (`run:`)
-is used as it is. The Train button downloads nothing: there, a base model is one this machine
-already has.
+card and NoulXP package name that revision. SIGTERM or Ctrl+C during the download cancels the
+run at once (143, its result file written): the download is left behind and the process ends
+without waiting for it. A local folder (`path:`) or an earlier run (`run:`) is used as it is.
+The Train button downloads nothing: there, a base model is one this machine already has.
 
 ## Privacy and security
 

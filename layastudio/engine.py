@@ -264,7 +264,7 @@ def hub_parts(value):
     return repo, revision or None
 
 
-def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=None):
+def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=None, fetch=None):
     """'hub:<repo>[@<revision>]', 'run:<id>' or 'path:<dir>' -> local checkpoint directory.
 
     The folder must be a complete checkpoint of a kind the studio trains (kinds.py): Laya,
@@ -275,7 +275,9 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=
     Only the Hugging Face cache is read, unless allow_download (a cloud run's base model,
     cloud.py): then a complete copy in the cache is used as it is, and otherwise the files the
     kind needs are downloaded. cache_dir: the cache read and filled (default: the
-    environment's, $HF_HUB_CACHE or $HF_HOME/hub)."""
+    environment's, $HF_HUB_CACHE or $HF_HOME/hub). fetch(download), when given, runs the
+    download and returns what it returns: a cloud run waits for it on a thread that a cancel
+    can leave behind (cloud.Headless.fetch)."""
     from . import kinds
 
     kind, _, value = str(ref).partition(":")
@@ -309,7 +311,7 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=
             path = None
         if allow_download and not _complete(path):
             try:
-                path = snapshot(local=False)
+                path = (fetch or _call)(lambda: snapshot(local=False))
             except Exception as error:
                 raise FileNotFoundError(
                     f"{value} could not be downloaded: {_first_line(error)}"
@@ -318,6 +320,10 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=
         raise ValueError(f"Unknown model reference {ref!r}")
     kinds.check(path)
     return path
+
+
+def _call(function):
+    return function()
 
 
 def _complete(path):

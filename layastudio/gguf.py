@@ -103,9 +103,14 @@ def convert(model_dir, out_file, precision="bf16", workspace=WORKSPACE, emit=Non
     tool = converter(workspace, emit)
     out_file = Path(out_file)
     out_file.parent.mkdir(parents=True, exist_ok=True)
+    # The converter imports its own conversion/ package and gguf-py: both on PYTHONPATH, since
+    # its folder is on the path only when Python adds a script's own, which -P and
+    # PYTHONSAFEPATH (the trainer image's) turn off. No empty entry: Python reads one as the
+    # current folder.
+    path = [str(tool), str(tool / "gguf-py"), *os.environ.get("PYTHONPATH", "").split(os.pathsep)]
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(tool / "gguf-py"), os.environ.get("PYTHONPATH", "")]),
+        "PYTHONPATH": os.pathsep.join(entry for entry in path if entry),
         "HF_HUB_OFFLINE": "1",
         "PYTHONUNBUFFERED": "1",
         "NO_LOCAL_GGUF": "",
