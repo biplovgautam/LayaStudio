@@ -12,11 +12,19 @@ because both write the upstream PyTorch parameter names.
 
 $LAYASTUDIO_BACKEND (mlx | torch) and $LAYASTUDIO_DEVICE (cuda, mps, xpu, cpu, ...)
 override the choice.
+
+cpu_threads() is how many CPU threads a CPU-bound step (a NoulXP package's steps, a GGUF's
+readout) should use here: a container's CPU quota (cgroup cpu.max) when it has one, so the
+steps neither oversubscribe the quota nor leave it idle. $LAYASTUDIO_THREADS overrides it.
 """
 
 import importlib.util
+import math
 import os
 import platform
+import subprocess
+import sys
+from pathlib import Path, PurePosixPath
 
 
 def _has(module):
@@ -212,3 +220,155 @@ def describe():
     elif info["backend"] == "mlx":
         info["device"] = "Apple MLX (Metal)"
     return info
+
+
+# ----------------------------------------------------------------------------- CPU threads
+
+CGROUP = "/sys/fs/cgroup"
+PROC_CGROUP = "/proc/self/cgroup"
+MAX_THREADS = 32
+# Without a quota: today's default for the check (noulxp: min(8, CPUs)). A machine's CPU count
+# also counts hyperthreads and, on a Mac, efficiency cores, and a host can hold its quota in a
+# parent cgroup a container cannot see: more threads there is no faster, often slower.
+UNQUOTED_THREADS = 8
+_warned = set()
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, ValueError):  # missing, unreadable, or not text
+        return None
+
+
+def _warn_once(message):
+    if message not in _warned:
+        _warned.add(message)
+        print(message, file=sys.stderr)
+
+
+def _cgroups(proc=PROC_CGROUP):
+    """{controller: path} of this process from /proc/self/cgroup; "" for cgroup v2's line
+    ("0::<path>"). Empty when there is no such file (macOS, Windows)."""
+    found = {}
+    for line in (_read(proc) or "").splitlines():
+        parts = line.strip().split(":", 2)
+        if len(parts) != 3:
+            continue
+        number, controllers, path = parts
+        if number == "0" and not controllers:
+            found[""] = path
+        for controller in filter(None, controllers.split(",")):
+            found[controller] = path
+    return found
+
+
+def _inside(root, path):
+    """root/<path>, never above root: a path with "..", as a cgroup outside the container's
+    namespace shows, is root itself."""
+    parts = PurePosixPath(path or "/").parts
+    if ".." in parts:
+        return Path(root)
+    return Path(root).joinpath(*[p for p in parts if p not in ("/", ".")])
+
+
+def _v2_quota(root, path):
+    """The smallest cgroup v2 cpu.max quota, in CPUs, from the process's own cgroup up to the
+    root; None when no level limits it ("max")."""
+    root = Path(root)
+    folder, best = _inside(root, path), None
+    while True:
+        fields = (_read(folder / "cpu.max") or "").split()
+        if fields and fields[0] != "max":
+            try:
+                quota = int(fields[0])
+                period = int(fields[1]) if len(fields) > 1 else 100000
+            except ValueError:
+                quota = period = 0
+            if quota > 0 and period > 0:
+                best = quota / period if best is None else min(best, quota / period)
+        if folder == root or root not in folder.parents:
+            return best
+        folder = folder.parent
+
+
+def _v1_quota(root, path):
+    """cgroup v1's cpu.cfs_quota_us / cpu.cfs_period_us, in CPUs; None when unlimited (-1)."""
+    best = None
+    for mount in ("cpu", "cpu,cpuacct"):
+        folders = [Path(root) / mount]
+        if path and path != "/":
+            folders.insert(0, _inside(Path(root) / mount, path))
+        for folder in folders:
+            try:
+                quota = int((_read(folder / "cpu.cfs_quota_us") or "").strip())
+                period = int((_read(folder / "cpu.cfs_period_us") or "").strip())
+            except ValueError:
+                continue
+            if quota > 0 and period > 0:
+                best = quota / period if best is None else min(best, quota / period)
+    return best
+
+
+def affinity():
+    """CPUs this process may run on."""
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def _unquoted():
+    """Threads where no quota is found (see UNQUOTED_THREADS): the affinity on Linux, a Mac's
+    performance cores, capped at 8."""
+    if hasattr(os, "sched_getaffinity"):
+        return max(1, min(UNQUOTED_THREADS, affinity()))
+    if platform.system() == "Darwin":
+        try:
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.perflevel0.physicalcpu"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            cores = int(out.stdout.strip())
+            if cores > 0:
+                return min(UNQUOTED_THREADS, cores)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return max(1, min(UNQUOTED_THREADS, os.cpu_count() or 1))
+
+
+def cpu_budget(root=CGROUP, proc=PROC_CGROUP, environ=None):
+    """{"threads", "quota", "source", "affinity"}: the threads a CPU-bound step uses here.
+
+    In order: $LAYASTUDIO_THREADS (a positive integer; anything else is ignored, said once);
+    the container's quota, cgroup v2 cpu.max (the smallest from this process's cgroup up to
+    the root) or cgroup v1's cfs quota, floored (8.5 CPUs gives 8, under 1 gives 1), no more
+    than the CPUs this process may run on, and at most 32; else min(8, CPUs) (see
+    UNQUOTED_THREADS). quota is the raw quota in CPUs, or None. Never raises."""
+    environ = os.environ if environ is None else environ
+    cpus = affinity()
+    raw = str(environ.get("LAYASTUDIO_THREADS", "") or "").strip()
+    if raw:
+        try:
+            wanted = int(raw)
+        except ValueError:
+            wanted = 0
+        if wanted > 0:
+            return {"threads": wanted, "quota": None, "source": "env", "affinity": cpus}
+        _warn_once(f"LAYASTUDIO_THREADS={raw!r} is not a positive integer; ignored")
+    paths = _cgroups(proc)
+    quota, source = _v2_quota(root, paths.get("", "/")), "cgroup2"
+    if quota is None:
+        quota, source = _v1_quota(root, paths.get("cpu") or paths.get("cpuacct")), "cgroup1"
+    if quota is None:
+        return {"threads": _unquoted(), "quota": None, "source": "fallback", "affinity": cpus}
+    threads = max(1, min(math.floor(quota), cpus, MAX_THREADS))
+    return {"threads": threads, "quota": round(quota, 4), "source": source, "affinity": cpus}
+
+
+def cpu_threads(**kwargs):
+    """The threads a CPU-bound step uses here (cpu_budget)."""
+    return cpu_budget(**kwargs)["threads"]
