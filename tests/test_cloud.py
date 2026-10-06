@@ -768,6 +768,28 @@ def test_a_job_is_never_left_running(tmp_path, monkeypatch):
     assert result["state"] == "failed" and result["error"]["stage"] == "run"
 
 
+def decider_tokenizer():
+    """Decider's real tokenizer in the Hugging Face cache (as test_decider.py finds it)."""
+    return Path(
+        os.environ.get(
+            "DECIDER_TOKENIZER",
+            Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface"))
+            / "hub/models--Mapika--decider-2b/snapshots/533964dae8be954c5b5e19fa4948e48408094c1e",
+        )
+    )
+
+
+def gguf_ready():
+    """Whether a Decider run's NoulXP package can be built here: llama-cpp-python, the
+    converter's tools folder and a tokenizer it knows."""
+    found = __import__("importlib").util.find_spec
+    return bool(
+        found("llama_cpp")
+        and os.environ.get("LAYASTUDIO_TOOLS")
+        and (decider_tokenizer() / "tokenizer.json").is_file()
+    )
+
+
 def tiny_base(kind, folder):
     """A tiny random base checkpoint of a kind, and the environment its run trains in: the
     CPU through PyTorch when this machine has the PyTorch stack, else MLX."""
@@ -778,7 +800,10 @@ def tiny_base(kind, folder):
             pytest.skip("Decider trains through PyTorch and PEFT here")
         import tiny
 
-        path = tiny.decider_checkpoint(folder / "decider")
+        # llama.cpp's converter knows Qwen's real tokenizer only: with it, where the GGUF
+        # tooling is here, the run's NoulXP package can be built.
+        real = decider_tokenizer() if gguf_ready() else None
+        path = tiny.decider_checkpoint(folder / "decider", tokenizer_dir=real)
         return f"path:{path}", {"LAYASTUDIO_BACKEND": "torch", "LAYASTUDIO_DEVICE": "cpu"}
     if kind == "julia":
         if not has_torch:
@@ -815,7 +840,7 @@ def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
     from layastudio import noulxp_package
 
     ref, env = tiny_base(kind, tmp_path / "models")
-    packaged = noulxp_package.missing_tooling(kind) is None
+    packaged = noulxp_package.missing_tooling(kind) is None and (kind != "decider" or gguf_ready())
     exports = [{"target": "noulxp"}] if packaged else []
     # Without a package the run keeps its checkpoint, or its card would be all it keeps.
     config, checked = write_run(
