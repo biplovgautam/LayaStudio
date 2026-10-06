@@ -496,6 +496,23 @@ def make_batches(items, batch_size, rng, shuffle=True):
     return batches
 
 
+def progress(epoch, done, this_epoch, epochs):
+    """The share of training done after `done` of this epoch's `this_epoch` updates, the
+    earlier epochs whole: every trainer's step events carry it (fraction), and it reaches 1 at
+    the last update whatever the epochs' batch counts were. The time left follows from it."""
+    return min(1.0, (epoch - 1 + done / max(1, this_epoch)) / max(1, epochs))
+
+
+def step_progress(epoch, done, this_epoch, epochs, elapsed):
+    """The step event's progress fields: {"epochs", "fraction", "eta_s"}."""
+    share = progress(epoch, done, this_epoch, epochs)
+    return {
+        "epochs": epochs,
+        "fraction": round(share, 4),
+        "eta_s": round(elapsed * (1 - share) / share) if share > 0 else None,
+    }
+
+
 def collate(items, pad_id, multiple=16):
     import mlx.core as mx
     import numpy as np
@@ -1108,7 +1125,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
         sigma[0] = 0.4 + (0.1 - 0.4) * ((epoch - 1) / max(1, hp["epochs"] - 1))
         items, _ = encode(tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights)
         batches = make_batches(items, hp["batch_size"], rng)
-        accum, count, running = None, 0, []
+        accum, count, running, done = None, 0, [], 0
+        this_epoch = math.ceil(len(batches) / hp["grad_accum"])
         for i, indices in enumerate(batches):
             batch = collate([items[j] for j in indices], tok.pad_token_id)
             (loss, ce), grads = loss_and_grad(model, batch)
@@ -1124,7 +1142,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                 accum, norm = optim.clip_grad_norm(accum, hp["max_grad_norm"])
                 optimizer.update(model, accum)
                 mx.eval(model.parameters(), optimizer.state, running)
-                step += 1
+                step, done = step + 1, done + 1
                 elapsed = time.perf_counter() - started
                 emit(
                     "step",
@@ -1135,8 +1153,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                     ce=sum(x.item() for x in running[1::2]) / count,
                     grad_norm=norm.item(),
                     decisions_per_s=round(seen / elapsed, 2),
-                    eta_s=round((updates - step) * elapsed / step),
                     peak_gb=round(mx.get_peak_memory() / 2**30, 2),
+                    **step_progress(epoch, done, this_epoch, hp["epochs"], elapsed),
                 )
                 accum, count, running = None, 0, []
         val_loss, val_acc = val_metrics()

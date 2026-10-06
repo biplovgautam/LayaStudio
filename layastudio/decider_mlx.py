@@ -31,6 +31,7 @@ from .engine import (
     lora_variants,
     now,
     resolve_model_ref,
+    step_progress,
     write_json,
 )
 
@@ -250,7 +251,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     val_rows = [r for r in rows if r["split"] == "val"]
     weights = class_weights(train_rows, questions) if hp["class_weighting"] == "balanced" else None
     val_items, _ = decider.encode_items(prompter, val_rows, questions, hp=hp)
-    probe, skipped = decider.encode_items(prompter, train_rows, questions, hp=hp)
+    probe, skipped = decider.training_probe(prompter, train_rows, questions, hp)
     if not probe:
         raise ValueError("No training rows could be built in Decider's prompt")
     if before_model:
@@ -323,7 +324,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
             prompter, train_rows, questions, rng, hp["shuffle_options"], weights, hp
         )
         batches = decider.token_batches(items, hp["batch_size"], hp["batch_tokens"], rng)
-        accum, count, running = None, 0, []
+        accum, count, running, done = None, 0, [], 0
+        this_epoch = math.ceil(len(batches) / hp["grad_accum"])
         for i, indices in enumerate(batches):
             (loss, ce), grads = loss_and_grad(model, collate([items[j] for j in indices], pad_id))
             accum = grads if accum is None else tree_map(mx.add, accum, grads)
@@ -336,7 +338,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                 accum, norm = optim.clip_grad_norm(accum, hp["max_grad_norm"])
                 optimizer.update(model, accum)
                 mx.eval(model.parameters(), optimizer.state, running)
-                step += 1
+                step, done = step + 1, done + 1
                 elapsed = time.perf_counter() - started
                 emit(
                     "step",
@@ -347,8 +349,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                     ce=sum(x.item() for x in running[1::2]) / count,
                     grad_norm=norm.item(),
                     decisions_per_s=round(seen / elapsed, 2),
-                    eta_s=round((updates - step) * elapsed / step),
                     peak_gb=round(mx.get_peak_memory() / 2**30, 2),
+                    **step_progress(epoch, done, this_epoch, hp["epochs"], elapsed),
                 )
                 accum, count, running = None, 0, []
         val_loss, val_acc, _ = evaluate_rows(model, val_items, letters, pad_id)

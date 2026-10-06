@@ -32,6 +32,7 @@ from .engine import (
     lora_variants,
     now,
     resolve_model_ref,
+    step_progress,
     write_json,
 )
 
@@ -278,7 +279,7 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
     val_rows = [r for r in rows if r["split"] == "val"]
     weights = class_weights(train_rows, questions) if hp["class_weighting"] == "balanced" else None
     val_items, _ = decider.encode_items(prompter, val_rows, questions, hp=hp)
-    probe, skipped = decider.encode_items(prompter, train_rows, questions, hp=hp)
+    probe, skipped = decider.training_probe(prompter, train_rows, questions, hp)
     if not probe:
         raise ValueError("No training rows could be built in Decider's prompt")
     if before_model:
@@ -334,7 +335,8 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
             prompter, train_rows, questions, rng, hp["shuffle_options"], weights, hp
         )
         batches = decider.token_batches(items, hp["batch_size"], hp["batch_tokens"], rng)
-        count, running = 0, []
+        count, running, done = 0, [], 0
+        this_epoch = math.ceil(len(batches) / hp["grad_accum"])
         optimizer.zero_grad(set_to_none=True)
         for i, indices in enumerate(batches):
             chunk = [items[j] for j in indices]
@@ -353,7 +355,7 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-                step += 1
+                step, done = step + 1, done + 1
                 elapsed = time.perf_counter() - started
                 emit(
                     "step",
@@ -364,8 +366,8 @@ def torch_fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                     ce=sum(running[1::2]) / count,
                     grad_norm=float(norm),
                     decisions_per_s=round(seen / elapsed, 2),
-                    eta_s=round((updates - step) * elapsed / step),
                     peak_gb=round(peak_memory_gb(torch, device), 2),
+                    **step_progress(epoch, done, this_epoch, hp["epochs"], elapsed),
                 )
                 count, running = 0, []
         val_loss, val_acc, _ = evaluate_rows(model, val_items, label_ids, pad_id, device)

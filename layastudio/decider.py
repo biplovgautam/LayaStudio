@@ -327,6 +327,22 @@ def _renormalised(target):
     return [t / total for t in target] if total > 0 else target
 
 
+def training_probe(prompter, rows, questions, hp):
+    """The training rows encoded as an epoch encodes them: options shuffled, and at most
+    max_train_options of them, when shuffle_options is on. Its batches are the updates an
+    epoch takes, which the schedule and the progress count. Rows encoded with every option
+    are longer, and where batch_tokens limits the batches they made more of them (with
+    Decider's tokenizer, 69 batches for an epoch's 60 on 77 options and 400-word texts; half
+    again as many with a small batch_tokens): training ended short of the end of its cosine
+    decay, and its progress short of 100%. Its own generator: the training's shuffles are
+    untouched."""
+    import random
+
+    return encode_items(
+        prompter, rows, questions, random.Random(hp["seed"]), hp["shuffle_options"], None, hp
+    )
+
+
 def token_batches(items, batch_size, batch_tokens, rng, shuffle=True):
     """Length-bucketed batches of at most batch_size rows and batch_tokens padded tokens."""
     order = list(range(len(items)))

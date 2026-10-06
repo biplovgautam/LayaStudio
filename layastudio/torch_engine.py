@@ -42,6 +42,7 @@ from .engine import (
     now,
     resolve_model_ref,
     safetensors_header,
+    step_progress,
     upstream_name,
     write_json,
 )
@@ -558,7 +559,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
         sigma = 0.4 + (0.1 - 0.4) * ((epoch - 1) / max(1, hp["epochs"] - 1))
         items, _ = encode(tok, cfg, train_rows, questions, rng, hp["shuffle_options"], weights)
         batches = make_batches(items, hp["batch_size"], rng)
-        count, running = 0, []
+        count, running, done = 0, [], 0
+        this_epoch = math.ceil(len(batches) / hp["grad_accum"])
         optimizer.zero_grad(set_to_none=True)
         for i, indices in enumerate(batches):
             batch = collate([items[j] for j in indices], tok.pad_token_id, device)
@@ -575,7 +577,7 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-                step += 1
+                step, done = step + 1, done + 1
                 elapsed = time.perf_counter() - started
                 emit(
                     "step",
@@ -586,8 +588,8 @@ def fit(spec, hp, emit, workspace=WORKSPACE, before_model=None):
                     ce=sum(running[1::2]) / count,
                     grad_norm=float(norm),
                     decisions_per_s=round(seen / elapsed, 2),
-                    eta_s=round((updates - step) * elapsed / step),
                     peak_gb=round(peak_memory_gb(torch, device), 2),
+                    **step_progress(epoch, done, this_epoch, hp["epochs"], elapsed),
                 )
                 count, running = 0, []
         val_loss, val_acc = val_metrics()

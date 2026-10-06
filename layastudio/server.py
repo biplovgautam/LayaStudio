@@ -1929,7 +1929,7 @@ async function refresh() {
   if (active) {
     const last = active.last || {};
     let p = "running";
-    if (last.type === "step" && last.updates) p = `${Math.round(100 * last.step / last.updates)}%`;
+    if (last.type === "step" && last.updates) p = `${Math.round(100 * (last.fraction ?? last.step / last.updates))}%`;
     else if (last.type === "progress" && last.total) p = `${Math.round(100 * last.done / last.total)}%`;
     const href = active.kind === "train" ? "#/runs/" + encodeURIComponent(active.id) : "#/jobs/" + encodeURIComponent(active.id);
     chip.innerHTML = `<a class="jobchip" href="${esc(href)}" title="${esc(active.title)} · open it"><span class="dot"></span><span class="jt">${esc(active.title)}</span><span class="jp">${esc(p)}</span></a>`;
@@ -2463,7 +2463,7 @@ async function viewRun(id, _, token) {
     if (job.state === "running" && last) {
       const phaseMsg = events.filter(e => e.type === "phase").pop();
       let frac = null, detail = "";
-      if (last.type === "step") { frac = last.step / last.updates; detail = `update ${last.step}/${last.updates} · epoch ${last.epoch} · ${last.decisions_per_s} decisions/s · ${last.peak_gb} GB peak · ~${fmtTime(last.eta_s)} left`; }
+      if (last.type === "step") { frac = last.fraction ?? last.step / last.updates; detail = `update ${last.step}/${last.updates} · epoch ${last.epoch} · ${last.decisions_per_s} decisions/s · ${last.peak_gb} GB peak · ~${fmtTime(last.eta_s)} left`; }
       else if (last.type === "progress") { frac = last.done / last.total; detail = `${last.done}/${last.total} rows${last.model ? " · " + modelName(last.model) : ""}`; }
       prog = `<div class="row" style="justify-content:space-between"><b>${esc(phaseMsg ? phaseMsg.message : "Starting")}</b><span class="muted">${esc(detail)}</span></div>${frac != null ? `<div class="bar" style="margin-top:8px"><i style="width:${(100 * frac).toFixed(1)}%"></i></div>` : ""}`;
     } else if (job.state === "failed" || job.state === "interrupted") prog = `<div class="notice bad"><b>Run ${esc(job.state)}.</b> ${esc(job.error || "")}</div>`;
@@ -2581,7 +2581,7 @@ const JOB_KINDS = {train: "fine-tune", evaluate: "evaluate", export: "export", p
 function jobHref(j) { return (j.kind === "train" ? "#/runs/" : "#/jobs/") + encodeURIComponent(j.id); }
 function jobFraction(j) {
   const last = j.last || {};
-  if (last.type === "step" && last.updates) return last.step / last.updates;
+  if (last.type === "step" && last.updates) return last.fraction ?? last.step / last.updates;
   if (last.type === "progress" && last.total) return last.done / last.total;
   return null;
 }

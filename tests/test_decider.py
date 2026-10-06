@@ -256,6 +256,100 @@ def test_mlx_lora_writes_the_same_checkpoint_format(checkpoint, tmp_path):
     answers_close(a, b, 1e-5)
 
 
+# A question of more options than an epoch's rows carry (max_train_options, 10).
+WIDE = {
+    "wide": {"type": "choice", "instructions": "Which?", "criteria": [f"l{i}" for i in range(25)]}
+}
+
+
+def wide_rows(n=90):
+    from layastudio import datasets
+
+    text = "\n".join(
+        json.dumps({"state": f"red {i}", "answers": {"wide": f"l{i % 25}"}}) for i in range(n)
+    )
+    questions, rows, _ = datasets.validate(WIDE, text, "w.jsonl", seed=13)
+    return questions, rows
+
+
+def test_updates_are_counted_as_an_epoch_encodes_its_rows(checkpoint):
+    """Above max_train_options an epoch's rows carry 10 options: their batches, not those of
+    rows with every option, are the updates the schedule and the progress count."""
+    questions, rows = wide_rows()
+    train_rows = [r for r in rows if r["split"] == "train"]
+    hp = {**decider.HYPERPARAMETERS, "batch_size": 8, "batch_tokens": 256}
+    prompter = decider.Prompter(decider.Tokens(checkpoint), decider.config(checkpoint))
+
+    def batches(items):
+        return len(
+            decider.token_batches(items, hp["batch_size"], hp["batch_tokens"], random.Random(0))
+        )
+
+    probe, _ = decider.training_probe(prompter, train_rows, questions, hp)
+    every, _ = decider.encode_items(prompter, train_rows, questions, hp=hp)
+    rng = random.Random(hp["seed"])
+    epochs = [
+        batches(decider.encode_items(prompter, train_rows, questions, rng, True, None, hp)[0])
+        for _ in range(3)
+    ]
+    assert all(abs(batches(probe) - e) <= max(1, e // 10) for e in epochs)
+    assert batches(every) > 1.3 * max(epochs)  # every option: longer rows, more batches
+    # Without shuffled options an epoch's rows carry every option, and so does the probe.
+    plain = {**hp, "shuffle_options": False}
+    assert batches(decider.training_probe(prompter, train_rows, questions, plain)[0]) == batches(
+        every
+    )
+
+
+def step_events(fit, checkpoint, tmp_path, epochs=2):
+    workspace = tmp_path / "ws"
+    text = "\n".join(
+        json.dumps({"state": f"red {i}", "answers": {"wide": f"l{i % 25}"}}) for i in range(90)
+    )
+    meta = engine.create_dataset("wide", WIDE, text, "w.jsonl", workspace=workspace)
+    spec = {"run_id": "steps", "dataset": meta["id"], "base_model": f"path:{checkpoint}"}
+    events = []
+    hp = {
+        **engine.hyperparameters("decider"),
+        "epochs": epochs,
+        "batch_size": 4,
+        "batch_tokens": 256,
+        "patience": 0,
+        "precision": "float32",
+        "grad_checkpoint": "off",
+    }
+    fit(spec, hp, lambda kind, **d: events.append({"type": kind, **d}), workspace)
+    return events
+
+
+def check_steps(events, epochs):
+    """Step events all through training: the epoch of epochs, a fraction that only grows and
+    reaches 1 at the last update, and the planned updates within an epoch's worth of it."""
+    steps = [e for e in events if e["type"] == "step"]
+    assert len(steps) >= 2 * epochs
+    assert all(e["epochs"] == epochs and 0 < e["fraction"] <= 1 for e in steps)
+    assert [e["fraction"] for e in steps] == sorted(e["fraction"] for e in steps)
+    assert steps[-1]["fraction"] == 1 and steps[-1]["eta_s"] == 0
+    assert {e["epoch"] for e in steps} == set(range(1, epochs + 1))
+    planned = next(e for e in events if e["type"] == "info")["updates"]
+    assert abs(planned - len(steps)) <= max(epochs, len(steps) // 10)
+
+
+@needs_peft
+def test_pytorch_training_reports_its_progress_in_steps(checkpoint, tmp_path, monkeypatch):
+    from layastudio import decider_engine
+
+    monkeypatch.setenv("LAYASTUDIO_DEVICE", "cpu")
+    check_steps(step_events(decider_engine.torch_fit, checkpoint, tmp_path), 2)
+
+
+@needs_mlx_lm
+def test_mlx_training_reports_its_progress_in_steps(checkpoint, tmp_path):
+    from layastudio import decider_mlx
+
+    check_steps(step_events(decider_mlx.fit, checkpoint, tmp_path), 2)
+
+
 @needs_mlx_lm
 def test_the_mlx_export_is_measured(checkpoint, tmp_path):
     from layastudio import decider_mlx
