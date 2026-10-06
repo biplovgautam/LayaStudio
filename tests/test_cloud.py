@@ -1253,3 +1253,82 @@ def test_a_cancelled_download_ends_the_process_at_once(tmp_path):
     assert last == {**last, "type": "finished", "state": "cancelled", "exit_code": 143}
     result = json.loads((tmp_path / "run/result.json").read_text())
     assert result["state"] == "cancelled" and result["error"]["stage"] == "prepare"
+
+
+# ----------------------------------------------------------------------------- the manifest
+
+
+def old_manifest(run_dir):
+    """cloud.manifest as it was before it hashed each file once: every path by itself."""
+    out = {}
+    for group in cloud.OUTPUTS:
+        folder = run_dir / group
+        if not folder.is_dir():
+            continue
+        out[group] = [
+            {
+                "path": path.relative_to(run_dir).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": cloud._sha256(path),
+            }
+            for path in sorted(folder.rglob("*"))
+            if path.is_file() and not path.name.endswith(".tmp")
+        ]
+    return out
+
+
+def output_tree(run_dir):
+    """A run's outputs as a Decider run leaves them: the GGUF hard-linked into the package,
+    the weights into the checkpoint, nested folders, a .tmp file and an empty group."""
+    for name, data in (
+        ("noulxp/model.gguf", b"GGUF" + bytes(300)),
+        ("noulxp/model.safetensors", b"weights" * 50),
+        ("noulxp/conformance.jsonl", b"{}\n"),
+        ("model/tokenizer/tokenizer.json", b"{}"),
+        ("model/same-size-a.bin", b"a" * 64),
+        ("model/same-size-b.bin", b"b" * 64),
+        ("card/README.md", b"# card"),
+        ("noulxp/upload.tmp", b"partial"),
+    ):
+        (run_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (run_dir / name).write_bytes(data)
+    (run_dir / "exports").mkdir()
+    os.link(run_dir / "noulxp/model.gguf", run_dir / "exports/model-bf16.gguf")
+    os.link(run_dir / "noulxp/model.safetensors", run_dir / "model/model.safetensors")
+    return run_dir
+
+
+@pytest.mark.parametrize("threads", [0, 1, 4])
+def test_the_manifest_is_what_it_was_with_each_file_hashed_once(tmp_path, monkeypatch, threads):
+    run_dir = output_tree(tmp_path / "run")
+    (run_dir / "exports/gguf-bf16.json").write_text("{}")
+    want = old_manifest(run_dir)
+    hashed = []
+    real = cloud._sha256
+    monkeypatch.setattr(cloud, "_sha256", lambda path: hashed.append(path.name) or real(path))
+    got = cloud.manifest(run_dir, threads=threads)
+    assert got == want and list(got) == list(want)  # the same groups, in the same order
+    assert sorted(hashed) == sorted(
+        [
+            "model.gguf",
+            "model.safetensors",
+            "conformance.jsonl",
+            "tokenizer.json",
+            "same-size-a.bin",
+            "same-size-b.bin",
+            "README.md",
+            "gguf-bf16.json",
+        ]
+    )  # one read for each linked pair, two for two files of one size
+    entries = {e["path"]: e for group in got.values() for e in group}
+    assert entries["exports/model-bf16.gguf"]["sha256"] == entries["noulxp/model.gguf"]["sha256"]
+    assert entries["model/same-size-a.bin"]["sha256"] != entries["model/same-size-b.bin"]["sha256"]
+    assert "noulxp/upload.tmp" not in entries
+
+
+def test_an_empty_output_group_is_listed_empty(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "exports").mkdir(parents=True)
+    (run_dir / "card").mkdir()
+    (run_dir / "card" / "x.tmp").write_text("partial")
+    assert cloud.manifest(run_dir) == old_manifest(run_dir) == {"exports": [], "card": []}

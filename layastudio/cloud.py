@@ -663,24 +663,58 @@ def _sha256(path, chunk=1 << 24):
     return digest.hexdigest()
 
 
-def manifest(run_dir):
+def manifest(run_dir, threads=None):
     """The run's output files, by kind: {"model": [{"path", "size", "sha256"}], ...}, with
-    paths relative to the run's folder."""
-    out = {}
+    paths relative to the run's folder.
+
+    Each file is hashed once: the paths of one file (a hard link, as a Decider run's
+    exports/model-bf16.gguf and noulxp/model.gguf are) share the digest read for the first.
+    Only files with more than one link are matched, by device and inode with the same size and
+    modification time; every other file is hashed by its path. Hashed by up to min(4, threads)
+    threads (runtime.cpu_threads())."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .runtime import cpu_threads
+
+    listed = {}
     for group in OUTPUTS:
         folder = run_dir / group
         if not folder.is_dir():
             continue
-        out[group] = [
+        files = []
+        for path in sorted(folder.rglob("*")):
+            if path.is_file() and not path.name.endswith(".tmp"):
+                st = path.stat()
+                files.append((path, st))
+        listed[group] = files
+    jobs, slot, shared = [], {}, {}
+    for files in listed.values():
+        for path, st in files:
+            key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+            if st.st_nlink > 1 and st.st_ino != 0 and key in shared:
+                slot[path] = shared[key]
+                continue
+            slot[path] = len(jobs)
+            if st.st_nlink > 1 and st.st_ino != 0:
+                shared[key] = len(jobs)
+            jobs.append(path)
+    workers = max(1, min(4, threads if threads is not None else cpu_threads()))
+    if workers == 1 or len(jobs) < 2:
+        digests = [_sha256(path) for path in jobs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            digests = list(pool.map(_sha256, jobs))
+    return {
+        group: [
             {
                 "path": path.relative_to(run_dir).as_posix(),
-                "size": path.stat().st_size,
-                "sha256": _sha256(path),
+                "size": st.st_size,
+                "sha256": digests[slot[path]],
             }
-            for path in sorted(folder.rglob("*"))
-            if path.is_file() and not path.name.endswith(".tmp")
+            for path, st in files
         ]
-    return out
+        for group, files in listed.items()
+    }
 
 
 class Printer:
