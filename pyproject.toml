@@ -84,7 +84,8 @@ Issues = "https://github.com/biplovgautam/LayaStudio/issues"
 "laya-mlx (runtime)" = "https://pypi.org/project/laya-mlx/"
 
 [tool.hatch.build.targets.wheel]
-packages = ["systemone_studio"]
+# layastudio/: the package's old name, a deprecated alias of systemone_studio (_alias.py).
+packages = ["systemone_studio", "layastudio"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
