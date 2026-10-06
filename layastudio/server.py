@@ -2802,7 +2802,7 @@ function exportItem(x) {
     <span>${x.size_mb != null ? bytes(x.size_mb * 2 ** 20) : "–"}</span>
     ${ms ? `<span>${num(ms, 1)} ms per decision${x.ms_per_decision ? "" : " on the CPU"}</span>` : ""}
     ${x.test ? `<span>${pct(x.test.accuracy_exported)} on ${x.test.rows} test rows</span>` : ""}
-    ${x.verification ? `<span>${x.verification.same_answer}/${x.verification.decisions} same answers</span>` : ""}
+    ${x.verification ? `<span>${x.verification.same_answer}/${x.verification.rows ?? x.verification.decisions} same answers</span>` : ""}
     <span>${esc(when(x.created))}</span>
     <span class="mono path">${esc(x.path)}</span></li>`;
 }
