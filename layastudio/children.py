@@ -6,9 +6,12 @@ SIGKILL: noulxp_package._end, gguf.Reference.end), and its scratch folders go wi
 after asking it to stop, a cloud run 30 s after) runs none of that, so:
 
 - each child process watches for it itself (WATCH): it exits when its stdin, a pipe the job
-  holds and never writes to, closes, which happens when the job dies, and on Linux also on
+  holds and never writes to, closes, which happens when the job dies (a job already gone
+  before the child starts reading included: the first read is EOF), and on Linux also on
   PR_SET_PDEATHSIG. A NoulXP step runs as `python -c RUN <its own arguments>` (command());
-  gguf_reference.py calls watch_parent();
+  gguf_reference.py calls watch_parent(). The interpreter need not be the job's own child:
+  in a Windows virtual environment sys.executable is a launcher that starts the base
+  interpreter as its child and waits for it, and the stdin pipe reaches it all the same;
 - a scratch folder in a run's folder carries the pid of the job that made it (scratch()), and
   the next build or export of that run removes the ones whose job is gone (sweep()).
 """
@@ -32,8 +35,18 @@ def _watch_parent():
             ctypes.CDLL(None, use_errno=True).prctl(1, 9)
         except (OSError, AttributeError):
             pass
-    if parent.isdigit() and os.getppid() != int(parent):
-        os._exit(1)  # the job ended before this process was watching
+        # A job that died before prctl sent no signal: this process has another parent now,
+        # and the job's pid is gone. Linux only, and only on both: elsewhere the interpreter
+        # can be its job's grandchild (a Windows virtual environment's python.exe is a
+        # launcher that starts the base interpreter as its own child), and the stdin watch
+        # below already ends a child whose job is gone.
+        if parent.isdigit() and os.getppid() != int(parent):
+            try:
+                os.kill(int(parent), 0)
+            except ProcessLookupError:
+                os._exit(1)  # the job ended before this process was watching
+            except OSError:
+                pass  # someone else's process: running
     try:
         stdin = sys.stdin.fileno()
     except (AttributeError, OSError, ValueError):
