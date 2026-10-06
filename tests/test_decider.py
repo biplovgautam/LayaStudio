@@ -50,7 +50,8 @@ GGUF_READY = (
 )
 needs_gguf = pytest.mark.skipif(
     not GGUF_READY,
-    reason="needs llama-cpp-python, Decider's tokenizer in the HF cache and LAYASTUDIO_TOOLS",
+    reason="needs llama-cpp-python, LAYASTUDIO_TOOLS and Decider's tokenizer (DECIDER_TOKENIZER"
+    " or the HF cache): README, Project layout",
 )
 
 MORE = {

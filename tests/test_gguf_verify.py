@@ -347,7 +347,11 @@ GGUF_READY = (
 )
 
 
-@pytest.mark.skipif(not GGUF_READY, reason="needs llama-cpp-python, Decider's tokenizer, tools")
+@pytest.mark.skipif(
+    not GGUF_READY,
+    reason="needs llama-cpp-python, LAYASTUDIO_TOOLS and Decider's tokenizer (DECIDER_TOKENIZER"
+    " or the HF cache): README, Project layout",
+)
 def test_the_real_overlap_measures_what_the_serial_one_does(tmp_path, monkeypatch):
     """The real converter, llama.cpp and float32 reference on the tiny checkpoint with Decider's
     real tokenizer: overlapped (forced, on the CPU) and serial agree."""

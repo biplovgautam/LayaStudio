@@ -549,6 +549,23 @@ uv run --extra dev pytest -q    # no downloads; tests that need MLX or PyTorch s
 uv run --extra dev ruff check layastudio && uv run --extra dev ruff format --check layastudio
 ```
 
+Three Decider end-to-end tests also skip unless two variables are set, because llama.cpp's
+converter only takes Qwen's real tokenizer: the GGUF conversion, the GGUF measurement serial
+against overlapped, and a Decider fine-tune's NoulXP package built and checked. They need
+llama-cpp-python and:
+
+- `LAYASTUDIO_TOOLS`: the tools folder that holds llama.cpp's converter at the pinned commit
+  (`llama.cpp-4df29be4f4c3/`, as `layastudio.gguf.converter()` fetches and verifies it; set
+  to an empty folder, the first test downloads it there);
+- `DECIDER_TOKENIZER`: a snapshot of `Mapika/decider-2b` with its `tokenizer.json`, by default
+  `$HF_HOME/hub/models--Mapika--decider-2b/snapshots/533964dae8be954c5b5e19fa4948e48408094c1e`.
+  Only the tokenizer files are read: the checkpoint is still the tiny random one.
+
+```bash
+LAYASTUDIO_TOOLS=/path/to/tools DECIDER_TOKENIZER=/path/to/decider-2b/snapshot \
+  uv run --extra dev --extra torch --extra decoder --extra gguf --extra export pytest -q
+```
+
 ## FAQ
 
 **Does fine-tuning make inference slower or the model bigger?** No. LoRA is merged into the weights; the file and the forward pass are exactly the base model's.
