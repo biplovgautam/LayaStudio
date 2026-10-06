@@ -532,6 +532,8 @@ def test_a_run_file_that_cannot_train_ends_with_a_refusal(tmp_path):
         "{not json",
         json.dumps({"workspace": 5}),
         json.dumps({"dataset": {"questions": 5, "train": 5}}),
+        json.dumps({"keep_checkpoint": "yes"}),
+        json.dumps({"template": 5}),
     ):
         config.write_text(text)  # refused, with a result file, whatever is wrong with it
         assert cloud.run(config, result=tmp_path / "r.json", stream=io.StringIO()) == 2
@@ -601,6 +603,56 @@ def test_a_run_whose_export_fails_ends_partial(tmp_path, monkeypatch):
     assert result["exports"][0]["state"] == "failed" and "outputs" in result
 
 
+def test_a_run_says_what_it_keeps_and_warns_when_that_is_only_its_card(tmp_path, monkeypatch):
+    """keep_checkpoint is off unless the run says so; the prepared event and the result repeat
+    it, and a run with neither the checkpoint nor a NoulXP package to keep is told."""
+    scripted(monkeypatch, train=TRAINED)
+    out = io.StringIO()
+    assert cloud.run(scripted_run(tmp_path), stream=out) == 0
+    prepared = json.loads(out.getvalue().splitlines()[0])
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert prepared["keep_checkpoint"] is result["keep_checkpoint"] is False
+    assert result["template"] is None
+    assert any("keeps no checkpoint" in w for w in prepared["warnings"])
+    assert [f["path"] for f in result["outputs"]["card"]] == [
+        "card/README.md",
+        "card/finetune.json",
+    ]
+
+    config = scripted_run(tmp_path / "kept", keep_checkpoint=True, template="laya.lora")
+    assert cloud.run(config, stream=io.StringIO()) == 0
+    result = json.loads((tmp_path / "kept/run/result.json").read_text())
+    assert result["keep_checkpoint"] is True and result["template"] == "laya.lora"
+    assert not any("keeps no checkpoint" in w for w in result["warnings"])
+
+
+def test_a_card_that_cannot_be_written_is_a_warning(tmp_path, monkeypatch):
+    """The run trained and its outputs stand: a card that fails is a warning, not a failure."""
+    scripted(monkeypatch, train=TRAINED)
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cloud, "write_card", broken)
+    assert cloud.run(scripted_run(tmp_path, keep_checkpoint=True), stream=io.StringIO()) == 0
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "succeeded" and "card" not in result["outputs"]
+    assert "No model card: OSError: disk full" in result["warnings"]
+
+
+def test_step_progress_reaches_the_end_whatever_the_epochs_hold():
+    """Every trainer's step events: the share done grows with each update, epochs of
+    different lengths included, and is 1 at the last."""
+    epochs, shares = 3, []
+    for epoch, updates in zip(range(1, epochs + 1), (7, 5, 6)):
+        for done in range(1, updates + 1):
+            fields = engine.step_progress(epoch, done, updates, epochs, elapsed=10.0)
+            assert fields["epochs"] == epochs and fields["eta_s"] >= 0
+            shares.append(fields["fraction"])
+    assert shares == sorted(shares) and shares[-1] == 1 and 0 < shares[0] < 1 / epochs
+    assert engine.step_progress(1, 1, 2, 1, elapsed=10.0)["eta_s"] == 10
+
+
 def test_an_event_read_in_the_middle_of_a_character_arrives_whole(tmp_path, monkeypatch):
     whole = line("phase", phase="train", message="Training ✅ · epoch 1")
     cut = whole.index("✅".encode()) + 1  # inside the check mark's three bytes
@@ -662,9 +714,15 @@ def test_a_job_is_never_left_running(tmp_path, monkeypatch):
 def tiny_base(kind, folder):
     """A tiny random base checkpoint of a kind, and the environment its run trains in: the
     CPU through PyTorch when this machine has the PyTorch stack, else MLX."""
-    has_torch = all(
-        __import__("importlib").util.find_spec(m) for m in ("torch", "transformers", "laya")
-    )
+    found = __import__("importlib").util.find_spec
+    has_torch = all(found(m) for m in ("torch", "transformers", "laya"))
+    if kind == "decider":
+        if not all(found(m) for m in ("torch", "transformers", "peft")):
+            pytest.skip("Decider trains through PyTorch and PEFT here")
+        import tiny
+
+        path = tiny.decider_checkpoint(folder / "decider")
+        return f"path:{path}", {"LAYASTUDIO_BACKEND": "torch", "LAYASTUDIO_DEVICE": "cpu"}
     if kind == "julia":
         if not has_torch:
             pytest.skip("Julia's tiny checkpoint is built with PyTorch")
@@ -692,16 +750,24 @@ def headless(config, env, *args):
     )
 
 
-@pytest.mark.parametrize("kind", ["julia", "laya"])
+@pytest.mark.parametrize("kind", ["julia", "laya", "decider"])
 def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
     """End to end with no UI: baseline, training and evaluation, then a NoulXP package where
-    this machine has the tooling; every event a JSON line, the result file at the end."""
+    this machine has the tooling, and the card; every event a JSON line, the training's
+    progress in step events, the result file at the end."""
     from layastudio import noulxp_package
 
     ref, env = tiny_base(kind, tmp_path / "models")
     packaged = noulxp_package.missing_tooling(kind) is None
     exports = [{"target": "noulxp"}] if packaged else []
-    config, checked = write_run(tmp_path / "run", ref, exports=exports)
+    # Without a package the run keeps its checkpoint, or its card would be all it keeps.
+    config, checked = write_run(
+        tmp_path / "run",
+        ref,
+        exports=exports,
+        keep_checkpoint=not packaged,
+        template=f"{kind}.lora",
+    )
     process = headless(config, env)
     stdout, stderr = process.communicate(timeout=900)
     assert process.returncode == 0, stderr[-3000:]
@@ -715,7 +781,13 @@ def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
         expected += [("export:noulxp", "running"), ("export:noulxp", "done")]
     assert stages == expected
     trained = {e["type"] for e in events if e.get("stage") == "train" and "job" not in e}
-    assert {"phase", "epoch", "result", "done"} <= trained
+    assert {"phase", "epoch", "step", "result", "done"} <= trained
+    steps = [e for e in events if e["type"] == "step"]
+    assert all(e["epochs"] == 1 and e["epoch"] == 1 and 0 < e["fraction"] <= 1 for e in steps)
+    assert [e["fraction"] for e in steps] == sorted(e["fraction"] for e in steps)
+    assert steps[-1]["fraction"] == 1 and steps[-1]["step"] == len(steps)
+    assert events[0]["keep_checkpoint"] is (not packaged)
+    assert not any("keeps no checkpoint" in w for w in events[0]["warnings"])
 
     result = json.loads((tmp_path / "run/result.json").read_text())
     assert result["state"] == "succeeded" and result["kind"] == kind
@@ -737,6 +809,36 @@ def test_a_run_file_trains_exports_and_says_what_it_made(tmp_path, kind):
         assert any(f["path"] == "noulxp/noulxp.json" for f in result["outputs"]["noulxp"])
     else:
         assert "noulxp" not in result["outputs"]
+    assert result["keep_checkpoint"] is (not packaged) and result["template"] == f"{kind}.lora"
+    check_card(tmp_path, result, run_dir, checked, packaged)
+
+
+def check_card(tmp_path, result, run_dir, checked, packaged):
+    """card/: the model card and the fine-tune's record, listed with the outputs; neither
+    names a path on the machine that trained nor holds a row of the dataset."""
+    card = {f["path"]: f for f in result["outputs"]["card"]}
+    assert sorted(card) == ["card/README.md", "card/finetune.json"]
+    for path, entry in card.items():
+        data = (run_dir / path).read_bytes()
+        assert entry["size"] == len(data) and entry["sha256"] == hashlib.sha256(data).hexdigest()
+    readme = (run_dir / "card/README.md").read_text()
+    record = json.loads((run_dir / "card/finetune.json").read_text())
+    for text in (readme, json.dumps(record)):
+        assert str(tmp_path) not in text and "/private/" not in text
+        assert not any(row["state"] in text for row in make_rows(45))
+    assert cloud.CARD_REPO in readme and "## Measured on the held-out test split" in readme
+    assert ("carries a NoulXP package" in readme) is packaged
+    assert record["kind"] == result["kind"] and record["template"] == result["template"]
+    assert record["dataset"]["sha256"] == checked["sha256"]
+    assert record["dataset"]["rows"] == checked["rows"]
+    assert record["hyperparameters"] == result["hyperparameters"]
+    assert record["metrics"]["finetuned"]["overall"]["n"] > 0
+    assert "model" not in record["metrics"]["base"]
+    assert record["training"]["best_epoch"] == result["training"]["best_epoch"]
+    if packaged:
+        assert record["noulxp"]["cases_passed"] == record["noulxp"]["cases"] > 0
+    else:
+        assert record["noulxp"] is None
 
 
 def test_a_cancelled_run_stops_its_job_and_says_so(tmp_path):

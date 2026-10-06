@@ -42,6 +42,8 @@ The config, with paths relative to its own folder:
       "bounds": {"epochs": {"min": 1, "max": 5}},     optional: what the run may change
       "limits": {"max_bytes": 26214400, "max_rows": 200000},
       "exports": [{"target": "noulxp", "gguf": "bf16"}],
+      "keep_checkpoint": false,                       optional: model/ is among what is kept
+      "template": "decider-2b.lora",                  optional: the platform's name for the run
       "run_id": "...", "baseline": true, "workspace": "..."
     }
 
@@ -55,9 +57,35 @@ The config, with paths relative to its own folder:
   digest, the report's sha256 (its questions and split rows, not a file's bytes).
 - bounds: with any, the run may change only the hyperparameters they name, each within its
   {"min", "max"} or its {"choices"}.
+- keep_checkpoint (default false): whether the checkpoint in its maker's format, model/, is
+  among the outputs a cloud run keeps, besides its NoulXP package and its card. The run's
+  folder holds it either way (the package and the card are made from it) and the result's
+  manifest lists every output: the agent uploads what the switch says. The result and the
+  "prepared" event repeat it; a run that keeps no checkpoint and makes no NoulXP package is
+  told so in its warnings, since its card would be all it keeps.
+- template: recorded as it is, in the result and in card/finetune.json.
 - The config is the agent's, never a user's: its paths are read as given (absolute ones and
   "..", too). A GPU image sets $LAYASTUDIO_TOOLS to the llama.cpp converter it bakes in
   (gguf.py), or Decider's GGUF fetches it beside the workspace.
+
+What a run makes, in runs/<id>/, each group listed in the result's outputs with every file's
+size and SHA-256: model/ (the checkpoint), noulxp/ (its NoulXP package, only one that passed),
+exports/ (GGUF, MLX-LM) and card/, written once it trained (whether or not an export failed):
+
+- card/README.md: the model card the registry shows, written from the run's measurements as
+  publish_systemone writes it, NoulXP line included. It names the model <namespace>/<name>
+  (CARD_REPO) in its examples and the run's name in its title: publishing puts the model's.
+- card/finetune.json: the version's record of the fine-tune: the base model at its revision,
+  the template, the hyperparameters, the dataset's digest and size, the training and the
+  measurements before and after, and the NoulXP check. A kept checkpoint's own finetune.json
+  (Julia 1, Decider) is the trainers' record of the same run, with paths on the GPU: at a
+  version's root the card's replaces it.
+
+Neither holds a row of the dataset or a path on the machine that trained.
+
+Training's "step" events (every trainer) carry the update, the epoch of epochs, and
+fraction: the share of the training done, which reaches 1 at the last update, with eta_s
+the seconds left at that pace.
 
 The exit code, also the result's exit_code: 0 when it trained and made every export; 3
 (partial) when it trained but an export failed, which the result's failed_exports names (the
@@ -111,8 +139,45 @@ AT_MOST_ONE = ("warmup",)
 # The precision an export gets when the run does not say (as `python -m layastudio.export`).
 DEFAULT_PRECISION = {"gguf": "bf16", "mlx": "int4"}
 # Outputs of a run, in the result's manifest: the checkpoint, its NoulXP package (only one that
-# passed its check), and the exports (GGUF, MLX-LM).
-OUTPUTS = ("model", "noulxp", "exports")
+# passed its check), the exports (GGUF, MLX-LM) and the card (README.md, finetune.json).
+CARD = "card"
+OUTPUTS = ("model", "noulxp", "exports", CARD)
+# The model's name in the card's examples, until publishing names it.
+CARD_REPO = "<namespace>/<name>"
+# What card/finetune.json keeps of the training summary (training.json): never a path.
+TRAINING_KEYS = (
+    "train_decisions",
+    "val_decisions",
+    "skipped_decisions",
+    "trainable_params",
+    "total_params",
+    "updates",
+    "best_epoch",
+    "best_val_loss",
+    "history",
+    "train_seconds",
+    "peak_memory_gb",
+    "lora_variants",
+    "backend",
+    "device",
+    "created",
+)
+# What it keeps of the NoulXP check (noulxp_package.describe).
+NOULXP_KEYS = (
+    "standard",
+    "profile",
+    "noulxp",
+    "gguf",
+    "cases",
+    "cases_passed",
+    "max_abs_dp",
+    "mean_abs_dp",
+    "argmax",
+    "test_rows",
+    "runtime_precision",
+    "checked_at",
+    "size_mb",
+)
 
 
 class Refused(ValueError):
@@ -679,6 +744,79 @@ def _summaries(run_dir):
     }
 
 
+def _measured(comparison):
+    """The before and after measurements, without the models' references (a base given as a
+    folder is a path on this machine)."""
+    if not comparison:
+        return None
+    return {
+        "base": {k: v for k, v in comparison["base"].items() if k != "model"},
+        "finetuned": {k: v for k, v in comparison["finetuned"].items() if k != "model"},
+        "paired": comparison.get("paired"),
+    }
+
+
+def write_card(run_id, workspace, dataset=None, template=None):
+    """runs/<id>/card from the run's own files: README.md, the model card, and finetune.json,
+    the fine-tune's record (this module's docstring). dataset: its meta, of which only the
+    digest and the counts are kept. Returns the record."""
+    from . import kinds, noulxp_package
+    from .families import find
+    from .publish import build_card
+    from .publish_systemone import registry_card, with_noulxp
+
+    run_dir = workspace / "runs" / engine.check_id(run_id)
+    model_dir = run_dir / "model"
+    run = engine.read_json(run_dir / "run.json") or {}
+    training = engine.read_json(run_dir / "training.json") or {}
+    comparison = engine.read_json(run_dir / "comparison.json")
+    questions = engine.read_json(model_dir / "questions.json") or {}
+    kind = run.get("kind") or kinds.detect(model_dir) or kinds.LAYA
+    repo, revision = noulxp_package.base_reference(run.get("base_model"), workspace)
+    known = find(repo) if repo else None
+    # The package this run's export just built and checked (describe: only one that passed),
+    # not hashed again: the manifest hashes every file once.
+    package = noulxp_package.describe(run_dir / noulxp_package.PACKAGE)
+
+    named = {**run, "base_model": f"hub:{repo or 'unknown'}"}  # a published name, never a path
+    card = build_card(named, training, comparison, CARD_REPO, questions, kind)
+    card = with_noulxp(registry_card(card, CARD_REPO, kind), noulxp_package.card_line(package))
+    hp = training.get("hyperparameters") or run.get("hyperparameters") or {}
+    dataset = dataset or {}
+    record = {
+        "tool": "System One Studio",
+        "run": run_id,
+        "name": run.get("name"),
+        "template": template,
+        "kind": kind,
+        "base_model": {
+            "repo": repo,
+            "revision": revision,
+            "license": known.licence if known else None,
+        },
+        "method": hp.get("method"),
+        "hyperparameters": hp,
+        "dataset": {
+            "sha256": training.get("dataset_sha256") or dataset.get("sha256"),
+            "seed": dataset.get("seed"),
+            "rows": dataset.get("rows"),
+            "decisions": dataset.get("decisions"),
+            "questions": list(questions),
+        },
+        "training": {k: training[k] for k in TRAINING_KEYS if k in training},
+        "calibration": training.get("calibration"),
+        "metrics": _measured(comparison),
+        "noulxp": {k: package.get(k) for k in NOULXP_KEYS} if package else None,
+        "created": engine.now(),
+    }
+    folder = run_dir / CARD
+    shutil.rmtree(folder, ignore_errors=True)
+    folder.mkdir(parents=True)
+    (folder / "README.md").write_text(card, encoding="utf-8")
+    engine.write_json(folder / "finetune.json", record)
+    return record
+
+
 def run(config, workspace=None, result=None, stream=None):
     """Run the fine-tune a config file describes, end to end, and return its exit code (this
     module's docstring). The result file is written whatever happens, and the last event,
@@ -730,6 +868,12 @@ def _run(config, workspace, runner, emit, outcome, finish):
     workspace = (config.parent / where).resolve() if where else engine.WORKSPACE
     outcome["workspace"] = str(workspace)
     runner.workspace = workspace
+    keep = spec.get("keep_checkpoint", False)
+    if not isinstance(keep, bool):
+        return refuse("keep_checkpoint is true or false: whether the run keeps its checkpoint")
+    template = spec.get("template")
+    if template is not None and not isinstance(template, str):
+        return refuse("A run's template is text: the platform's name for it")
     ref = spec.get("base_model")
     if isinstance(ref, str) and ref.startswith("path:"):  # a folder beside the config, too
         spec["base_model"] = f"path:{(config.parent / Path(ref[5:]).expanduser()).resolve()}"
@@ -750,6 +894,11 @@ def _run(config, workspace, runner, emit, outcome, finish):
         shutil.rmtree(run_dir, ignore_errors=True)
         return finish("cancelled", 143, error={"stage": "prepare", "message": "Cancelled"})
     meta = prepared["dataset"]
+    if not keep and not any(e["target"] == "noulxp" for e in prepared["exports"]):
+        prepared["warnings"].append(
+            "This run keeps no checkpoint (keep_checkpoint) and makes no NoulXP package: "
+            "its card is all it keeps"
+        )
     outcome.update(
         run_id=run_id,
         name=prepared["name"],
@@ -762,6 +911,8 @@ def _run(config, workspace, runner, emit, outcome, finish):
         hyperparameters=prepared["hyperparameters"],
         ignored=prepared["ignored"],
         warnings=prepared["warnings"],
+        keep_checkpoint=keep,
+        template=template,
         stages=[],
         exports=[],
     )
@@ -770,6 +921,7 @@ def _run(config, workspace, runner, emit, outcome, finish):
         **{k: outcome[k] for k in ("run_id", "name", "kind", "base_model", "dataset")},
         hyperparameters=prepared["hyperparameters"],
         exports=prepared["exports"],
+        keep_checkpoint=keep,
         warnings=prepared["warnings"],
     )
 
@@ -799,6 +951,8 @@ def _run(config, workspace, runner, emit, outcome, finish):
                 {**export, "state": done["state"], "result": done["result"]}
                 | ({"error": done["error"]} if "error" in done else {})
             )
+        if not runner.cancelled:
+            _card(run_id, workspace, meta, template, emit, outcome)
         outcome["outputs"] = manifest(run_dir)
         if runner.cancelled:
             return finish("cancelled", 143, error={"stage": "export", "message": "Cancelled"})
@@ -816,6 +970,18 @@ def _run(config, workspace, runner, emit, outcome, finish):
         return finish(
             "failed", 1, error={"stage": "run", "message": f"{type(error).__name__}: {error}"}
         )
+
+
+def _card(run_id, workspace, meta, template, emit, outcome):
+    """The run's card, written once it trained. A card that cannot be written is a warning:
+    the training and the exports it would describe are there, and publishing can do without."""
+    emit("phase", phase="card", message="Writing the model card from the run's measurements")
+    try:
+        write_card(run_id, workspace, meta, template)
+    except Exception as error:  # noqa: BLE001 - the run's outputs stand without a card
+        message = f"No model card: {type(error).__name__}: {error}"
+        outcome["warnings"].append(message)
+        emit("log", message=message)
 
 
 def main(argv=None):

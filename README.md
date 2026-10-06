@@ -497,6 +497,14 @@ here is refused there too. Every event is printed to stdout as one JSON line, an
 `result.json` (beside the config) says how the run ended, with its measurements and its output
 files, each with its size and SHA-256. It is what the cloud studio's GPUs run.
 
+Once it has trained, the run also writes its card, `runs/<id>/card/`: `README.md`, the model
+card the registry shows, from the run's own measurements, and `finetune.json`, the fine-tune's
+record (base model and revision, hyperparameters, the dataset's digest and size, the
+measurements before and after, the NoulXP check), with no dataset row and no local path in
+either. `keep_checkpoint` says whether the checkpoint itself is among what a cloud run keeps
+next to its NoulXP package and card; the run's folder holds it either way. Training's `step`
+events carry `fraction`, the share of the training done, which reaches 1 at the last update.
+
 The exit code says how it ended: 0 trained and exported, 3 trained but an export failed (the
 result's `failed_exports` names it), 1 failed, 2 refused before anything ran, 143 cancelled.
 The last event, `finished`, carries the same state, exit code and error. A base model
