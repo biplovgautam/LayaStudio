@@ -26,14 +26,20 @@ runtime that noulxp has for the run's checkpoint kind (kinds.py):
    runtime on the CPU, to NoulXP's request set (52 requests in 11 languages, the coverage the
    standard asks for). Rows of the run's test split, asked the questions the run was tuned for,
    are added only on request (test_rows > 0): they are published inside the package.
-3. `noulxp validate`, then `noulxp check` on the CPU: the reference runtime has to reproduce
-   every case (each probability within 0.01, and the same leading option).
+3. `noulxp validate` (schemas, parsers, coverage), then `noulxp check` on the CPU: every
+   file's SHA-256 against the manifest, then the reference runtime has to reproduce every case
+   (each probability within 0.01, and the same leading option). The check is the one pass
+   that hashes the package, on the final files, right before it decides.
 
-Each step runs in a process of its own, so memory goes back between them. The package is built
-in runs/<id>/noulxp.partial/noulxp and becomes runs/<id>/noulxp only once it passes, with the
-check's report inside it (check-cpu.json). A package that fails is kept as
-runs/<id>/noulxp-failed for reading and is never published. runs/<id>/noulxp-report.json
-describes the last attempt.
+Each step runs in a process of its own, so memory goes back between them, with as many CPU
+threads as the machine's quota allows (runtime.cpu_threads(): a pod's cgroup cpu.max), the same
+count for the recording and the check. The package is built in runs/<id>/noulxp.partial/noulxp
+and becomes runs/<id>/noulxp only once it passes, with the check's report inside it
+(check-cpu.json). A package that fails is kept as runs/<id>/noulxp-failed for reading and is
+never published. runs/<id>/noulxp-report.json
+describes the last attempt, with what each step took ("steps": seconds, CPU, threads, the
+container's throttling and memory; telemetry.py): it explains a measurement, it certifies
+nothing, and none of it goes into the package.
 
 Publishing (publish_systemone.py) places the passing package next to the checkpoint's own
 files, as the version's `noulxp/` folder, for as long as the upload takes.
@@ -117,9 +123,39 @@ MIN_TRANSFORMERS = (5, 2)
 # The file entries a manifest names (SPEC.md 4.2); weights also list their external data.
 FILE_KEYS = ("weights", "tokenizer", "template", "prompt", "calibration", "conformance")
 
+# ONNX Runtime's threads in the exporter's own process, for its informative onnxruntime-versus-
+# torch comparison (source.export.verification) only: noulxp 0.4's compare_with_torch opens its
+# session with no thread count, which is one thread per host core on a pod. Installed before
+# the exporter is imported, and nothing unless LAYASTUDIO_THREADS (which the step's process
+# gets: _child_env) is a positive integer and noulxp 0.4's providers.ort_session exists. Only
+# the install is guarded: an error of the export or of a real session still fails the step.
+ORT_THREADS = (
+    "def _cap_ort_threads():\n"
+    "    import os\n"
+    "    try:\n"
+    "        n = int(os.environ.get('LAYASTUDIO_THREADS', ''))\n"
+    "    except ValueError:\n"
+    "        return\n"
+    "    if n <= 0:\n"
+    "        return\n"
+    "    try:\n"
+    "        import noulxp\n"
+    "        import noulxp.providers as providers\n"
+    "    except ImportError:\n"
+    "        return\n"
+    "    original = getattr(providers, 'ort_session', None)\n"
+    "    if not callable(original) or not str(getattr(noulxp, '__version__', '')).startswith('0.4'):\n"
+    "        return\n"
+    "    def ort_session(path, *args, threads=None, **kwargs):\n"
+    "        return original(path, *args, threads=threads or n, **kwargs)\n"
+    "    ort_session.__wrapped__ = original\n"
+    "    providers.ort_session = ort_session\n"
+    "_cap_ort_threads()\n"
+)
 # `noulxp export <kind>`, called as its command calls it (hard-linked weights, opset 18), with
-# the fine-tune's own provenance in the manifest's `source` instead of the base model's.
-EXPORT = (
+# the fine-tune's own provenance in the manifest's `source` instead of the base model's. It caps
+# ONNX Runtime's threads for the exporter's informative comparison first (ORT_THREADS).
+EXPORT = ORT_THREADS + (
     "import importlib, json, sys\n"
     "from pathlib import Path\n"
     "exporter = importlib.import_module('noulxp.export.' + sys.argv[1])\n"
@@ -127,6 +163,16 @@ EXPORT = (
     " source=json.loads(sys.argv[5]), **json.loads(sys.argv[6]))\n"
 )
 CASES = re.compile(r"^\s*(\d+)/(\d+) cases\b")
+# The variables that cap a step process's BLAS and OpenMP threads (torch reads them at import),
+# and LAYASTUDIO_THREADS, which the export's ORT_THREADS reads.
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "LAYASTUDIO_THREADS")
+# Where the package's hashes are verified: once, by the check, on the final files.
+HASHES = "verified by noulxp check (package_problems)"
+# Laya's own runtime takes no thread count, and noulxp 0.4 records none for it.
+LAYA_THREADS = "OMP_NUM_THREADS and MKL_NUM_THREADS (laya's runtime takes no thread count)"
+# How long a step process may take to end after SIGTERM before it is killed (the local server
+# kills a job 15 s after asking, a cloud run 30 s after).
+END_AFTER = 10
 GLOG = re.compile(r"^[WIEF]\d{4} ")  # torch's own warnings, e.g. "W1004 15:17:08 ..."
 
 
@@ -351,39 +397,76 @@ def _write_jsonl(path, rows):
 # ----------------------------------------------------------------------------- the steps
 
 
-def _python(args, emit, progress=False):
+def _child_env(threads=None):
+    """A step process's environment: offline, unbuffered, and, with a thread count, the
+    BLAS/OpenMP caps (THREAD_VARS) at that count. A cap the machine already sets wins
+    (setdefault): report the effective values (thread_env), not the count asked for. Only step
+    processes get these; the job's own process (training, the GPU) keeps its own."""
+    env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"}
+    if threads:
+        for name in THREAD_VARS:
+            env.setdefault(name, str(int(threads)))
+    return env
+
+
+def thread_env(threads=None):
+    """The thread caps a step process started with this count sees."""
+    env = _child_env(threads)
+    return {name: env.get(name) for name in THREAD_VARS}
+
+
+def _end(processes, timeout=END_AFTER):
+    """Every process still running: SIGTERM to all at once, one shared deadline, then SIGKILL.
+    Each is reaped before this returns."""
+    alive = [p for p in processes if p is not None and p.poll() is None]
+    for process in alive:
+        with contextlib.suppress(OSError):
+            process.terminate()
+    deadline = time.monotonic() + timeout
+    for process in alive:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                process.kill()
+            process.wait()
+
+
+def _python(args, emit, progress=False, threads=None):
     """One step in a process of its own, its output into the job's log.
 
-    Returns (exit code, the last lines it printed). Cancelling the job stops the step."""
-    env = {**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"}
+    threads: the BLAS/OpenMP caps of its environment (_child_env). Returns (exit code, the
+    last lines it printed). Cancelling the job stops the step."""
+    from .telemetry import Sampler
+
     process = subprocess.Popen(
         [sys.executable, *args],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         errors="replace",
-        env=env,
+        env=_child_env(threads),
     )
     tail = collections.deque(maxlen=20)
     try:
-        assert process.stdout is not None
-        for line in process.stdout:
-            line = line.rstrip()
-            if not line:
-                continue
-            tail.append(line)
-            counted = CASES.match(line) if progress else None
-            if counted:
-                emit("progress", done=int(counted[1]), total=int(counted[2]))
-            else:
-                emit("log", message=line)
+        sampler = Sampler(process.pid)
+        try:
+            assert process.stdout is not None
+            for line in process.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                tail.append(line)
+                counted = CASES.match(line) if progress else None
+                if counted:
+                    emit("progress", done=int(counted[1]), total=int(counted[2]))
+                else:
+                    emit("log", message=line)
+        finally:
+            sampler.stop()
         code = process.wait()
     except BaseException:
-        process.terminate()
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        _end([process])
         raise
     return code, list(tail)
 
@@ -393,7 +476,7 @@ def _last(tail):
     return (useful or tail or ["no output"])[-1]
 
 
-def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=None):
+def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=None, threads=None):
     """Step 1: `noulxp export <kind>` from the run's checkpoint."""
     code, tail = _python(
         [
@@ -407,85 +490,131 @@ def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=
             json.dumps(options or {}),
         ],
         emit,
+        threads=threads,
     )
     if code:
         raise RuntimeError(f"noulxp export {kind} failed: {_last(tail)}")
 
 
-def record_conformance(package_dir, checkpoint, requests, emit, runtime="laya"):
+def _generate_args(package_dir, checkpoint, requests, runtime, threads=None):
+    """`noulxp conformance generate`'s arguments: every request (no --limit), the model's own
+    runtime on the CPU, with this many threads when given."""
+    args = [
+        "-m",
+        "noulxp",
+        "conformance",
+        "generate",
+        str(package_dir),
+        "--native",
+        str(checkpoint),
+        "--runtime",
+        runtime,
+        "--requests",
+        str(requests),
+    ]
+    if threads:
+        args += ["--threads", str(int(threads))]
+    return args
+
+
+def record_conformance(package_dir, checkpoint, requests, emit, runtime="laya", threads=None):
     """Step 2: the fine-tune's own answers (its own runtime, CPU) into conformance.jsonl."""
     code, tail = _python(
-        [
-            "-m",
-            "noulxp",
-            "conformance",
-            "generate",
-            str(package_dir),
-            "--native",
-            str(checkpoint),
-            "--runtime",
-            runtime,
-            "--requests",
-            str(requests),
-        ],
+        _generate_args(package_dir, checkpoint, requests, runtime, threads),
         emit,
         progress=True,
+        threads=threads,
     )
     if code:
         raise RuntimeError(f"noulxp conformance generate failed: {_last(tail)}")
 
 
 def validate_package(package_dir, emit):
-    """Step 3a: schemas, hashes and coverage, without running anything. Returns the problems."""
-    code, tail = _python(["-m", "noulxp", "validate", str(package_dir)], emit)
+    """Step 3a: schemas, parsers, coverage, without running anything. Returns the problems.
+
+    It leaves the files' SHA-256 to the check (--no-hashes), which runs right after on the same
+    unchanged files and hashes every one of them before it decides (check_package): one hash
+    pass, in the step that decides "passed". It still finds a file that is missing or outside
+    the package."""
+    code, tail = _python(["-m", "noulxp", "validate", str(package_dir), "--no-hashes"], emit)
     if code == 0:
         return []
     return [line for line in tail if not line.endswith("problem(s)")] or [_last(tail)]
 
 
-def check_package(package_dir, emit):
-    """Step 3b: the conformance file through the reference runtime on the CPU. The report."""
+def check_package(package_dir, emit, threads=None):
+    """Step 3b: every file's SHA-256 against the manifest, then the conformance file through
+    the reference runtime on the CPU, with this many threads when given. The report.
+
+    The package's only hash pass (validate_package skips it): `noulxp check` with its default
+    hash verification, whose mismatches are the report's package_problems, which build() refuses.
+    Never add --no-hashes here. A check moved into this process must call
+    conformance.check(hashes=True), or pass package.verify(hashes=True)'s problems to replay():
+    never problems=[] while validate skips the hashes."""
     report_path = package_dir / CHECK
-    code, tail = _python(
-        [
-            "-m",
-            "noulxp",
-            "check",
-            str(package_dir),
-            "--device",
-            "cpu",
-            "--report",
-            str(report_path),
-        ],
-        emit,
-    )
+    args = [
+        "-m",
+        "noulxp",
+        "check",
+        str(package_dir),
+        "--device",
+        "cpu",
+        "--report",
+        str(report_path),
+    ]
+    if threads:
+        args += ["--threads", str(int(threads))]
+    code, tail = _python(args, emit, threads=threads)
     report = read_json(report_path)
     if not isinstance(report, dict):
         raise RuntimeError(f"noulxp check failed (exit {code}): {_last(tail)}")
     return report
 
 
+def _reported(described):
+    """The thread count a step says it ran with (generated_by.threads; a check's
+    runtime.threads, which noulxp 0.4.0 leaves null and 0.4.1 fills), else None: never
+    inferred."""
+    value = described.get("threads") if isinstance(described, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 # ----------------------------------------------------------------------------- build
 
 
-def ensure_gguf(model_ref, workspace, emit, precision=GGUF_PRECISION):
+def ensure_gguf(model_ref, workspace, emit, precision=GGUF_PRECISION, threads=None, stats=None):
     """The run's GGUF export at this precision, converted (gguf.py) unless one exists that
-    was converted from the checkpoint's current weights. (path, export report)"""
+    was converted from the checkpoint's current weights. (path, export report)
+
+    Reused only when all of these hold: the file is there, its report names this llama.cpp
+    commit and the weights it was converted from, those are the checkpoint's weights now, and
+    the file is the one the report hashed. Nothing is hashed for a run without one (a fresh
+    pod): gguf.export reads the weights' digests while the converter runs; a stale one hands
+    over the digests computed here. These hashes are the studio's cache keys, not the
+    package's certification (the check hashes the package). stats, when given, gets
+    {"cached": bool}."""
     from . import gguf
 
     _, run_dir, model_dir, _ = locate(model_ref, workspace)
     target = run_dir / "exports" / gguf.FILE.format(precision=precision)
     report = read_json(run_dir / "exports" / f"gguf-{precision}.json") or {}
-    weights = {p.name: _sha256(p) for p in sorted(model_dir.glob("*.safetensors"))}
+    weights = None
     if (
         target.is_file()
-        and report.get("source_sha256") == weights
-        and report.get("sha256") == _sha256(target)
         and report.get("llama_cpp") == gguf.LLAMA_CPP_COMMIT
+        and report.get("source_sha256")
     ):
-        emit("log", message=f"Using the run's GGUF export ({precision})")
-        return target, report
-    report = gguf.export(model_ref, workspace, emit, precision=precision)
+        weights = {p.name: _sha256(p) for p in sorted(model_dir.glob("*.safetensors"))}
+        if report.get("source_sha256") == weights and report.get("sha256") == _sha256(target):
+            emit("log", message=f"Using the run's GGUF export ({precision})")
+            if stats is not None:
+                stats["cached"] = True
+            return target, report
+    if stats is not None:
+        stats["cached"] = False
+    report = gguf.export(
+        model_ref, workspace, emit, precision=precision, threads=threads, source_sha256=weights
+    )
     return target, report
 
 
@@ -494,7 +623,8 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
 
     Raises when the package does not pass, after keeping it as runs/<id>/noulxp-failed: a
     failing package never replaces the run's package, and is never published."""
-    from . import kinds
+    from . import kinds, telemetry
+    from .runtime import cpu_budget
 
     emit = emit or (lambda *a, **k: None)
     run_id, run_dir, model_dir, run = locate(model_ref, workspace)
@@ -505,8 +635,13 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     missing = missing_tooling(kind)
     if missing:
         raise RuntimeError(tooling_message(missing, kind))
+    from noulxp.conformance import DEFAULT_REQUESTS, read_jsonl
 
     started = time.perf_counter()
+    # One thread count for every CPU step here, the recording and the check alike: the
+    # machine's quota (runtime.cpu_budget).
+    budget = cpu_budget()
+    threads = budget["threads"]
     staging, kept, failed = run_dir / BUILDING, run_dir / PACKAGE, run_dir / FAILED
     shutil.rmtree(staging, ignore_errors=True)
     # Built in a folder named as it is published, so the check's report names it so too.
@@ -521,14 +656,33 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
         "family": family,
         "kind": kind,
         "profile": entry["profile"],
+        "threads": threads,
+        "cpu_quota": budget["quota"],
+        "threads_source": budget["source"],
+        # What the step processes run with (a cap the machine sets already wins).
+        "thread_env": thread_env(threads),
+        "hashes": HASHES,
     }
+    if kind == "laya":
+        report["laya_threads"] = LAYA_THREADS
+    report["machine"] = telemetry.machine(kind)
+    report["memory"] = {"start": telemetry.memory()}
+    steps = telemetry.Steps(report, emit=emit)
     try:
         with tempfile.TemporaryDirectory(prefix=".noulxp-", dir=run_dir) as scratch:
             scratch = Path(scratch)
             source = provenance(run, run_id, workspace)
             view = None
             if kind == "decider":
-                gguf_file, converted = ensure_gguf(f"run:{run_id}", workspace, emit, gguf)
+                cached = {}
+                with steps("gguf", threads=threads, device="cpu") as record:
+                    gguf_file, converted = ensure_gguf(
+                        f"run:{run_id}", workspace, emit, gguf, threads=threads, stats=cached
+                    )
+                    if cached.get("cached"):
+                        record["cached"] = True
+                    else:  # this conversion's own timings, never a stored report's
+                        record["timings"] = converted.get("timings")
                 report["gguf"] = {
                     k: converted.get(k)
                     for k in ("precision", "sha256", "size_mb", "llama_cpp", "verification")
@@ -542,29 +696,49 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                     "phase",
                     phase="export",
                     message="Writing the NoulXP package (noulxp export decider)",
+                    threads=threads,
+                    device="cpu",
                 )
-                export_package(
-                    view, building, f"studio:{run_id}", source, emit, kind, {"gguf": "model.gguf"}
-                )
-            elif kind == "julia":
-                # The package's budgets are the checkpoint's own inference policy.
-                from . import julia
-
-                policy = julia.config(model_dir)
-                emit(
-                    "phase",
-                    phase="export",
-                    message="Writing the NoulXP package (noulxp export julia)",
-                )
-                options = {"max_tokens": policy["max_len"], "head_tokens": policy["head_max_len"]}
-                export_package(model_dir, building, f"studio:{run_id}", source, emit, kind, options)
+                with steps("export", threads=threads, device="cpu", env=thread_env(threads)):
+                    export_package(
+                        view,
+                        building,
+                        f"studio:{run_id}",
+                        source,
+                        emit,
+                        kind,
+                        {"gguf": "model.gguf"},
+                        threads=threads,
+                    )
             else:
+                options = None
+                if kind == "julia":
+                    # The package's budgets are the checkpoint's own inference policy.
+                    from . import julia
+
+                    policy = julia.config(model_dir)
+                    options = {
+                        "max_tokens": policy["max_len"],
+                        "head_tokens": policy["head_max_len"],
+                    }
                 emit(
                     "phase",
                     phase="export",
-                    message="Writing the NoulXP package (noulxp export laya)",
+                    message=f"Writing the NoulXP package (noulxp export {kind})",
+                    threads=threads,
+                    device="cpu",
                 )
-                export_package(model_dir, building, f"studio:{run_id}", source, emit, kind)
+                with steps("export", threads=threads, device="cpu", env=thread_env(threads)):
+                    export_package(
+                        model_dir,
+                        building,
+                        f"studio:{run_id}",
+                        source,
+                        emit,
+                        kind,
+                        options,
+                        threads=threads,
+                    )
             limits = (read_json(building / MANIFEST) or {}).get("limits") or {}
             questions = read_json(model_dir / "questions.json") or {}
             try:
@@ -572,8 +746,6 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
             except (FileNotFoundError, ValueError):
                 rows = []  # the run's dataset was deleted: NoulXP's request set alone
             own, asked = own_requests(questions, rows, limits, test_rows)
-            from noulxp.conformance import DEFAULT_REQUESTS, read_jsonl
-
             requests = read_jsonl(DEFAULT_REQUESTS) + own
             _write_jsonl(scratch / "requests.jsonl", requests)
             report["conformance"] = {
@@ -589,22 +761,61 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                 phase="conformance",
                 message=f"Recording the fine-tune's own answers to {len(requests)} requests "
                 f"({RUNTIME.get(kind, kind)} runtime, CPU)",
+                threads=threads,
+                device="cpu",
             )
             if view is None:
                 view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
-            record_conformance(building, view, scratch / "requests.jsonl", emit, runtime=kind)
-        emit("phase", phase="validate", message="Validating the package: schemas, hashes, coverage")
-        problems = validate_package(building, emit)
-        emit("phase", phase="check", message="Checking the package on the CPU (noulxp check)")
-        check = check_package(building, emit)
+            with steps(
+                "conformance", threads=threads, device="cpu", env=thread_env(threads)
+            ) as record:
+                record_conformance(
+                    building,
+                    view,
+                    scratch / "requests.jsonl",
+                    emit,
+                    runtime=kind,
+                    threads=threads,
+                )
+                record["threads_reported"] = _reported(
+                    ((read_json(building / MANIFEST) or {}).get("conformance") or {}).get(
+                        "generated_by"
+                    )
+                )
+        emit(
+            "phase",
+            phase="validate",
+            message="Validating the package: schemas, parsers, coverage (the check verifies "
+            "every file's hash)",
+        )
+        with steps("validate"):
+            problems = validate_package(building, emit)
+        emit(
+            "phase",
+            phase="check",
+            message="Checking the package (noulxp check): every file's SHA-256, then the cases "
+            "on the CPU",
+            threads=threads,
+            device="cpu",
+        )
+        with steps("check", threads=threads, device="cpu", env=thread_env(threads)) as record:
+            check = check_package(building, emit, threads=threads)
+            record["threads_reported"] = _reported(check.get("runtime"))
     except BaseException as error:
         shutil.rmtree(staging, ignore_errors=True)
         report["error"] = f"{type(error).__name__}: {error}"
         report["seconds"] = round(time.perf_counter() - started, 1)
+        report["memory"]["end"] = telemetry.memory()
         write_json(run_dir / REPORT, report)
         raise
 
-    passed = bool(check.get("passed") and check.get("compatible")) and not problems
+    # A file that does not match its hash fails the check (package_problems); refused here too,
+    # whatever a later noulxp decides "passed" means.
+    passed = (
+        bool(check.get("passed") and check.get("compatible"))
+        and not problems
+        and not check.get("package_problems")
+    )
     report.update(
         state="passed" if passed else "failed",
         seconds=round(time.perf_counter() - started, 1),
@@ -623,6 +834,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
         report["error"] = failure(check, problems)
     shutil.rmtree(staging, ignore_errors=True)
     report["size_mb"] = round(_size(run_dir / report["path"]) / 2**20, 1)
+    report["memory"]["end"] = telemetry.memory()
     write_json(run_dir / REPORT, report)
     emit("result", **result_fields(report))
     if not passed:

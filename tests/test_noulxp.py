@@ -4,6 +4,7 @@ The model is the tiny random checkpoint the other tests use, in float16 like a r
 nothing is downloaded and no real model runs.
 """
 
+import contextlib
 import hashlib
 import json
 import shutil
@@ -364,6 +365,156 @@ def test_a_tampered_package_does_not_count_as_passing(tmp_path):
     (package / "model.onnx").write_bytes(b"graph")
     (package / "check-cpu.json").write_text(json.dumps({**check, "passed": False}))
     assert noulxp_package.passing_package(run_dir, model) is None
+
+
+# ----------------------------------------------------------------------------- what the build says
+
+
+@needs_tooling
+def test_the_report_says_what_each_step_took_and_the_result_does_not(built):
+    workspace, report, events, _ = built
+    threads = report["threads"]
+    assert 1 <= threads <= 32 and report["threads_source"] in (
+        "env",
+        "cgroup2",
+        "cgroup1",
+        "fallback",
+    )
+    assert report["hashes"] == noulxp_package.HASHES
+    assert report["thread_env"]["OMP_NUM_THREADS"] and "laya_threads" in report
+    steps = report["steps"]
+    assert list(steps) == ["export", "conformance", "validate", "check"]
+    assert all(steps[name]["seconds"] >= 0 for name in steps)
+    assert steps["conformance"]["threads"] == steps["check"]["threads"] == threads
+    assert steps["check"]["device"] == "cpu" and "threads" not in steps["validate"]
+    # What the steps say they ran with: never inferred (null where noulxp 0.4.0 says nothing).
+    assert steps["check"]["threads_reported"] in (None, threads)
+    assert steps["conformance"]["threads_reported"] in (None, threads)
+    on_disk = json.loads((workspace / "runs" / RUN / noulxp_package.REPORT).read_text())
+    assert on_disk["steps"] == steps and on_disk["machine"]["cpu_count"]
+    phases = {e["phase"]: e for e in events if e["type"] == "phase"}
+    assert phases["check"]["threads"] == threads and phases["check"]["device"] == "cpu"
+    assert "SHA-256" in phases["check"]["message"] and "parsers" in phases["validate"]["message"]
+    timed = [e for e in events if e["type"] == "log" and e.get("step")]
+    assert [e["step"] for e in timed] == list(steps)
+    result = next(e for e in events if e["type"] == "result")
+    assert set(result) - {"type"} == set(noulxp_package.result_fields(report))
+    # Nothing of it is in the package.
+    package = workspace / "runs" / RUN / noulxp_package.PACKAGE
+    for name in ("noulxp.json", "check-cpu.json"):
+        text = (package / name).read_text()
+        assert '"steps"' not in text and "threads_source" not in text
+
+
+def fresh_workspace(built, root):
+    """A copy of the built workspace with no package, failed package or report."""
+    workspace = root / "ws"
+    shutil.copytree(built[0], workspace)
+    run_dir = workspace / "runs" / RUN
+    for name in (noulxp_package.PACKAGE, noulxp_package.FAILED):
+        shutil.rmtree(run_dir / name, ignore_errors=True)
+    (run_dir / noulxp_package.REPORT).unlink(missing_ok=True)
+    return workspace, run_dir
+
+
+def without_volatile(manifest):
+    """A manifest without what differs from build to build: when it was converted, the
+    exporter's informative onnxruntime-versus-torch numbers, the recording's seconds and
+    threads."""
+    manifest = json.loads(json.dumps(manifest))
+    manifest["source"].pop("converted_at", None)
+    manifest["source"].get("export", {}).pop("verification", None)
+    by = manifest["conformance"]["generated_by"]
+    by.pop("seconds", None)
+    by.pop("threads", None)
+    return manifest
+
+
+def same_package(a, b):
+    """Two packages with the same files, byte for byte, apart from the manifest's volatile
+    fields and the check's report; and checks that passed alike. The graphs are byte for byte
+    the same only from exports with one PYTHONHASHSEED (reproducible): the exporter names
+    ModernBERT's two rotary caches in an order that follows string hashing."""
+    names = sorted(p.name for p in a.iterdir())
+    assert names == sorted(p.name for p in b.iterdir())
+    for name in names:
+        if name not in ("noulxp.json", "check-cpu.json"):
+            assert (a / name).read_bytes() == (b / name).read_bytes(), name
+    ma, mb = (json.loads((x / "noulxp.json").read_text()) for x in (a, b))
+    assert list(ma) == list(mb) and without_volatile(ma) == without_volatile(mb)
+    ca, cb = (json.loads((x / "check-cpu.json").read_text()) for x in (a, b))
+    for key in ("passed", "compatible", "cases", "cases_passed", "max_abs_dp", "failures"):
+        assert ca[key] == cb[key], key
+    assert ca["passed"] and ca["compatible"]
+
+
+@needs_tooling
+def test_the_package_is_the_same_with_telemetry_off_or_failing(built, tmp_path, monkeypatch):
+    from layastudio import telemetry
+
+    monkeypatch.setenv("PYTHONHASHSEED", "0")  # reproducible graphs (same_package)
+    workspace, run_dir = fresh_workspace(built, tmp_path / "on")
+    on = export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    assert on["steps"]
+
+    class Off:
+        def __init__(self, report, **kwargs):
+            pass
+
+        @contextlib.contextmanager
+        def __call__(self, name, **settings):
+            yield {}
+
+    with monkeypatch.context() as m:
+        m.setattr(telemetry, "Steps", Off)
+        m.setattr(telemetry, "machine", lambda *a, **k: {})
+        workspace_off, run_off = fresh_workspace(built, tmp_path / "off")
+        off = export(f"run:{RUN}", "noulxp", workspace_off, test_rows=0)
+    assert off["state"] == "passed" and "steps" not in off
+    same_package(run_dir / noulxp_package.PACKAGE, run_off / noulxp_package.PACKAGE)
+
+    def broken(*args, **kwargs):
+        raise OSError("cgroup gone")
+
+    monkeypatch.setattr(telemetry, "_read", broken)
+    workspace_broken, run_broken = fresh_workspace(built, tmp_path / "broken")
+    failing = export(f"run:{RUN}", "noulxp", workspace_broken, test_rows=0)
+    assert failing["state"] == "passed" and failing["check"]["passed"]
+    same_package(run_dir / noulxp_package.PACKAGE, run_broken / noulxp_package.PACKAGE)
+
+
+@needs_tooling
+@pytest.mark.parametrize("tamper", ["weights", "conformance"])
+def test_a_file_changed_after_validate_fails_the_check(built, tmp_path, monkeypatch, tamper):
+    """validate leaves the hashes to the check: a file changed between the two is caught there,
+    and the package is kept apart and never published."""
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    real_validate = noulxp_package.validate_package
+
+    def validate_then_tamper(package_dir, emit):
+        problems = real_validate(package_dir, emit)
+        if tamper == "weights":  # the last byte: tensor data, not the header
+            path = package_dir / "model.safetensors"
+            data = bytearray(path.read_bytes())
+            data[-1] ^= 1
+            path.unlink()  # the export hard-links it to the run's checkpoint: a copy of its own
+            path.write_bytes(bytes(data))
+        else:
+            path = package_dir / "conformance.jsonl"
+            path.write_text(path.read_text().replace('"id": "', '"id": "x', 1))
+        return problems
+
+    monkeypatch.setattr(noulxp_package, "validate_package", validate_then_tamper)
+    with pytest.raises(RuntimeError, match="never published"):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    report = json.loads((run_dir / noulxp_package.REPORT).read_text())
+    assert report["state"] == "failed" and report["problems"] == []
+    assert report["error"].startswith("The package's files do not check out")
+    name = "model.safetensors" if tamper == "weights" else "conformance.jsonl"
+    assert any(name in p for p in report["check"]["package_problems"])
+    assert (run_dir / noulxp_package.FAILED).is_dir()
+    assert not (run_dir / noulxp_package.PACKAGE).exists()
+    assert noulxp_package.passing_package(run_dir, run_dir / "model") is None
 
 
 def test_the_card_says_when_a_version_has_no_package():

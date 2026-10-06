@@ -320,3 +320,60 @@ def test_a_julia_fine_tune_gets_a_noulxp_package_that_passes(checkpoint, tmp_pat
     card = (run_dir / "model/README.md").read_text()
     assert "Supersonic Labs" in card and "base_model: SupersonicLabs/Julia-1" in card
     assert "**NoulXP:** this version carries a NoulXP package" in card
+
+
+def julia_run(root, checkpoint, run_id="jt"):
+    import shutil
+
+    workspace, meta = workspace_with_data(root, 30)
+    run_dir = workspace / "runs" / run_id
+    shutil.copytree(checkpoint, run_dir / "model")
+    engine.write_json(run_dir / "model/questions.json", QUESTIONS)
+    engine.write_json(
+        run_dir / "run.json",
+        {"id": run_id, "dataset": meta["id"], "base_model": "hub:SupersonicLabs/Julia-1"},
+    )
+    return workspace, run_dir
+
+
+def cases(run_dir):
+    path = run_dir / "noulxp/conformance.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@pytest.mark.skipif(TOOLING is not None, reason=f"NoulXP tooling: {TOOLING}")
+def test_the_thread_count_changes_nothing_but_rounding(checkpoint, tmp_path, monkeypatch):
+    """Julia's own runtime and the check at 1 and at 4 threads (LAYASTUDIO_THREADS): the same
+    cases, keys and refusals, every probability within 1e-4 (the file's 4-decimal rounding can
+    flip on a 1e-7 difference), both checks passing, the exporter's informative comparison
+    within 1e-6."""
+    built = {}
+    for threads in (1, 4):
+        monkeypatch.setenv("LAYASTUDIO_THREADS", str(threads))
+        workspace, run_dir = julia_run(tmp_path / str(threads), checkpoint)
+        report = export("run:jt", "noulxp", workspace, test_rows=0)
+        assert report["state"] == "passed" and report["threads"] == threads
+        assert report["threads_source"] == "env"
+        assert report["steps"]["check"]["threads"] == threads
+        manifest = json.loads((run_dir / "noulxp/noulxp.json").read_text())
+        assert manifest["conformance"]["generated_by"]["threads"] == threads
+        built[threads] = (cases(run_dir), manifest)
+    (one, m1), (four, m4) = built[1], built[4]
+    assert [c["id"] for c in one] == [c["id"] for c in four]
+    worst = 0.0
+    for a, b in zip(one, four):
+        assert ("error" in a) == ("error" in b)
+        if "error" in a:
+            assert a["error"]["type"] == b["error"]["type"]
+            continue
+        assert list(a["expected"]) == list(b["expected"])
+        for qid, want in a["expected"].items():
+            got = b["expected"][qid]["probabilities"]
+            assert list(want["probabilities"]) == list(got)
+            for key, p in want["probabilities"].items():
+                worst = max(worst, abs(p - got[key]))
+    assert worst <= 1e-4, worst
+    v1, v4 = (m["source"]["export"]["verification"] for m in (m1, m4))
+    assert set(v1) == set(v4) and v1["rows"] == v4["rows"]
+    assert v1["same_argmax"] == v4["same_argmax"]
+    assert abs(v1["max_abs_p"] - v4["max_abs_p"]) <= 1e-6
