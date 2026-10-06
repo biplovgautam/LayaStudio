@@ -640,6 +640,28 @@ def test_a_card_that_cannot_be_written_is_a_warning(tmp_path, monkeypatch):
     assert "No model card: OSError: disk full" in result["warnings"]
 
 
+def test_a_card_that_fails_halfway_leaves_no_card(tmp_path, monkeypatch):
+    """finetune.json fails after README.md is written: the run has no card, not a card with
+    one file, and nothing of it is left for the manifest to list."""
+    scripted(monkeypatch, train=TRAINED)
+    write_json, there = engine.write_json, []
+
+    def full_disk(path, value):
+        if os.path.basename(path) == "finetune.json":
+            there.extend(sorted(os.listdir(os.path.dirname(path))))
+            raise OSError("disk full")
+        return write_json(path, value)
+
+    monkeypatch.setattr(engine, "write_json", full_disk)
+    assert cloud.run(scripted_run(tmp_path, keep_checkpoint=True), stream=io.StringIO()) == 0
+    assert there == ["README.md"]  # the README was written when the record failed
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "succeeded" and "card" not in result["outputs"]
+    assert "No model card: OSError: disk full" in result["warnings"]
+    run_dir = tmp_path / "run/ws/runs" / result["run_id"]
+    assert not (run_dir / "card").exists() and not (run_dir / "card.tmp").exists()
+
+
 def test_step_progress_reaches_the_end_whatever_the_epochs_hold():
     """Every trainer's step events: the share done grows with each update, epochs of
     different lengths included, and is 1 at the last."""

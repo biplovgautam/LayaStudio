@@ -759,7 +759,8 @@ def _measured(comparison):
 def write_card(run_id, workspace, dataset=None, template=None):
     """runs/<id>/card from the run's own files: README.md, the model card, and finetune.json,
     the fine-tune's record (this module's docstring). dataset: its meta, of which only the
-    digest and the counts are kept. Returns the record."""
+    digest and the counts are kept. Returns the record. A card is written whole or not at
+    all: never with only some of its files."""
     from . import kinds, noulxp_package
     from .families import find
     from .publish import build_card
@@ -809,11 +810,19 @@ def write_card(run_id, workspace, dataset=None, template=None):
         "noulxp": {k: package.get(k) for k in NOULXP_KEYS} if package else None,
         "created": engine.now(),
     }
-    folder = run_dir / CARD
+    # Written whole or not at all: both files go to card.tmp, which no manifest lists, and that
+    # folder becomes card only once both are in it. A card that fails to write, or a run killed
+    # while writing it, never leaves a card with one file or a cut-off README to upload.
+    folder, staging = run_dir / CARD, run_dir / f"{CARD}.tmp"
+    shutil.rmtree(staging, ignore_errors=True)
     shutil.rmtree(folder, ignore_errors=True)
-    folder.mkdir(parents=True)
-    (folder / "README.md").write_text(card, encoding="utf-8")
-    engine.write_json(folder / "finetune.json", record)
+    try:
+        staging.mkdir(parents=True)
+        (staging / "README.md").write_text(card, encoding="utf-8")
+        engine.write_json(staging / "finetune.json", record)
+        staging.rename(folder)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return record
 
 
@@ -979,6 +988,7 @@ def _card(run_id, workspace, meta, template, emit, outcome):
     try:
         write_card(run_id, workspace, meta, template)
     except Exception as error:  # noqa: BLE001 - the run's outputs stand without a card
+        shutil.rmtree(workspace / "runs" / run_id / CARD, ignore_errors=True)  # none listed
         message = f"No model card: {type(error).__name__}: {error}"
         outcome["warnings"].append(message)
         emit("log", message=message)
