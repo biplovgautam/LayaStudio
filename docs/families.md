@@ -144,10 +144,31 @@ fine-tuning (paired, one question per request on the A40): Julia 10.4 ms, Decide
 | Decider 2B (the maker's v11) | GGUF bf16 | 3.8 GB | the same | 0 answers changed |
 | Decider 2B | NoulXP `causal-letters` (the run's GGUF) | 3.6 GB (bf16, the default) or 1.9 GB (q8_0) | Decider's own GGUF readout on the CPU, NoulXP's 52 requests | **52/52 cases**, max \|Δp\| 5.0e-5 |
 
+"60 test rows" is the measurement every GGUF gets by default (gguf.FULL_VERIFY_ROWS: the first
+60 rows of the test split, every decode they make). gguf.VERIFY_ROWS can lower it for bf16
+alone, the merged weights exactly, as a product decision: it then caps the decodes and spreads
+them over the whole test split and its answer types, and the report adds `test_rows` and
+`of_test_rows` to say it is a sample. q8_0 and f16 always get 60. The measurement is the
+studio's own report (`exports/gguf-<precision>.json`, and `gguf` in `noulxp-report.json`): no
+NoulXP package, check or card depends on it.
+
 60 rows did not show what q8_0 costs; 2,000 questions did. A Decider package therefore carries
 the bf16 GGUF, the merged weights exactly, by default, and q8_0 only on request (`--gguf
 q8_0`). At 3.6 GB a bf16 package is over the size the registry checks by itself (2.5 GB by
 default, an admin setting), so an admin asks for its check, or raises that limit.
+
+### Threads and timings of a NoulXP build
+
+Every CPU step of a build (the GGUF readout, `noulxp conformance generate`, `noulxp check`)
+runs with the same thread count: the container's CPU quota (cgroup `cpu.max`, floored, 8 on
+the A40 pods' 8.5 CPUs), else at most 8, or `LAYASTUDIO_THREADS`. The steps' processes get it
+as `--threads` and as `OMP_NUM_THREADS`/`MKL_NUM_THREADS` (Laya's own runtime takes no thread
+count). Without test rows, Laya and Julia record their own answers while `noulxp export` traces
+the graph. On a CUDA machine, the GGUF's float32 reference reads its rows on the GPU while the
+converter runs. `noulxp-report.json` says what each step took (`steps`: seconds, CPU seconds,
+threads, the container's CPU throttling, peak threads and memory of each step's process) and
+on what machine (`machine`); thread counts move answers by rounding only (the check's tolerance
+is 0.01).
 
 For scale, bfloat16 alone (the same weights in PyTorch on the GPU) moves Decider's answers by up
 to 0.017 against float32. A publish dry run of each fine-tune lists the maker's own files with
