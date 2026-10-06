@@ -2,9 +2,9 @@
 recorded beside the export: with stand-ins for the step processes, so they run anywhere.
 
 The guards here keep what a package certifies where it is: the check always hashes every file
-(validate may skip that only because the check does it), always runs on the CPU, at the same
-thread count as the recording, and never with a serving option. Every step runs behind
-children.WATCH, with its own arguments after it."""
+(validate may skip that only because the check does it), always runs on the CPU, at the build's
+thread count (the recording runs at that count too, or one fewer beside the export), and never
+with a serving option. Every step runs behind children.WATCH, with its own arguments after it."""
 
 import hashlib
 import io
@@ -84,6 +84,7 @@ def test_the_check_runs_exactly_so(tmp_path, steps):
         "MKL_NUM_THREADS": "6",
         "OPENBLAS_NUM_THREADS": "6",
         "LAYASTUDIO_THREADS": "6",
+        "NOULXP_THREADS": "6",
     }
     assert check.env["HF_HUB_OFFLINE"] == "1"
     assert check.env[children.PARENT] == str(os.getpid())
@@ -103,7 +104,7 @@ def test_validate_leaves_the_hashes_to_the_check_and_only_to_it(tmp_path, steps)
     assert "--no-hashes" not in check.args
 
 
-def test_the_recording_gets_the_same_threads_and_every_request(tmp_path, steps):
+def test_the_recording_gets_its_threads_and_every_request(tmp_path, steps):
     noulxp_package.record_conformance(
         tmp_path / "pkg", tmp_path / "view", tmp_path / "r.jsonl", print, "decider", threads=6
     )
@@ -138,7 +139,19 @@ def test_a_cap_the_machine_sets_wins_and_is_what_is_reported(tmp_path, steps, mo
         "MKL_NUM_THREADS": None,
         "OPENBLAS_NUM_THREADS": None,
         "LAYASTUDIO_THREADS": None,
+        "NOULXP_THREADS": None,
     }
+
+
+def test_a_step_gets_its_own_count_whatever_the_job_was_given(tmp_path, steps, monkeypatch):
+    """LAYASTUDIO_THREADS=8 set the job's budget; the export beside the recording still gets 1
+    for its comparison (ORT_THREADS reads it)."""
+    monkeypatch.setenv("LAYASTUDIO_THREADS", "8")
+    noulxp_package.export_package(tmp_path, tmp_path / "out", "n", {}, print, "laya", threads=1)
+    [export] = steps
+    assert {name: export.env[name] for name in noulxp_package.THREAD_VARS} == dict.fromkeys(
+        noulxp_package.THREAD_VARS, "1"
+    )
 
 
 def test_the_export_caps_its_threads_and_runs_its_exporter(tmp_path, steps):
@@ -148,6 +161,7 @@ def test_the_export_caps_its_threads_and_runs_its_exporter(tmp_path, steps):
     assert export.args[3] == "-c" and export.args[4] == noulxp_package.EXPORT
     assert export.args[4].startswith(noulxp_package.ORT_THREADS)
     assert export.env["LAYASTUDIO_THREADS"] == "1" and export.env["OMP_NUM_THREADS"] == "1"
+    assert export.env["NOULXP_THREADS"] == "1"
 
 
 # ----------------------------------------------------------------------------- ORT_THREADS
@@ -202,6 +216,89 @@ def test_ort_threads_does_nothing_without_a_positive_count(ort_graph, monkeypatc
         monkeypatch.setenv("LAYASTUDIO_THREADS", value)
     exec(noulxp_package.ORT_THREADS, {})
     assert providers.ort_session is original
+
+
+# The export step's own preamble, then the exporter's informative comparison as the noulxp
+# installed (or on PYTHONPATH) runs it, on a pod whose quota binds: 8.5 CPUs of 10 visible.
+# noulxp 0.4.1 reads that quota for any count it is not given; 0.4.0 has no such reading.
+COMPARISON = noulxp_package.ORT_THREADS + (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "import numpy as np\n"
+    "import torch\n"
+    "import noulxp.providers as providers\n"
+    "if hasattr(providers, 'cpu_quota'):\n"
+    "    providers.cpu_quota = lambda *a, **k: 8.5\n"
+    "if hasattr(providers, 'affinity'):\n"
+    "    providers.affinity = lambda: 10\n"
+    "seen = {'ort': [], 'torch': []}\n"
+    "capped = providers.ort_session\n"
+    "def spy(path, *args, **kwargs):\n"
+    "    session, used = capped(path, *args, **kwargs)\n"
+    "    seen['ort'].append(session.get_session_options().intra_op_num_threads)\n"
+    "    return session, used\n"
+    "providers.ort_session = spy\n"
+    "class Positions(torch.nn.Module):\n"
+    "    def forward(self, ids, mask, positions, markers, qtype):\n"
+    "        seen['torch'].append(torch.get_num_threads())\n"
+    "        return positions.float()\n"
+    "from noulxp.export import onnx_graph\n"
+    "feeds = {\n"
+    "    'input_ids': np.array([[1, 2, 3, 4]], dtype=np.int64),\n"
+    "    'attention_mask': np.ones((1, 4), dtype=np.int64),\n"
+    "    'marker_positions': np.array([[0, 1]], dtype=np.int64),\n"
+    "    'marker_mask': np.array([[True, True]]),\n"
+    "    'question_type': np.array([0], dtype=np.int64),\n"
+    "}\n"
+    "result = onnx_graph.compare_with_torch(Path(sys.argv[1]), Positions(), [feeds])\n"
+    "print(json.dumps({**seen, 'rows': result['rows']}))\n"
+)
+
+
+@pytest.fixture
+def positions_graph(tmp_path):
+    """option_logits = marker_positions as floats, over the five inputs of an encoder graph."""
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
+    pytest.importorskip("torch")
+    pytest.importorskip("noulxp.export.onnx_graph")
+    from onnx import TensorProto, helper
+
+    inputs = [
+        helper.make_tensor_value_info("input_ids", TensorProto.INT64, ["batch", "tokens"]),
+        helper.make_tensor_value_info("attention_mask", TensorProto.INT64, ["batch", "tokens"]),
+        helper.make_tensor_value_info("marker_positions", TensorProto.INT64, ["batch", "options"]),
+        helper.make_tensor_value_info("marker_mask", TensorProto.BOOL, ["batch", "options"]),
+        helper.make_tensor_value_info("question_type", TensorProto.INT64, ["batch"]),
+    ]
+    output = helper.make_tensor_value_info("option_logits", TensorProto.FLOAT, ["batch", "options"])
+    node = helper.make_node("Cast", ["marker_positions"], ["option_logits"], to=TensorProto.FLOAT)
+    graph = helper.make_graph([node], "positions", inputs, [output])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 18)])
+    model.ir_version = 10
+    path = tmp_path / "positions.onnx"
+    onnx.save(model, str(path))
+    return path
+
+
+@pytest.mark.parametrize("threads", [1, 3])
+def test_the_exporters_comparison_runs_at_the_steps_threads(positions_graph, monkeypatch, threads):
+    """The export step's own count caps both halves of the exporter's informative comparison,
+    onnxruntime and torch, even where a quota binds: with noulxp 0.4.0 (ORT_THREADS and
+    OMP_NUM_THREADS) and with 0.4.1, which reads NOULXP_THREADS instead of the quota."""
+    for name in noulxp_package.THREAD_VARS:
+        monkeypatch.delenv(name, raising=False)
+    done = subprocess.run(
+        [sys.executable, "-c", COMPARISON, str(positions_graph)],
+        env=noulxp_package._child_env(threads),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen["rows"] == 1
+    assert seen["ort"] == [threads] and seen["torch"] == [threads]
 
 
 # ----------------------------------------------------------------------------- the merge

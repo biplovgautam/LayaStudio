@@ -391,7 +391,10 @@ def test_the_report_says_what_each_step_took_and_the_result_does_not(built):
     steps = report["steps"]
     assert list(steps) == ["export", "conformance", "validate", "check"]
     assert all(steps[name]["seconds"] >= 0 for name in steps)
+    # One after the other (test rows): the recording at the build's count, like the check.
+    # Beside the export it records with one fewer (test_laya_records_beside_the_export_...).
     assert steps["conformance"]["threads"] == steps["check"]["threads"] == threads
+    assert steps["export"]["threads"] == threads and "beside_export" not in steps["conformance"]
     assert steps["check"]["device"] == "cpu" and "threads" not in steps["validate"]
     # What the steps say they ran with: never inferred (null where noulxp 0.4.0 says nothing).
     assert steps["check"]["threads_reported"] in (None, threads)
@@ -487,6 +490,101 @@ def test_recording_beside_the_export_makes_the_same_package(built, tmp_path, mon
     by = json.loads((packages["1"] / "noulxp.json").read_text())["conformance"]["generated_by"]
     # noulxp 0.4.0 records no threads for laya; 0.4.1 records the count it ran with.
     assert by["runtime"] == "laya" and by.get("threads") in (None, 2)
+
+
+def conformance_cases(run_dir):
+    path = run_dir / noulxp_package.PACKAGE / "conformance.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+@needs_tooling
+def test_laya_records_beside_the_export_at_one_thread_fewer_and_only_rounding_moves(
+    built, tmp_path, monkeypatch
+):
+    """The default path on a pod (forced here): the build's N threads, the export at 1, Laya's
+    own runtime recording beside it at N-1, the check at N; against a build at 1 thread, one
+    step after the other: the same cases, keys and refusals, every probability within 1e-4
+    (the file's 4-decimal rounding can flip on a 1e-7 difference), both checks passing, and the
+    exporter's informative comparison (at 1 thread in both) within 1e-6."""
+    n = 4
+    built_at = {}
+    for name, threads, mode in (("one", 1, "0"), ("beside", n, "1")):
+        monkeypatch.setenv("LAYASTUDIO_THREADS", str(threads))
+        monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", mode)
+        for var in set(noulxp_package.THREAD_VARS) - {"LAYASTUDIO_THREADS"}:
+            monkeypatch.delenv(var, raising=False)
+        workspace, run_dir = fresh_workspace(built, tmp_path / name)
+        events = []
+        report = export(
+            f"run:{RUN}",
+            "noulxp",
+            workspace,
+            lambda kind, **data: events.append({"type": kind, **data}),
+            test_rows=0,
+        )
+        assert report["state"] == "passed" and report["check"]["passed"]
+        assert report["threads"] == threads and report["threads_source"] == "env"
+        manifest = json.loads((run_dir / noulxp_package.PACKAGE / "noulxp.json").read_text())
+        built_at[name] = (report, events, conformance_cases(run_dir), manifest)
+
+    report, events, _, manifest = built_at["beside"]
+    steps = report["steps"]
+    assert steps["conformance"]["beside_export"] is True
+    assert steps["export"]["beside_conformance"] is True
+    counts = [steps[name]["threads"] for name in ("export", "conformance", "check")]
+    assert counts == [1, n - 1, n]
+    assert set(steps["export"]["env"].values()) == {"1"}
+    assert set(steps["conformance"]["env"].values()) == {str(n - 1)}
+    assert set(steps["check"]["env"].values()) == {str(n)}
+    phases = {e["phase"]: e["threads"] for e in events if e["type"] == "phase" and "threads" in e}
+    assert phases == {"export": 1, "conformance": n - 1, "check": n}
+    # noulxp 0.4.0 records no threads for laya; 0.4.1 records the count it ran with.
+    assert manifest["conformance"]["generated_by"].get("threads") in (None, n - 1)
+    assert steps["conformance"]["threads_reported"] in (None, n - 1)
+
+    (_, _, one, m1), (_, _, beside, mn) = built_at["one"], built_at["beside"]
+    assert [c["id"] for c in one] == [c["id"] for c in beside]
+    worst = 0.0
+    for a, b in zip(one, beside):
+        assert ("error" in a) == ("error" in b)
+        if "error" in a:
+            assert a["error"]["type"] == b["error"]["type"]
+            continue
+        assert list(a["expected"]) == list(b["expected"])
+        for qid, want in a["expected"].items():
+            got = b["expected"][qid]["probabilities"]
+            assert list(want["probabilities"]) == list(got)
+            for key, p in want["probabilities"].items():
+                worst = max(worst, abs(p - got[key]))
+    assert worst <= 1e-4, worst
+    v1, vn = (m["source"]["export"]["verification"] for m in (m1, mn))
+    assert set(v1) == set(vn) and v1["rows"] == vn["rows"]
+    assert v1["same_argmax"] == vn["same_argmax"]
+    assert abs(v1["max_abs_p"] - vn["max_abs_p"]) <= 1e-6
+
+
+@needs_tooling
+def test_a_cancel_during_the_machine_probe_still_reports_and_cleans_up(
+    built, tmp_path, monkeypatch
+):
+    """Decider's llama.cpp probe (telemetry.machine) runs inside the build's try: a cancel there
+    replaces the previous attempt's report and leaves no staging or scratch folder."""
+    from layastudio import telemetry
+
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    (run_dir / noulxp_package.REPORT).write_text(json.dumps({"created": "earlier"}))
+
+    def probe(kind=None, **kwargs):
+        raise engine.Cancelled()
+
+    monkeypatch.setattr(telemetry, "machine", probe)
+    with pytest.raises(engine.Cancelled):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    report = json.loads((run_dir / noulxp_package.REPORT).read_text())
+    assert report["created"] != "earlier" and report["error"].startswith("Cancelled")
+    assert report["state"] == "failed" and "end" in report["memory"]
+    assert not (run_dir / noulxp_package.BUILDING).exists()
+    assert not list(run_dir.glob(".noulxp-*"))
 
 
 @needs_tooling

@@ -31,17 +31,20 @@ runtime that noulxp has for the run's checkpoint kind (kinds.py):
    (each probability within 0.01, and the same leading option). The check is the one pass
    that hashes the package, on the final files, right before it decides.
 
-Each step runs in a process of its own, so memory goes back between them, with as many CPU
-threads as the machine's quota allows (runtime.cpu_threads(): a pod's cgroup cpu.max), the same
-count for the recording and the check. For Laya and Julia without test rows, the model's own
-runtime records its answers while `noulxp export` traces the graph (both read only the run's
-checkpoint), and its file joins the package once the export is done. The package is built
-in runs/<id>/noulxp.partial/noulxp and becomes runs/<id>/noulxp only once it passes, with the
-check's report inside it (check-cpu.json). A package that fails is kept as
-runs/<id>/noulxp-failed for reading and is never published. runs/<id>/noulxp-report.json
-describes the last attempt, with what each step took ("steps": seconds, CPU, threads, the
-container's throttling and memory; telemetry.py): it explains a measurement, it certifies
-nothing, and none of it goes into the package.
+Each step runs in a process of its own, so memory goes back between them, and ends with the
+job even when the job is killed outright (children.py). The machine's quota decides the CPU
+threads, N (runtime.cpu_budget(): a pod's cgroup cpu.max). The check, the GGUF readout
+(gguf.py: two fewer while its float32 reference reads beside it) and the recording run with N,
+and so does the export, except beside the recording: for Laya and Julia without test rows, the
+model's own runtime records its answers with N-1 threads while `noulxp export` traces the
+graph with 1 (both read only the run's checkpoint), and the recording's file joins the package
+once the export is done. Thread counts move answers by rounding only, far inside the check's
+tolerance. The package is built in runs/<id>/noulxp.partial/noulxp and becomes
+runs/<id>/noulxp only once it passes, with the check's report inside it (check-cpu.json). A
+package that fails is kept as runs/<id>/noulxp-failed for reading and is never published.
+runs/<id>/noulxp-report.json describes the last attempt, with what each step took ("steps":
+seconds, CPU, threads, the container's throttling and memory; telemetry.py): it explains a
+measurement, it certifies nothing, and none of it goes into the package.
 
 Publishing (publish_systemone.py) places the passing package next to the checkpoint's own
 files, as the version's `noulxp/` folder, for as long as the upload takes.
@@ -125,11 +128,12 @@ MIN_TRANSFORMERS = (5, 2)
 FILE_KEYS = ("weights", "tokenizer", "template", "prompt", "calibration", "conformance")
 
 # ONNX Runtime's threads in the exporter's own process, for its informative onnxruntime-versus-
-# torch comparison (source.export.verification) only: noulxp 0.4's compare_with_torch opens its
-# session with no thread count, which is one thread per host core on a pod. Installed before
-# the exporter is imported, and nothing unless LAYASTUDIO_THREADS (which the step's process
-# gets: _child_env) is a positive integer and noulxp 0.4's providers.ort_session exists. Only
-# the install is guarded: an error of the export or of a real session still fails the step.
+# torch comparison (source.export.verification) only: noulxp 0.4.0's compare_with_torch opens
+# its session with no thread count, which is one thread per host core on a pod (0.4.1's passes
+# the count NOULXP_THREADS gives it, THREAD_VARS, which this keeps). Installed before the
+# exporter is imported, and nothing unless LAYASTUDIO_THREADS (the step's own count: _child_env)
+# is a positive integer and noulxp 0.4's providers.ort_session exists. Only the install is
+# guarded: an error of the export or of a real session still fails the step.
 ORT_THREADS = (
     "def _cap_ort_threads():\n"
     "    import os\n"
@@ -165,8 +169,17 @@ EXPORT = ORT_THREADS + (
 )
 CASES = re.compile(r"^\s*(\d+)/(\d+) cases\b")
 # The variables that cap a step process's BLAS and OpenMP threads (torch reads them at import),
-# and LAYASTUDIO_THREADS, which the export's ORT_THREADS reads.
-THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "LAYASTUDIO_THREADS")
+# LAYASTUDIO_THREADS, which the export's ORT_THREADS reads, and NOULXP_THREADS: noulxp 0.4.1
+# takes it as the count of anything it is not given one for (its exporters' graph-versus-torch
+# comparison: onnxruntime and torch alike), where it would otherwise read the container's quota
+# and run that comparison at N beside a recording. noulxp 0.4.0 does not read it.
+THREAD_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "LAYASTUDIO_THREADS",
+    "NOULXP_THREADS",
+)
 # Where the package's hashes are verified: once, by the check, on the final files.
 HASHES = "verified by noulxp check (package_problems)"
 # Laya's own runtime takes no thread count, and noulxp 0.4 records none for it.
@@ -401,16 +414,19 @@ def _write_jsonl(path, rows):
 
 def _child_env(threads=None):
     """A step process's environment: offline, unbuffered, naming this job (children.PARENT),
-    and, with a thread count, the BLAS/OpenMP caps (THREAD_VARS) at that count. A cap the
-    machine already sets wins (setdefault): report the effective values (thread_env), not the
-    count asked for. Only step processes get these; the job's own process (training, the GPU)
-    keeps its own."""
+    and, with a thread count, the thread caps (THREAD_VARS) at that count. A cap the machine
+    already sets wins (setdefault): report the effective values (thread_env), not the count
+    asked for. LAYASTUDIO_THREADS is the exception: the job's own was its budget
+    (runtime.cpu_budget), and a step's is always its own count (1 for an export beside the
+    recording). Only step processes get these; the job's own process (training, the GPU) keeps
+    its own."""
     from .children import child_env
 
     env = child_env({**os.environ, "HF_HUB_OFFLINE": "1", "PYTHONUNBUFFERED": "1"})
     if threads:
         for name in THREAD_VARS:
             env.setdefault(name, str(int(threads)))
+        env["LAYASTUDIO_THREADS"] = str(int(threads))
     return env
 
 
@@ -824,8 +840,8 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     from noulxp.conformance import DEFAULT_REQUESTS, read_jsonl
 
     started = time.perf_counter()
-    # One thread count for every CPU step here, the recording and the check alike: the
-    # machine's quota (runtime.cpu_budget).
+    # The machine's quota (runtime.cpu_budget), N: the check's threads, and every other CPU
+    # step's but the two that run side by side (the export at 1, the recording at N-1).
     budget = cpu_budget()
     threads = budget["threads"]
     staging, kept, failed = run_dir / BUILDING, run_dir / PACKAGE, run_dir / FAILED
@@ -852,11 +868,13 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     }
     if kind == "laya":
         report["laya_threads"] = LAYA_THREADS
-    report["machine"] = telemetry.machine(kind)
-    report["memory"] = {"start": telemetry.memory()}
-    steps = telemetry.Steps(report, emit=emit)
     native = None
     try:
+        # Inside the try: a cancel while Decider's llama.cpp probe runs still writes the report
+        # and removes the staging folder.
+        report["machine"] = telemetry.machine(kind)
+        report["memory"] = {"start": telemetry.memory()}
+        steps = telemetry.Steps(report, emit=emit)
         with children.scratch(run_dir, SCRATCH) as scratch:
             scratch = Path(scratch)
             try:
@@ -1057,7 +1075,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
         shutil.rmtree(staging, ignore_errors=True)
         report["error"] = f"{type(error).__name__}: {error}"
         report["seconds"] = round(time.perf_counter() - started, 1)
-        report["memory"]["end"] = telemetry.memory()
+        report.setdefault("memory", {})["end"] = telemetry.memory()
         write_json(run_dir / REPORT, report)
         raise
 

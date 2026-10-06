@@ -407,11 +407,16 @@ def test_gguf_conversion_reads_the_same_letters(real_tokenizer_checkpoint, tmp_p
 
 
 @needs_gguf
-def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(real_tokenizer_checkpoint, tmp_path):
+def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(
+    real_tokenizer_checkpoint, tmp_path, monkeypatch
+):
     """The run's GGUF (bf16 here, small), noulxp export decider, conformance from Decider's own
-    GGUF readout, validate and check: the whole build on the CPU."""
+    GGUF readout, validate and check: the whole build on the CPU, at 3 threads (neither noulxp
+    0.4.0's default for the recording, 4, nor its check's, min(8, CPUs), on any machine with
+    more than 3 CPUs)."""
     if noulxp_package.missing_tooling("decider"):
         pytest.skip(noulxp_package.missing_tooling("decider"))
+    monkeypatch.setenv("LAYASTUDIO_THREADS", "3")
     workspace, meta = workspace_with_data(tmp_path, 30)
     run_dir = workspace / "runs" / "dn"
     shutil.copytree(real_tokenizer_checkpoint, run_dir / "model")
@@ -427,6 +432,24 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(real_tokenizer_ch
     manifest = json.loads((run_dir / "noulxp/noulxp.json").read_text())
     assert manifest["weights"]["format"] == "gguf"
     assert manifest["source"]["gguf"]["precision"] == "bf16"
+    # Every CPU step at the build's count, one after the other: the recording (Decider's own
+    # GGUF readout, which noulxp 0.4.0 records with its threads) and the check alike.
+    threads, steps = report["threads"], report["steps"]
+    assert threads == 3 and report["threads_source"] == "env"
+    assert list(steps) == ["gguf", "export", "conformance", "validate", "check"]
+    for name in ("gguf", "export", "conformance", "check"):
+        assert steps[name]["threads"] == threads, name
+        assert steps[name]["device"] == "cpu", name
+    assert "beside_export" not in steps["conformance"]
+    assert steps["conformance"]["env"]["LAYASTUDIO_THREADS"] == str(threads)
+    assert manifest["conformance"]["generated_by"]["threads"] == threads
+    assert steps["conformance"]["threads_reported"] == threads
+    assert steps["check"]["threads_reported"] in (None, threads)  # noulxp 0.4.0 says none
+    # This build converted its GGUF: its own timings, at its threads.
+    assert "cached" not in steps["gguf"]
+    assert steps["gguf"]["timings"]["threads"] == threads
+    assert steps["gguf"]["timings"]["convert_s"] >= 0
+    assert report["gguf"]["verification"]["threads"] == threads
     calibration = json.loads((run_dir / "noulxp/calibration.json").read_text())
     assert calibration["temperature"]["noul"] == pytest.approx(1.5)
     info = noulxp_package.passing_package(run_dir, run_dir / "model")
@@ -448,6 +471,13 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(real_tokenizer_ch
         assert name in pushed["files"], name
     card = (run_dir / "model/README.md").read_text()
     assert "Mapika" in card and "base_model: Mapika/decider-2b" in card
+    # Built again: the run's GGUF is reused, with no timings of its own (never a stored
+    # report's), and the package checks the same.
+    again = export("run:dn", "noulxp", workspace, test_rows=3, gguf="bf16")
+    assert again["state"] == "passed" and again["steps"]["gguf"]["cached"] is True
+    assert "timings" not in again["steps"]["gguf"]
+    assert again["gguf"]["sha256"] == report["gguf"]["sha256"]
+    assert again["check"]["cases_passed"] == again["check"]["cases"]
     # The package is the run's own GGUF, converted from these weights: change them, and it
     # no longer counts.
     weights = run_dir / "model/model.safetensors"
