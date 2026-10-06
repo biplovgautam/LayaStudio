@@ -1,9 +1,10 @@
 """What a NoulXP build's steps cost here: seconds, CPU, throttling, memory, threads.
 
 Read-only and best-effort. Every reading is a file the kernel already keeps (cgroup cpu.stat,
-memory.peak, /proc/<pid>/status, /proc/cpuinfo) or getrusage; a reading that is not there or
-cannot be read is null, and none can raise into the step it measures. Nothing here writes a
-cgroup file, starts or reaps a step's process, or changes a step's arguments or environment.
+memory.peak, memory.stat, /proc/<pid>/status, /proc/cpuinfo) or getrusage; a reading that is
+not there or cannot be read is null, and none can raise into the step it measures. Nothing
+here writes a cgroup file, starts or reaps a step's process, or changes a step's arguments or
+environment.
 
 The numbers go to runs/<id>/noulxp-report.json ("steps", "machine") and a GGUF export's
 exports/gguf-<precision>.json ("timings"), never into the package or a result event: they
@@ -96,19 +97,42 @@ def memory(root=CGROUP, proc=PROC_CGROUP):
         return {"current": None, "peak": None, "max": None, "oom_kill": None}
 
 
-def free_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):
-    """Bytes this job can still use: the cgroup's memory.max minus memory.current, else the
-    kernel's MemAvailable; None where neither is known (macOS)."""
+def available_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):
+    """Bytes this job can still use, and what they were read from: {"free", "source"} and,
+    under a cgroup limit, the readings ("max", "current", "page_cache").
+
+    Under a limit ("cgroup"): memory.max minus what the kernel cannot reclaim, memory.current
+    less the page cache (memory.stat's file less its shmem, which tmpfs and shared memory hold
+    and no reclaim drops). memory.current counts the page cache too, which reclaim drops
+    before the cgroup would kill anything, so after a few GB of checkpoints have been read or
+    written it says far less is free than is. This is the cgroup's counterpart of
+    MemAvailable; without memory.stat, memory.current is used whole (the smaller figure).
+    Without a limit ("meminfo"): the kernel's MemAvailable. {"free": None, "source": None}
+    where neither is known (macOS). Never raises."""
+    found = {"free": None, "source": None}
     try:
         mem = memory(root, proc)
-        if isinstance(mem["max"], int) and isinstance(mem["current"], int):
-            return max(0, mem["max"] - mem["current"])
+        limit, current = mem["max"], mem["current"]
+        if isinstance(limit, int) and isinstance(current, int):
+            stat = _keyed(_read(cgroup_dir(root, proc) / "memory.stat"))
+            cache = None
+            if "file" in stat:
+                cache = min(current, max(0, stat["file"] - stat.get("shmem", 0)))
+            found.update(source="cgroup", max=limit, current=current, page_cache=cache)
+            found["free"] = max(0, limit - (current - (cache or 0)))
+            return found
         for line in (_read(meminfo) or "").splitlines():
             if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
+                found.update(free=int(line.split()[1]) * 1024, source="meminfo")
+                return found
     except READ_ERRORS:
         pass
-    return None
+    return {"free": None, "source": None}
+
+
+def free_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):
+    """Bytes this job can still use (available_memory()["free"]), None where unknown."""
+    return available_memory(root, proc, meminfo)["free"]
 
 
 def cpu_model(cpuinfo="/proc/cpuinfo"):

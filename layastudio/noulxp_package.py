@@ -724,24 +724,45 @@ def _native_threads(threads, beside_export):
     return max(1, threads - 1) if beside_export else threads
 
 
-def overlap_conformance(kind, test_rows, threads, free=None):
-    """Whether the model's own runtime records its answers while the export runs: Laya and
-    Julia without test rows (the requests are NoulXP's own and need nothing from the export),
-    with 3 threads or more and about 12 GB of memory free. Anything else records after the
-    export, as always. LAYASTUDIO_PARALLEL_CONFORMANCE=0 turns it off, =1 skips the thread and
-    memory gates (tests)."""
-    if kind not in ("laya", "julia") or test_rows != 0:
-        return False
+CONFORMANCE_MEMORY = 12 * 2**30  # free memory the recording beside the export needs
+
+
+def conformance_gate(kind, test_rows, threads, free=None):
+    """Whether the model's own runtime records its answers while the export runs, and what
+    that was decided on: {"overlap", "reason"} and, once read, "threads", "free_bytes",
+    "needed_bytes" and "memory". Laya and Julia without test rows (the requests are NoulXP's
+    own and need nothing from the export), with 3 threads or more and CONFORMANCE_MEMORY free
+    (telemetry.available_memory: the page cache counts as free; `free` given, it is used
+    instead). Anything else records after the export, as always: "kind", "test_rows",
+    "threads" or "memory" names the gate that decided. LAYASTUDIO_PARALLEL_CONFORMANCE=0
+    turns it off, =1 skips the thread and memory gates (tests). The build records it
+    (steps.conformance.overlap_gate); it certifies nothing."""
+    if kind not in ("laya", "julia"):
+        return {"overlap": False, "reason": "kind"}
+    if test_rows != 0:
+        return {"overlap": False, "reason": "test_rows"}
     flag = os.environ.get("LAYASTUDIO_PARALLEL_CONFORMANCE", "").strip()
     if flag in ("0", "1"):
-        return flag == "1"
+        return {"overlap": flag == "1", "reason": f"LAYASTUDIO_PARALLEL_CONFORMANCE={flag}"}
+    gate = {"overlap": False, "reason": "threads", "threads": threads}
     if threads < 3:
-        return False
+        return gate
     if free is None:
-        from .telemetry import free_memory
+        from .telemetry import available_memory
 
-        free = free_memory()
-    return free is not None and free >= 12 * 2**30
+        gate["memory"] = available_memory()
+        free = gate["memory"]["free"]
+    gate.update(free_bytes=free, needed_bytes=CONFORMANCE_MEMORY)
+    if free is None or free < CONFORMANCE_MEMORY:
+        gate["reason"] = "memory"
+        return gate
+    gate.update(overlap=True, reason="gates")
+    return gate
+
+
+def overlap_conformance(kind, test_rows, threads, free=None):
+    """conformance_gate()'s decision alone."""
+    return conformance_gate(kind, test_rows, threads, free)["overlap"]
 
 
 def merge_conformance(stub, building, cases):
@@ -880,6 +901,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
             try:
                 source = provenance(run, run_id, workspace)
                 view = planned = None
+                gate = conformance_gate(kind, test_rows, threads)
                 if kind == "decider":
                     cached = {}
                     with steps("gguf", threads=threads, device="cpu") as record:
@@ -918,7 +940,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                             threads=threads,
                         )
                 else:
-                    if overlap_conformance(kind, test_rows, threads):
+                    if gate["overlap"]:
                         # NoulXP's own requests need nothing from the export: the model's own
                         # runtime records them now, from a copy of the checkpoint.
                         view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
@@ -989,6 +1011,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                     native.stop()
                     native = None
                     emit.release(send=False)
+                    gate = {**gate, "discarded": "the requests changed"}
                 if native is None:
                     _write_jsonl(scratch / "requests.jsonl", requests)
                 report["conformance"] = {
@@ -1019,6 +1042,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                         device="cpu",
                         env=thread_env(recording),
                         beside_export=True,
+                        overlap_gate=gate,
                     ) as record:
                         code = native.wait()
                         record["native_seconds"] = native.seconds
@@ -1032,7 +1056,11 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
                     if view is None:
                         view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
                     with steps(
-                        "conformance", threads=recording, device="cpu", env=thread_env(recording)
+                        "conformance",
+                        threads=recording,
+                        device="cpu",
+                        env=thread_env(recording),
+                        overlap_gate=gate,
                     ) as record:
                         record_conformance(
                             building,

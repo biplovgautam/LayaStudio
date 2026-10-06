@@ -506,26 +506,43 @@ class Reference:
                 pass
 
 
-def overlap_verify():
-    """Whether the float32 reference runs in a process of its own beside the converter: on a
-    CUDA device (ROCm included) with OVERLAP_MEMORY free. Anywhere else the measurement runs
-    in this process after the conversion (today's order), which LAYASTUDIO_SERIAL_VERIFY=1
-    also asks for. LAYASTUDIO_PARALLEL_VERIFY=1 skips the device and memory gates (tests)."""
+def verify_gate():
+    """Whether the float32 reference runs in a process of its own beside the converter, and
+    what that was decided on: {"overlap", "reason", "device", "free_bytes", "needed_bytes",
+    "memory"} (the last four when they were read). On a CUDA device (ROCm included) with
+    OVERLAP_MEMORY free (telemetry.available_memory: the page cache counts as free) it does
+    ("reason": "gates"); anywhere else the measurement runs in this process after the
+    conversion (today's order): "device" or "memory" says which gate kept it there.
+    LAYASTUDIO_SERIAL_VERIFY=1 asks for that too; LAYASTUDIO_PARALLEL_VERIFY=1 skips both
+    gates (tests). The report records it (timings.overlap_gate); it certifies nothing."""
     if os.environ.get("LAYASTUDIO_SERIAL_VERIFY", "").strip() == "1":
-        return False
+        return {"overlap": False, "reason": "LAYASTUDIO_SERIAL_VERIFY"}
     if os.environ.get("LAYASTUDIO_PARALLEL_VERIFY", "").strip() == "1":
-        return True
+        return {"overlap": True, "reason": "LAYASTUDIO_PARALLEL_VERIFY"}
     from .runtime import torch_device
 
     try:
-        if getattr(torch_device(), "type", "cpu") != "cuda":
-            return False
+        device = str(getattr(torch_device(), "type", "cpu"))
     except (ImportError, RuntimeError):
-        return False
-    from .telemetry import free_memory
+        device = None
+    gate = {"overlap": False, "reason": "device", "device": device}
+    if device != "cuda":
+        return gate
+    from .telemetry import available_memory
 
-    free = free_memory()
-    return free is not None and free >= OVERLAP_MEMORY
+    memory = available_memory()
+    free = memory.get("free")
+    gate.update(free_bytes=free, needed_bytes=OVERLAP_MEMORY, memory=memory)
+    if free is None or free < OVERLAP_MEMORY:
+        gate["reason"] = "memory"
+        return gate
+    gate.update(overlap=True, reason="gates")
+    return gate
+
+
+def overlap_verify():
+    """verify_gate()'s decision alone."""
+    return verify_gate()["overlap"]
 
 
 def export(
@@ -564,8 +581,9 @@ def export(
     rows = verify_rows(precision) if rows is None else int(rows)
     threads = int(threads) if threads else cpu_threads()
     started = time.perf_counter()
-    overlap = overlap_verify()
-    timings = {"overlap": overlap, "threads": threads}
+    gate = verify_gate()
+    overlap = gate["overlap"]
+    timings = {"overlap": overlap, "overlap_gate": gate, "threads": threads}
     hasher = reference = scratch = None
     items = sample = None
     try:

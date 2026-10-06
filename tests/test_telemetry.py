@@ -60,6 +60,41 @@ def test_cgroup_readings_present_absent_and_malformed(tmp_path):
     assert telemetry.free_memory(tmp_path / "x", tmp_path / "y", tmp_path / "z") is None
 
 
+def test_free_memory_counts_the_page_cache_as_reclaimable(tmp_path):
+    """The A40 pod's limit (51.2 GB) with 30 GB charged, 12 GB of it page cache (1 GB of that
+    shmem): 32.2 GB free, not the 21.2 GB that memory.max minus memory.current says."""
+    GB = 10**9
+    root, proc = cgroup2(tmp_path / "cg", {".": "max 100000"})
+    (root / "memory.max").write_text(f"{int(51.2 * GB)}\n")
+    (root / "memory.current").write_text(f"{30 * GB}\n")
+    (root / "memory.stat").write_text(
+        f"anon {17 * GB}\nfile {12 * GB}\nkernel {GB}\nshmem {GB}\n"
+        f"active_file {7 * GB}\ninactive_file {5 * GB}\n"
+    )
+    found = telemetry.available_memory(root, proc)
+    assert found == {
+        "free": int(51.2 * GB) - 19 * GB,
+        "source": "cgroup",
+        "max": int(51.2 * GB),
+        "current": 30 * GB,
+        "page_cache": 11 * GB,
+    }
+    assert telemetry.free_memory(root, proc) == found["free"]
+    (root / "memory.stat").write_text(f"anon {GB}\nfile {40 * GB}\nshmem 0\n")  # stale, racy
+    assert telemetry.available_memory(root, proc)["free"] == int(51.2 * GB)  # at most the limit
+    (root / "memory.stat").write_text("anon 1\n")  # no file line: memory.current, whole
+    assert telemetry.free_memory(root, proc) == int(51.2 * GB) - 30 * GB
+    (root / "memory.stat").unlink()
+    assert telemetry.available_memory(root, proc)["page_cache"] is None
+    assert telemetry.free_memory(root, proc) == int(51.2 * GB) - 30 * GB
+    (root / "memory.current").write_text(f"{60 * GB}\n")  # over the limit
+    assert telemetry.free_memory(root, proc) == 0
+    assert telemetry.available_memory(tmp_path / "x", tmp_path / "y", tmp_path / "z") == {
+        "free": None,
+        "source": None,
+    }
+
+
 def test_the_machine_block_reads_cpuinfo(tmp_path):
     root, proc = cgroup2(tmp_path / "cg", {".": "850000 100000"})
     cpuinfo = tmp_path / "cpuinfo"

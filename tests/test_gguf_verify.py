@@ -212,6 +212,119 @@ def test_serial_and_overlapped_measurements_agree(tmp_path, checkpoint, stand_in
     assert FakeReader.made[0].seen == [4] * a["rows"]  # the serial readout at N threads
 
 
+# ----------------------------------------------------------------------------- the gate
+
+GIB = 2**30
+
+
+@pytest.fixture
+def machine(monkeypatch):
+    """The gate's two readings, set by the test: the device torch_device() names and the
+    memory available_memory() reads (None: unknown). Records whether memory was read."""
+    from types import SimpleNamespace
+
+    from layastudio import runtime, telemetry
+
+    seen = {"device": "cuda", "free": 25 * GIB, "reads": 0}
+    monkeypatch.delenv("LAYASTUDIO_SERIAL_VERIFY", raising=False)
+    monkeypatch.delenv("LAYASTUDIO_PARALLEL_VERIFY", raising=False)
+
+    def torch_device():
+        if isinstance(seen["device"], BaseException):
+            raise seen["device"]
+        return SimpleNamespace(type=seen["device"])
+
+    def available_memory():
+        seen["reads"] += 1
+        return {"free": seen["free"], "source": "cgroup" if seen["free"] is not None else None}
+
+    monkeypatch.setattr(runtime, "torch_device", torch_device)
+    monkeypatch.setattr(telemetry, "available_memory", available_memory)
+    return seen
+
+
+def test_the_gate_overlaps_on_cuda_with_the_memory_it_needs(machine):
+    assert gguf.OVERLAP_MEMORY == 24 * GIB
+    gate = gguf.verify_gate()
+    assert gate == {
+        "overlap": True,
+        "reason": "gates",
+        "device": "cuda",
+        "free_bytes": 25 * GIB,
+        "needed_bytes": 24 * GIB,
+        "memory": {"free": 25 * GIB, "source": "cgroup"},
+    }
+    assert gguf.overlap_verify() is True
+    machine["free"] = 24 * GIB
+    assert gguf.verify_gate()["overlap"] is True
+    for free in (23 * GIB, 24 * GIB - 1, 0, None):
+        machine["free"] = free
+        gate = gguf.verify_gate()
+        assert gate["overlap"] is False and gate["reason"] == "memory"
+        assert gate["free_bytes"] == free and gate["device"] == "cuda"
+        assert gguf.overlap_verify() is False
+
+
+@pytest.mark.parametrize("device", ["cpu", "mps", "xpu", "privateuseone"])
+def test_the_gate_keeps_every_other_device_serial(machine, device):
+    machine["device"] = device
+    machine["free"] = 400 * GIB
+    gate = gguf.verify_gate()
+    assert gate == {"overlap": False, "reason": "device", "device": device}
+    assert machine["reads"] == 0  # memory is read on a CUDA device only
+
+
+@pytest.mark.parametrize("error", [ImportError("No module named 'torch'"), RuntimeError("bad")])
+def test_the_gate_without_a_torch_device_is_serial(machine, error):
+    machine["device"] = error
+    assert gguf.verify_gate() == {"overlap": False, "reason": "device", "device": None}
+
+
+def test_the_flags_decide_before_the_gates(machine, monkeypatch):
+    monkeypatch.setenv("LAYASTUDIO_SERIAL_VERIFY", "1")
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_VERIFY", "1")  # serial wins
+    assert gguf.verify_gate() == {"overlap": False, "reason": "LAYASTUDIO_SERIAL_VERIFY"}
+    monkeypatch.delenv("LAYASTUDIO_SERIAL_VERIFY")
+    machine["device"], machine["free"] = "cpu", None
+    assert gguf.verify_gate() == {"overlap": True, "reason": "LAYASTUDIO_PARALLEL_VERIFY"}
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_VERIFY", "0")
+    assert gguf.verify_gate()["reason"] == "device"
+    assert machine["reads"] == 0
+
+
+def test_an_export_takes_the_gates_decision_and_records_it(
+    tmp_path, checkpoint, stand_ins, machine
+):
+    """No flag: on a CUDA device with 25 GiB free the reference starts before the converter,
+    and the report says what the gate read."""
+    workspace, _ = run_workspace(tmp_path, checkpoint)
+    report = gguf.export(f"run:{RUN}", workspace, threads=4)
+    assert stand_ins["order"] == ["reference", "convert"]
+    gate = report["timings"]["overlap_gate"]
+    assert report["timings"]["overlap"] is True and gate["reason"] == "gates"
+    assert gate["free_bytes"] == 25 * GIB and gate["needed_bytes"] == 24 * GIB
+    assert report["verification"]["same_answer"] == report["verification"]["rows"] > 0
+
+
+def test_an_export_on_the_cpu_measures_in_this_process(
+    tmp_path, checkpoint, stand_ins, monkeypatch
+):
+    """No flag, the real torch_device() on the CPU: the measurement after the conversion,
+    in this process, and the report says the device kept it there."""
+    workspace, _ = run_workspace(tmp_path, checkpoint)
+    for flag in ("LAYASTUDIO_SERIAL_VERIFY", "LAYASTUDIO_PARALLEL_VERIFY"):
+        monkeypatch.delenv(flag, raising=False)
+    report = gguf.export(f"run:{RUN}", workspace, threads=4)
+    assert stand_ins["order"] == ["convert"] and not stand_ins["started"]
+    assert report["timings"]["overlap"] is False
+    assert report["timings"]["overlap_gate"] == {
+        "overlap": False,
+        "reason": "device",
+        "device": "cpu",
+    }
+    assert report["verification"]["reference"].endswith("PyTorch on cpu")
+
+
 def _importable(module):
     try:
         __import__(module)

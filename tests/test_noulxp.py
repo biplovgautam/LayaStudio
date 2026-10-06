@@ -399,6 +399,8 @@ def test_the_report_says_what_each_step_took_and_the_result_does_not(built):
     # What the steps say they ran with: never inferred (null where noulxp 0.4.0 says nothing).
     assert steps["check"]["threads_reported"] in (None, threads)
     assert steps["conformance"]["threads_reported"] in (None, threads)
+    # The overlap gate's decision and what decided it (test rows: one after the other).
+    assert steps["conformance"]["overlap_gate"] == {"overlap": False, "reason": "test_rows"}
     on_disk = json.loads((workspace / "runs" / RUN / noulxp_package.REPORT).read_text())
     assert on_disk["steps"] == steps and on_disk["machine"]["cpu_count"]
     phases = {e["phase"]: e for e in events if e["type"] == "phase"}
@@ -481,6 +483,10 @@ def test_recording_beside_the_export_makes_the_same_package(built, tmp_path, mon
         assert phases == ["export", "conformance", "validate", "check"]
         beside = report["steps"]["conformance"].get("beside_export", False)
         assert beside is (mode == "1") and report["steps"]["conformance"]["threads"] == 2
+        assert report["steps"]["conformance"]["overlap_gate"] == {
+            "overlap": mode == "1",
+            "reason": f"LAYASTUDIO_PARALLEL_CONFORMANCE={mode}",
+        }
         progress = [i for i, e in enumerate(events) if e["type"] == "progress"]
         conformance = next(i for i, e in enumerate(events) if e.get("phase") == "conformance")
         assert progress and min(progress) > conformance  # held back until its phase

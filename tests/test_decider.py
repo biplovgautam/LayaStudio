@@ -441,6 +441,7 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(
         assert steps[name]["threads"] == threads, name
         assert steps[name]["device"] == "cpu", name
     assert "beside_export" not in steps["conformance"]
+    assert steps["conformance"]["overlap_gate"] == {"overlap": False, "reason": "kind"}
     assert steps["conformance"]["env"]["LAYASTUDIO_THREADS"] == str(threads)
     assert manifest["conformance"]["generated_by"]["threads"] == threads
     assert steps["conformance"]["threads_reported"] == threads
@@ -449,6 +450,10 @@ def test_a_decider_fine_tune_gets_a_noulxp_package_that_passes(
     assert "cached" not in steps["gguf"]
     assert steps["gguf"]["timings"]["threads"] == threads
     assert steps["gguf"]["timings"]["convert_s"] >= 0
+    # The GGUF measurement's gate: what it read and decided (no GPU here: serial).
+    gate = steps["gguf"]["timings"]["overlap_gate"]
+    assert gate["overlap"] is steps["gguf"]["timings"]["overlap"] is False
+    assert gate["reason"] in ("device", "memory", "LAYASTUDIO_SERIAL_VERIFY"), gate
     assert report["gguf"]["verification"]["threads"] == threads
     calibration = json.loads((run_dir / "noulxp/calibration.json").read_text())
     assert calibration["temperature"]["noul"] == pytest.approx(1.5)

@@ -165,12 +165,17 @@ with N, and the GGUF readout too (two fewer while the float32 reference still re
 beside it); so do `noulxp export` and `noulxp conformance generate` when they run one after the
 other (Decider, or test rows). Without test rows, Laya and Julia record their
 own answers while `noulxp export` traces the graph: the recording with N-1 threads, the export
-with 1 (`LAYASTUDIO_PARALLEL_CONFORMANCE=0` runs them one after the other). Each step's process
+with 1, when 3 threads or more and 12 GiB of memory are free (`LAYASTUDIO_PARALLEL_CONFORMANCE=0`
+runs them one after the other). Each step's process
 gets its count as `--threads` where the command takes one, and as `OMP_NUM_THREADS`,
 `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `LAYASTUDIO_THREADS` and `NOULXP_THREADS` (Laya's own
 runtime takes no thread count; the exporter's informative graph-versus-torch comparison reads
-the last two). On a CUDA machine, the GGUF's float32 reference reads its rows on the GPU while
-the converter runs. Every step's process ends with the job, even a job killed outright (it
+the last two). On a CUDA machine with 24 GiB free, the GGUF's float32 reference reads its rows
+on the GPU while the converter runs (`LAYASTUDIO_SERIAL_VERIFY=1` keeps it after). Free memory
+is the container's limit less what the kernel cannot reclaim: the page cache, which the
+checkpoints just read and written fill, counts as free. Each gate's decision, the gate that
+made it and what it read are in the report (`steps.conformance.overlap_gate`, and the GGUF's
+`timings.overlap_gate`). Every step's process ends with the job, even a job killed outright (it
 exits when the job's end closes its stdin, and on Linux on PR_SET_PDEATHSIG), and the next
 build or GGUF export of the run removes the scratch folders such a job left. `noulxp-report.json` says what each step took (`steps`: seconds, CPU
 seconds, threads, the container's CPU throttling, peak threads and memory of each step's

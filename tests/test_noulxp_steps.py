@@ -453,6 +453,42 @@ def test_only_encoders_without_test_rows_record_beside_the_export(monkeypatch):
     assert gate("laya", 0, 1) and not gate("decider", 0, 8) and not gate("julia", 4, 8)
 
 
+def test_the_conformance_gate_says_what_decided_it(monkeypatch):
+    """What the build records (steps.conformance.overlap_gate): the decision, the gate that
+    made it and what that gate read, memory included (available_memory: page cache free)."""
+    from layastudio import telemetry
+
+    gate = noulxp_package.conformance_gate
+    monkeypatch.delenv("LAYASTUDIO_PARALLEL_CONFORMANCE", raising=False)
+    assert noulxp_package.CONFORMANCE_MEMORY == 12 * 2**30
+    assert gate("decider", 0, 8) == {"overlap": False, "reason": "kind"}
+    assert gate("laya", 5, 8) == {"overlap": False, "reason": "test_rows"}
+    assert gate("julia", 0, 2) == {"overlap": False, "reason": "threads", "threads": 2}
+    reading = {"free": 13 * 2**30, "source": "cgroup", "max": 51 * 2**30, "page_cache": 9}
+    monkeypatch.setattr(telemetry, "available_memory", lambda: dict(reading))
+    assert gate("laya", 0, 8) == {
+        "overlap": True,
+        "reason": "gates",
+        "threads": 8,
+        "free_bytes": 13 * 2**30,
+        "needed_bytes": 12 * 2**30,
+        "memory": reading,
+    }
+    reading["free"] = 12 * 2**30 - 1
+    found = gate("julia", 0, 3)
+    assert found["overlap"] is False and found["reason"] == "memory"
+    assert found["free_bytes"] == 12 * 2**30 - 1
+    reading["free"] = None  # unknown (macOS): one after the other
+    assert gate("laya", 0, 8)["reason"] == "memory"
+    assert gate("laya", 0, 8, free=40 * 2**30)["overlap"] is True  # given: never read
+    for flag in ("0", "1"):
+        monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", flag)
+        assert gate("laya", 0, 1) == {
+            "overlap": flag == "1",
+            "reason": f"LAYASTUDIO_PARALLEL_CONFORMANCE={flag}",
+        }
+
+
 def test_progress_waits_for_the_conformance_phase():
     events = []
 
