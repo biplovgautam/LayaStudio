@@ -1,10 +1,11 @@
-"""The NoulXP steps' command lines and environments, and the reuse of a run's GGUF: with
-stand-ins for the step processes, so they run anywhere.
+"""The NoulXP steps' command lines and environments, and the merge of a conformance file
+recorded beside the export: with stand-ins for the step processes, so they run anywhere.
 
 The guards here keep what a package certifies where it is: the check always hashes every file
 (validate may skip that only because the check does it), always runs on the CPU, at the same
 thread count as the recording, and never with a serving option."""
 
+import hashlib
 import io
 import json
 import subprocess
@@ -194,6 +195,87 @@ def test_ort_threads_does_nothing_without_a_positive_count(ort_graph, monkeypatc
     assert providers.ort_session is original
 
 
+# ----------------------------------------------------------------------------- the merge
+
+
+def recorded(tmp_path, cases=2, extra=None):
+    """A stub after `noulxp conformance generate` (its manifest and file) and an exported
+    package without a conformance file."""
+    stub, building = tmp_path / "stub", tmp_path / "noulxp"
+    stub.mkdir(parents=True)
+    building.mkdir(parents=True)
+    lines = "".join(json.dumps({"id": f"c{i}", "request": {}}) + "\n" for i in range(cases))
+    (stub / "conformance.jsonl").write_text(lines)
+    summary = {
+        "path": "conformance.jsonl",
+        "sha256": hashlib.sha256(lines.encode()).hexdigest(),
+        "cases": cases,
+        "generated_by": {"runtime": "julia", "threads": 3, "seconds": 1.0},
+    }
+    (stub / "noulxp.json").write_text(json.dumps({"conformance": summary, **(extra or {})}))
+    exported = {"standard": "noulxp/0.1", "name": "studio:é", "weights": {"path": "model.onnx"}}
+    (building / "noulxp.json").write_text(json.dumps(exported))
+    return stub, building, summary, exported
+
+
+def test_the_merge_moves_the_file_and_adds_only_its_summary(tmp_path):
+    stub, building, summary, exported = recorded(tmp_path)
+    assert noulxp_package.merge_conformance(stub, building, 2) == summary
+    manifest_text = (building / "noulxp.json").read_text(encoding="utf-8")
+    # As `noulxp conformance generate` writes it: the exporter's keys, then "conformance".
+    assert (
+        manifest_text
+        == json.dumps({**exported, "conformance": summary}, ensure_ascii=False, indent=2) + "\n"
+    )
+    assert (building / "conformance.jsonl").is_file()
+    assert not (stub / "conformance.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "spoil,match",
+    [
+        (lambda stub, building: (stub / "extra.txt").write_text("x"), "other files"),
+        (lambda stub, building: (stub / "noulxp.json").write_text("[]"), "not what generate"),
+        (
+            lambda stub, building: (building / "conformance.jsonl").write_text("{}\n"),
+            "already has",
+        ),
+        (
+            lambda stub, building: (building / "noulxp.json").write_text(
+                json.dumps({"conformance": {"path": "conformance.jsonl"}})
+            ),
+            "already has",
+        ),
+        (lambda stub, building: (building / "noulxp.json").unlink(), "has no noulxp.json"),
+        (lambda stub, building: (building / "noulxp.json").write_text("[1]"), "has no"),
+        (
+            lambda stub, building: (stub / "conformance.jsonl").write_text("{}\n{}\n"),
+            "SHA-256",
+        ),
+    ],
+)
+def test_the_merge_refuses_anything_unexpected(tmp_path, spoil, match):
+    stub, building, _, _ = recorded(tmp_path)
+    spoil(stub, building)
+    with pytest.raises(RuntimeError, match=match):
+        noulxp_package.merge_conformance(stub, building, 2)
+
+
+def test_the_merge_refuses_another_name_count_or_key(tmp_path):
+    stub, building, summary, _ = recorded(tmp_path, extra={"weights": {}})
+    with pytest.raises(RuntimeError, match="not what generate"):
+        noulxp_package.merge_conformance(stub, building, 2)
+    stub, building, summary, _ = recorded(tmp_path / "b")
+    with pytest.raises(RuntimeError, match="holds 2 cases, not 3"):
+        noulxp_package.merge_conformance(stub, building, 3)
+    stub, building, summary, _ = recorded(tmp_path / "c")
+    (stub / "noulxp.json").write_text(
+        json.dumps({"conformance": {**summary, "path": "../conformance.jsonl"}})
+    )
+    with pytest.raises(RuntimeError, match="named"):
+        noulxp_package.merge_conformance(stub, building, 2)
+
+
 # ----------------------------------------------------------------------------- the GGUF's reuse
 
 
@@ -245,3 +327,48 @@ def test_ensure_gguf_hashes_only_what_it_can_reuse(tmp_path, monkeypatch):
     engine.write_json(run_dir / "exports/gguf-bf16.json", {"llama_cpp": "another commit"})
     noulxp_package.ensure_gguf("run:dv", tmp_path, quiet, "bf16", stats=stats)
     assert hashed == [] and exported[-1]["source_sha256"] is None
+
+
+# ----------------------------------------------------------------------------- the gate, the emit
+
+
+def test_only_encoders_without_test_rows_record_beside_the_export(monkeypatch):
+    gate = noulxp_package.overlap_conformance
+    monkeypatch.delenv("LAYASTUDIO_PARALLEL_CONFORMANCE", raising=False)
+    plenty = 64 * 2**30
+    assert gate("laya", 0, 8, free=plenty) and gate("julia", 0, 3, free=plenty)
+    assert not gate("decider", 0, 8, free=plenty)
+    assert not gate("laya", 12, 8, free=plenty)
+    assert not gate("laya", 0, 2, free=plenty)
+    assert not gate("julia", 0, 8, free=4 * 2**30)
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
+    assert not gate("laya", 0, 8, free=plenty)
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "1")
+    assert gate("laya", 0, 1) and not gate("decider", 0, 8) and not gate("julia", 4, 8)
+
+
+def test_progress_waits_for_the_conformance_phase():
+    events = []
+
+    def record(type_, /, **data):
+        events.append((type_, data))
+
+    emit = noulxp_package.Locked(record)
+    emit("log", message="a", kind="not the event's type")
+    emit.progress(done=1, total=2)
+    emit.hold()
+    emit.progress(done=10, total=52)
+    emit("phase", phase="export")
+    emit.release()
+    emit.progress(done=20, total=52)
+    emit.hold()
+    emit.progress(done=5, total=52)
+    emit.release(send=False)
+    assert [(k, d.get("done") or d.get("phase") or d.get("message")) for k, d in events] == [
+        ("log", "a"),
+        ("progress", 1),
+        ("phase", "export"),
+        ("progress", 10),
+        ("progress", 20),
+    ]
+    assert events[0][1]["kind"] == "not the event's type"

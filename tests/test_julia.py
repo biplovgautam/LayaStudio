@@ -347,6 +347,7 @@ def test_the_thread_count_changes_nothing_but_rounding(checkpoint, tmp_path, mon
     cases, keys and refusals, every probability within 1e-4 (the file's 4-decimal rounding can
     flip on a 1e-7 difference), both checks passing, the exporter's informative comparison
     within 1e-6."""
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
     built = {}
     for threads in (1, 4):
         monkeypatch.setenv("LAYASTUDIO_THREADS", str(threads))
@@ -377,3 +378,27 @@ def test_the_thread_count_changes_nothing_but_rounding(checkpoint, tmp_path, mon
     assert set(v1) == set(v4) and v1["rows"] == v4["rows"]
     assert v1["same_argmax"] == v4["same_argmax"]
     assert abs(v1["max_abs_p"] - v4["max_abs_p"]) <= 1e-6
+
+
+@pytest.mark.skipif(TOOLING is not None, reason=f"NoulXP tooling: {TOOLING}")
+def test_julia_recorded_beside_the_export_makes_the_same_package(checkpoint, tmp_path, monkeypatch):
+    monkeypatch.setattr(noulxp_package, "_native_threads", lambda threads, beside: 2)
+    monkeypatch.setenv("PYTHONHASHSEED", "0")  # reproducible graphs
+    packages = {}
+    for mode in ("0", "1"):
+        monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", mode)
+        workspace, run_dir = julia_run(tmp_path / mode, checkpoint)
+        report = export("run:jt", "noulxp", workspace, test_rows=0)
+        assert report["state"] == "passed"
+        assert report["steps"]["conformance"].get("beside_export", False) is (mode == "1")
+        packages[mode] = run_dir / "noulxp"
+    a, b = packages["0"], packages["1"]
+    assert (a / "conformance.jsonl").read_bytes() == (b / "conformance.jsonl").read_bytes()
+    for name in ("model.onnx", "tokenizer.json", "template.json", "calibration.json"):
+        assert (a / name).read_bytes() == (b / name).read_bytes(), name
+    ma, mb = (json.loads((x / "noulxp.json").read_text()) for x in (a, b))
+    for m in (ma, mb):
+        m["source"].pop("converted_at", None)
+        m["source"]["export"].pop("verification", None)
+        m["conformance"]["generated_by"].pop("seconds")
+    assert ma == mb and ma["conformance"]["generated_by"]["threads"] == 2

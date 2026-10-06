@@ -7,7 +7,13 @@ nothing is downloaded and no real model runs.
 import contextlib
 import hashlib
 import json
+import os
 import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -449,9 +455,45 @@ def same_package(a, b):
 
 
 @needs_tooling
+def test_recording_beside_the_export_makes_the_same_package(built, tmp_path, monkeypatch):
+    """Without test rows, Laya's own runtime records while `noulxp export` traces: the same
+    conformance file byte for byte (at the same threads), the same manifest but for seconds
+    and threads, the same check, the phases in the same order."""
+    monkeypatch.setattr(noulxp_package, "_native_threads", lambda threads, beside: 2)
+    monkeypatch.setenv("PYTHONHASHSEED", "0")  # reproducible graphs (same_package)
+    packages = {}
+    for mode in ("0", "1"):
+        workspace, run_dir = fresh_workspace(built, tmp_path / mode)
+        monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", mode)
+        events = []
+        report = export(
+            f"run:{RUN}",
+            "noulxp",
+            workspace,
+            lambda kind, **data: events.append({"type": kind, **data}),
+            test_rows=0,
+        )
+        assert report["state"] == "passed" and report["conformance"]["test_rows"] == 0
+        phases = [e["phase"] for e in events if e["type"] == "phase"]
+        assert phases == ["export", "conformance", "validate", "check"]
+        beside = report["steps"]["conformance"].get("beside_export", False)
+        assert beside is (mode == "1") and report["steps"]["conformance"]["threads"] == 2
+        progress = [i for i, e in enumerate(events) if e["type"] == "progress"]
+        conformance = next(i for i, e in enumerate(events) if e.get("phase") == "conformance")
+        assert progress and min(progress) > conformance  # held back until its phase
+        assert not list(run_dir.glob(".noulxp-*"))
+        packages[mode] = run_dir / noulxp_package.PACKAGE
+    same_package(packages["0"], packages["1"])
+    by = json.loads((packages["1"] / "noulxp.json").read_text())["conformance"]["generated_by"]
+    # noulxp 0.4.0 records no threads for laya; 0.4.1 records the count it ran with.
+    assert by["runtime"] == "laya" and by.get("threads") in (None, 2)
+
+
+@needs_tooling
 def test_the_package_is_the_same_with_telemetry_off_or_failing(built, tmp_path, monkeypatch):
     from layastudio import telemetry
 
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
     monkeypatch.setenv("PYTHONHASHSEED", "0")  # reproducible graphs (same_package)
     workspace, run_dir = fresh_workspace(built, tmp_path / "on")
     on = export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
@@ -488,6 +530,7 @@ def test_the_package_is_the_same_with_telemetry_off_or_failing(built, tmp_path, 
 def test_a_file_changed_after_validate_fails_the_check(built, tmp_path, monkeypatch, tamper):
     """validate leaves the hashes to the check: a file changed between the two is caught there,
     and the package is kept apart and never published."""
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "0")
     workspace, run_dir = fresh_workspace(built, tmp_path)
     real_validate = noulxp_package.validate_package
 
@@ -515,6 +558,161 @@ def test_a_file_changed_after_validate_fails_the_check(built, tmp_path, monkeypa
     assert (run_dir / noulxp_package.FAILED).is_dir()
     assert not (run_dir / noulxp_package.PACKAGE).exists()
     assert noulxp_package.passing_package(run_dir, run_dir / "model") is None
+
+
+# ----------------------------------------------------------------------------- beside the export, failing
+
+
+def native_command(code):
+    """`noulxp conformance generate` stood in by a script."""
+    return lambda *args, **kwargs: ["-c", code]
+
+
+@needs_tooling
+def test_a_recording_that_fails_early_fails_the_build_after_the_export(
+    built, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "1")
+    monkeypatch.setattr(
+        noulxp_package,
+        "_generate_args",
+        native_command("import sys; print('the runtime broke', flush=True); sys.exit(1)"),
+    )
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    with pytest.raises(RuntimeError, match="conformance generate failed: the runtime broke"):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    report = json.loads((run_dir / noulxp_package.REPORT).read_text())
+    assert "failed" not in report["steps"]["export"]  # the export ran to its end first
+    assert report["steps"]["conformance"]["failed"] is True
+    assert not (run_dir / noulxp_package.PACKAGE).exists()
+    assert not (run_dir / noulxp_package.BUILDING).exists()
+    assert not list(run_dir.glob(".noulxp-*"))
+
+
+@needs_tooling
+def test_an_export_that_fails_stops_the_recording(built, tmp_path, monkeypatch):
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "1")
+    monkeypatch.setattr(
+        noulxp_package, "_generate_args", native_command("import time; time.sleep(600)")
+    )
+    seen = []
+
+    def export_package(*args, companions=(), **kwargs):
+        [native] = companions
+        assert native.poll() is None  # recording while the export runs
+        seen.append(native)
+        raise RuntimeError("noulxp export laya failed: out of memory")
+
+    monkeypatch.setattr(noulxp_package, "export_package", export_package)
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="out of memory"):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    assert time.monotonic() - started < 30
+    assert seen[0].poll() is not None  # ended and reaped
+    assert not list(run_dir.glob(".noulxp-*"))
+
+
+@needs_tooling
+def test_an_export_that_left_a_conformance_file_is_refused(built, tmp_path, monkeypatch):
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "1")
+    real = noulxp_package.export_package
+
+    def export_package(model_dir, out_dir, *args, **kwargs):
+        real(model_dir, out_dir, *args, **kwargs)
+        manifest = json.loads((out_dir / "noulxp.json").read_text())
+        manifest["conformance"] = {"path": "conformance.jsonl", "cases": 52}
+        (out_dir / "noulxp.json").write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(noulxp_package, "export_package", export_package)
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    with pytest.raises(RuntimeError, match="already has a conformance file"):
+        export(f"run:{RUN}", "noulxp", workspace, test_rows=0)
+    assert not (run_dir / noulxp_package.PACKAGE).exists()
+
+
+@needs_tooling
+def test_an_emit_that_raises_in_the_following_thread_does_not_hang(built, tmp_path, monkeypatch):
+    monkeypatch.setenv("LAYASTUDIO_PARALLEL_CONFORMANCE", "1")
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    main = threading.main_thread()
+
+    def emit(kind, **data):
+        if threading.current_thread() is not main:
+            raise BrokenPipeError("the log is gone")
+
+    report = export(f"run:{RUN}", "noulxp", workspace, emit, test_rows=0)
+    assert report["state"] == "passed"
+
+
+CANCELLED_BUILD = """
+import json, os, signal, sys, time
+sys.path.insert(0, {repo!r})
+from pathlib import Path
+from layastudio import engine, noulxp_package
+from layastudio.export import export
+
+marks = Path({marks!r})
+def on_term(*_):
+    raise engine.Cancelled()
+signal.signal(signal.SIGTERM, on_term)
+
+def generate_args(*args, **kwargs):
+    return ["-c", "import time; time.sleep(600)"]
+noulxp_package._generate_args = generate_args
+
+def export_package(*args, emit=None, companions=(), **kwargs):
+    [native] = companions
+    (marks / "native").write_text(str(native.pid))
+    code = "import os, time; open({export_pid!r}, 'w').write(str(os.getpid())); time.sleep(600)"
+    noulxp_package._python(["-c", code], args[4], companions=companions)
+noulxp_package.export_package = export_package
+try:
+    export("run:{run}", "noulxp", Path({workspace!r}), test_rows=0)
+except engine.Cancelled:
+    sys.exit(143)
+"""
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@needs_tooling
+def test_a_cancel_during_the_export_ends_both_processes(built, tmp_path, monkeypatch):
+    """SIGTERM while the export and the recording run: both end, the scratch folder goes, and
+    the report says Cancelled."""
+    workspace, run_dir = fresh_workspace(built, tmp_path)
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    script = CANCELLED_BUILD.format(
+        repo=str(Path(__file__).resolve().parents[1]),
+        marks=str(marks),
+        export_pid=str(marks / "export"),
+        run=RUN,
+        workspace=str(workspace),
+    )
+    build = subprocess.Popen(
+        [sys.executable, "-c", script],
+        env={**os.environ, "LAYASTUDIO_PARALLEL_CONFORMANCE": "1"},
+    )
+    deadline = time.monotonic() + 60
+    while not ((marks / "export").exists() and (marks / "native").exists()):
+        assert time.monotonic() < deadline and build.poll() is None
+        time.sleep(0.1)
+    time.sleep(0.3)
+    pids = [int((marks / name).read_text()) for name in ("export", "native")]
+    assert all(alive(pid) for pid in pids)
+    build.send_signal(signal.SIGTERM)
+    assert build.wait(timeout=30) == 143
+    assert not any(alive(pid) for pid in pids)
+    assert not list(run_dir.glob(".noulxp-*")) and not (run_dir / noulxp_package.BUILDING).exists()
+    report = json.loads((run_dir / noulxp_package.REPORT).read_text())
+    assert report["error"].startswith("Cancelled") and report["steps"]["export"]["failed"]
 
 
 def test_the_card_says_when_a_version_has_no_package():

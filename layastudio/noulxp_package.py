@@ -33,10 +33,12 @@ runtime that noulxp has for the run's checkpoint kind (kinds.py):
 
 Each step runs in a process of its own, so memory goes back between them, with as many CPU
 threads as the machine's quota allows (runtime.cpu_threads(): a pod's cgroup cpu.max), the same
-count for the recording and the check. The package is built in runs/<id>/noulxp.partial/noulxp
-and becomes runs/<id>/noulxp only once it passes, with the check's report inside it
-(check-cpu.json). A package that fails is kept as runs/<id>/noulxp-failed for reading and is
-never published. runs/<id>/noulxp-report.json
+count for the recording and the check. For Laya and Julia without test rows, the model's own
+runtime records its answers while `noulxp export` traces the graph (both read only the run's
+checkpoint), and its file joins the package once the export is done. The package is built
+in runs/<id>/noulxp.partial/noulxp and becomes runs/<id>/noulxp only once it passes, with the
+check's report inside it (check-cpu.json). A package that fails is kept as
+runs/<id>/noulxp-failed for reading and is never published. runs/<id>/noulxp-report.json
 describes the last attempt, with what each step took ("steps": seconds, CPU, threads, the
 container's throttling and memory; telemetry.py): it explains a measurement, it certifies
 nothing, and none of it goes into the package.
@@ -59,6 +61,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path, PurePosixPath
 
@@ -432,11 +435,13 @@ def _end(processes, timeout=END_AFTER):
             process.wait()
 
 
-def _python(args, emit, progress=False, threads=None):
+def _python(args, emit, progress=False, threads=None, companions=()):
     """One step in a process of its own, its output into the job's log.
 
-    threads: the BLAS/OpenMP caps of its environment (_child_env). Returns (exit code, the
-    last lines it printed). Cancelling the job stops the step."""
+    threads: the BLAS/OpenMP caps of its environment (_child_env). companions: processes
+    running beside it (the model's own runtime recording during the export), stopped with it
+    when the job is cancelled or the step's following fails. Returns (exit code, the last
+    lines it printed). Cancelling the job stops the step."""
     from .telemetry import Sampler
 
     process = subprocess.Popen(
@@ -466,7 +471,7 @@ def _python(args, emit, progress=False, threads=None):
             sampler.stop()
         code = process.wait()
     except BaseException:
-        _end([process])
+        _end([*companions, process])
         raise
     return code, list(tail)
 
@@ -476,7 +481,9 @@ def _last(tail):
     return (useful or tail or ["no output"])[-1]
 
 
-def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=None, threads=None):
+def export_package(
+    model_dir, out_dir, name, source, emit, kind="laya", options=None, threads=None, companions=()
+):
     """Step 1: `noulxp export <kind>` from the run's checkpoint."""
     code, tail = _python(
         [
@@ -491,6 +498,7 @@ def export_package(model_dir, out_dir, name, source, emit, kind="laya", options=
         ],
         emit,
         threads=threads,
+        companions=companions,
     )
     if code:
         raise RuntimeError(f"noulxp export {kind} failed: {_last(tail)}")
@@ -571,12 +579,173 @@ def check_package(package_dir, emit, threads=None):
     return report
 
 
+# ----------------------------------------------------------------------------- recording beside the export
+
+
+class Locked:
+    """The job's emit, safe to call from the thread that follows the model's own runtime while
+    the export runs: one event at a time, and its progress held back until the conformance
+    phase starts (release)."""
+
+    def __init__(self, emit):
+        self.emit = emit
+        self.lock = threading.Lock()
+        self.held = None  # progress events waiting for the conformance phase, or None
+
+    def __call__(self, type_, /, **data):  # positional: events carry a "kind" field too
+        with self.lock:
+            self.emit(type_, **data)
+
+    def progress(self, **data):
+        with self.lock:
+            if self.held is not None:
+                self.held.append(data)
+            else:
+                self.emit("progress", **data)
+
+    def hold(self):
+        with self.lock:
+            self.held = []
+
+    def release(self, send=True):
+        """Progress goes out as it comes from now on; what was held goes out first (or, for
+        a recording that was discarded, nowhere)."""
+        with self.lock:
+            held, self.held = self.held or [], None
+            for data in held if send else ():
+                self.emit("progress", **data)
+
+
+class Native:
+    """`noulxp conformance generate` started beside the export, into a stub package of its own
+    (a manifest of "{}", nothing else): the model's own runtime reads only the checkpoint view,
+    never the export, so running it during the export changes none of its inputs. A daemon
+    thread forwards its output through the Locked emit and keeps its last lines."""
+
+    def __init__(self, stub, checkpoint, requests, emit, runtime, threads):
+        from .telemetry import Sampler
+
+        self.stub, self.requests_path = Path(stub), Path(requests)
+        self.emit = emit
+        self.threads = threads
+        self.tail = collections.deque(maxlen=20)
+        self.started = time.perf_counter()
+        self.seconds = None
+        self.process = subprocess.Popen(
+            [sys.executable, *_generate_args(stub, checkpoint, requests, runtime, threads)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            env=_child_env(threads),
+        )
+        self.sampler = Sampler(self.process.pid)
+        self.reader = threading.Thread(target=self._follow, name="noulxp-native", daemon=True)
+        self.reader.start()
+
+    def _follow(self):
+        stream = self.process.stdout
+        for line in stream:
+            line = line.rstrip()
+            if not line:
+                continue
+            self.tail.append(line)
+            try:
+                counted = CASES.match(line)
+                if counted:
+                    self.emit.progress(done=int(counted[1]), total=int(counted[2]))
+                else:
+                    self.emit("log", message=line)
+            except Exception:  # noqa: BLE001 - the output is drained whatever emit does
+                pass
+
+    def failed_early(self):
+        code = self.process.poll()
+        return code is not None and code != 0
+
+    def wait(self):
+        """Its exit code, once it has ended and its output has been read."""
+        code = self.process.wait()
+        self.seconds = round(time.perf_counter() - self.started, 2)
+        self.reader.join(timeout=10)
+        self.sampler.stop()
+        return code
+
+    def stop(self):
+        """Ended and reaped (SIGTERM, then SIGKILL), its output read: safe to call twice."""
+        _end([self.process])
+        self.reader.join(timeout=10)
+        self.sampler.stop()
+
+
 def _reported(described):
     """The thread count a step says it ran with (generated_by.threads; a check's
     runtime.threads, which noulxp 0.4.0 leaves null and 0.4.1 fills), else None: never
     inferred."""
     value = described.get("threads") if isinstance(described, dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _native_threads(threads, beside_export):
+    """The model's own runtime's threads: one fewer beside the export (which runs with one)."""
+    return max(1, threads - 1) if beside_export else threads
+
+
+def overlap_conformance(kind, test_rows, threads, free=None):
+    """Whether the model's own runtime records its answers while the export runs: Laya and
+    Julia without test rows (the requests are NoulXP's own and need nothing from the export),
+    with 3 threads or more and about 12 GB of memory free. Anything else records after the
+    export, as always. LAYASTUDIO_PARALLEL_CONFORMANCE=0 turns it off, =1 skips the thread and
+    memory gates (tests)."""
+    if kind not in ("laya", "julia") or test_rows != 0:
+        return False
+    flag = os.environ.get("LAYASTUDIO_PARALLEL_CONFORMANCE", "").strip()
+    if flag in ("0", "1"):
+        return flag == "1"
+    if threads < 3:
+        return False
+    if free is None:
+        from .telemetry import free_memory
+
+        free = free_memory()
+    return free is not None and free >= 12 * 2**30
+
+
+def merge_conformance(stub, building, cases):
+    """The stub's conformance file and summary into the exported package, or a RuntimeError.
+
+    Strict: the stub holds only its manifest (whose only key is "conformance") and the file;
+    the summary names conformance.jsonl and `cases` cases; the export left no conformance of
+    its own. The file is moved in and hashed again; the exported manifest gains only
+    "conformance", written as `noulxp conformance generate` writes it."""
+    stub, building = Path(stub), Path(building)
+    stub_manifest = read_json(stub / MANIFEST)
+    if not isinstance(stub_manifest, dict) or set(stub_manifest) != {"conformance"}:
+        raise RuntimeError("the recorded conformance summary is not what generate writes")
+    summary = stub_manifest["conformance"]
+    if not isinstance(summary, dict):
+        raise RuntimeError("the recorded conformance summary is not an object")
+    relative = summary.get("path")
+    if relative != "conformance.jsonl" or not _safe(relative):
+        raise RuntimeError(f"the recorded conformance file is named {relative!r}")
+    if sorted(p.name for p in stub.iterdir()) != sorted([MANIFEST, relative]):
+        raise RuntimeError("the recording left other files beside its conformance file")
+    if summary.get("cases") != cases:
+        raise RuntimeError(f"the recording holds {summary.get('cases')} cases, not {cases}")
+    manifest_path = building / MANIFEST
+    manifest = read_json(manifest_path)
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"the exported package has no {MANIFEST}")
+    if "conformance" in manifest or (building / relative).exists():
+        raise RuntimeError("the exported package already has a conformance file")
+    os.replace(stub / relative, building / relative)
+    if _sha256(building / relative) != summary.get("sha256"):
+        raise RuntimeError("the conformance file does not match the SHA-256 it was recorded with")
+    manifest["conformance"] = summary
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return summary
 
 
 # ----------------------------------------------------------------------------- build
@@ -626,7 +795,7 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     from . import kinds, telemetry
     from .runtime import cpu_budget
 
-    emit = emit or (lambda *a, **k: None)
+    emit = Locked(emit or (lambda *a, **k: None))
     run_id, run_dir, model_dir, run = locate(model_ref, workspace)
     kind = kinds.detect(model_dir) or "laya"
     family, entry = support(run, workspace, model_dir)
@@ -668,120 +837,185 @@ def build(model_ref, workspace=WORKSPACE, emit=None, test_rows=TEST_ROWS, gguf=G
     report["machine"] = telemetry.machine(kind)
     report["memory"] = {"start": telemetry.memory()}
     steps = telemetry.Steps(report, emit=emit)
+    native = None
     try:
         with tempfile.TemporaryDirectory(prefix=".noulxp-", dir=run_dir) as scratch:
             scratch = Path(scratch)
-            source = provenance(run, run_id, workspace)
-            view = None
-            if kind == "decider":
-                cached = {}
-                with steps("gguf", threads=threads, device="cpu") as record:
-                    gguf_file, converted = ensure_gguf(
-                        f"run:{run_id}", workspace, emit, gguf, threads=threads, stats=cached
-                    )
-                    if cached.get("cached"):
-                        record["cached"] = True
-                    else:  # this conversion's own timings, never a stored report's
-                        record["timings"] = converted.get("timings")
-                report["gguf"] = {
-                    k: converted.get(k)
-                    for k in ("precision", "sha256", "size_mb", "llama_cpp", "verification")
-                }
-                source = {
-                    **source,
-                    "gguf": {k: converted.get(k) for k in ("precision", "llama_cpp")},
-                }
-                view = checkpoint_view(model_dir, scratch / "checkpoint", kind, gguf_file)
-                emit(
-                    "phase",
-                    phase="export",
-                    message="Writing the NoulXP package (noulxp export decider)",
-                    threads=threads,
-                    device="cpu",
-                )
-                with steps("export", threads=threads, device="cpu", env=thread_env(threads)):
-                    export_package(
-                        view,
-                        building,
-                        f"studio:{run_id}",
-                        source,
-                        emit,
-                        kind,
-                        {"gguf": "model.gguf"},
-                        threads=threads,
-                    )
-            else:
-                options = None
-                if kind == "julia":
-                    # The package's budgets are the checkpoint's own inference policy.
-                    from . import julia
-
-                    policy = julia.config(model_dir)
-                    options = {
-                        "max_tokens": policy["max_len"],
-                        "head_tokens": policy["head_max_len"],
-                    }
-                emit(
-                    "phase",
-                    phase="export",
-                    message=f"Writing the NoulXP package (noulxp export {kind})",
-                    threads=threads,
-                    device="cpu",
-                )
-                with steps("export", threads=threads, device="cpu", env=thread_env(threads)):
-                    export_package(
-                        model_dir,
-                        building,
-                        f"studio:{run_id}",
-                        source,
-                        emit,
-                        kind,
-                        options,
-                        threads=threads,
-                    )
-            limits = (read_json(building / MANIFEST) or {}).get("limits") or {}
-            questions = read_json(model_dir / "questions.json") or {}
             try:
-                _, rows, _ = load_dataset(run.get("dataset", ""), workspace)
-            except (FileNotFoundError, ValueError):
-                rows = []  # the run's dataset was deleted: NoulXP's request set alone
-            own, asked = own_requests(questions, rows, limits, test_rows)
-            requests = read_jsonl(DEFAULT_REQUESTS) + own
-            _write_jsonl(scratch / "requests.jsonl", requests)
-            report["conformance"] = {
-                "noulxp_requests": len(requests) - len(own),
-                "test_rows": len(own),
-                "questions_asked": asked["asked"],
-                "questions_left_out": asked["left_out"],
-            }
-            for qid, why in asked["left_out"].items():
-                emit("log", message=f"Question {qid!r} is not in the conformance file: {why}")
-            emit(
-                "phase",
-                phase="conformance",
-                message=f"Recording the fine-tune's own answers to {len(requests)} requests "
-                f"({RUNTIME.get(kind, kind)} runtime, CPU)",
-                threads=threads,
-                device="cpu",
-            )
-            if view is None:
-                view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
-            with steps(
-                "conformance", threads=threads, device="cpu", env=thread_env(threads)
-            ) as record:
-                record_conformance(
-                    building,
-                    view,
-                    scratch / "requests.jsonl",
-                    emit,
-                    runtime=kind,
-                    threads=threads,
-                )
-                record["threads_reported"] = _reported(
-                    ((read_json(building / MANIFEST) or {}).get("conformance") or {}).get(
-                        "generated_by"
+                source = provenance(run, run_id, workspace)
+                view = planned = None
+                if kind == "decider":
+                    cached = {}
+                    with steps("gguf", threads=threads, device="cpu") as record:
+                        gguf_file, converted = ensure_gguf(
+                            f"run:{run_id}", workspace, emit, gguf, threads=threads, stats=cached
+                        )
+                        if cached.get("cached"):
+                            record["cached"] = True
+                        else:  # this conversion's own timings, never a stored report's
+                            record["timings"] = converted.get("timings")
+                    report["gguf"] = {
+                        k: converted.get(k)
+                        for k in ("precision", "sha256", "size_mb", "llama_cpp", "verification")
+                    }
+                    source = {
+                        **source,
+                        "gguf": {k: converted.get(k) for k in ("precision", "llama_cpp")},
+                    }
+                    view = checkpoint_view(model_dir, scratch / "checkpoint", kind, gguf_file)
+                    emit(
+                        "phase",
+                        phase="export",
+                        message="Writing the NoulXP package (noulxp export decider)",
+                        threads=threads,
+                        device="cpu",
                     )
+                    with steps("export", threads=threads, device="cpu", env=thread_env(threads)):
+                        export_package(
+                            view,
+                            building,
+                            f"studio:{run_id}",
+                            source,
+                            emit,
+                            kind,
+                            {"gguf": "model.gguf"},
+                            threads=threads,
+                        )
+                else:
+                    if overlap_conformance(kind, test_rows, threads):
+                        # NoulXP's own requests need nothing from the export: the model's own
+                        # runtime records them now, from a copy of the checkpoint.
+                        view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
+                        planned = read_jsonl(DEFAULT_REQUESTS)
+                        _write_jsonl(scratch / "requests.jsonl", planned)
+                        stub = scratch / "native"
+                        stub.mkdir()
+                        (stub / MANIFEST).write_text("{}\n", encoding="utf-8")
+                        emit.hold()
+                        native = Native(
+                            stub,
+                            view,
+                            scratch / "requests.jsonl",
+                            emit,
+                            kind,
+                            _native_threads(threads, True),
+                        )
+                    options = None
+                    if kind == "julia":
+                        # The package's budgets are the checkpoint's own inference policy.
+                        from . import julia
+
+                        policy = julia.config(model_dir)
+                        options = {
+                            "max_tokens": policy["max_len"],
+                            "head_tokens": policy["head_max_len"],
+                        }
+                    # Beside the recording, the export traces with one thread.
+                    export_threads = 1 if native is not None else threads
+                    emit(
+                        "phase",
+                        phase="export",
+                        message=f"Writing the NoulXP package (noulxp export {kind})",
+                        threads=export_threads,
+                        device="cpu",
+                        beside_conformance=native is not None,
+                    )
+                    with steps(
+                        "export",
+                        threads=export_threads,
+                        device="cpu",
+                        env=thread_env(export_threads),
+                        beside_conformance=native is not None,
+                    ):
+                        export_package(
+                            model_dir,
+                            building,
+                            f"studio:{run_id}",
+                            source,
+                            emit,
+                            kind,
+                            options,
+                            threads=export_threads,
+                            companions=(native.process,) if native is not None else (),
+                        )
+                limits = (read_json(building / MANIFEST) or {}).get("limits") or {}
+                questions = read_json(model_dir / "questions.json") or {}
+                try:
+                    _, rows, _ = load_dataset(run.get("dataset", ""), workspace)
+                except (FileNotFoundError, ValueError):
+                    rows = []  # the run's dataset was deleted: NoulXP's request set alone
+                own, asked = own_requests(questions, rows, limits, test_rows)
+                requests = read_jsonl(DEFAULT_REQUESTS) + own
+                if native is not None and (own or requests != planned):
+                    # Not what the recording was asked: it is discarded, and the requests are
+                    # recorded after the export, as always.
+                    emit("log", message="Recording the requests again, after the export")
+                    native.stop()
+                    native = None
+                    emit.release(send=False)
+                if native is None:
+                    _write_jsonl(scratch / "requests.jsonl", requests)
+                report["conformance"] = {
+                    "noulxp_requests": len(requests) - len(own),
+                    "test_rows": len(own),
+                    "questions_asked": asked["asked"],
+                    "questions_left_out": asked["left_out"],
+                }
+                for qid, why in asked["left_out"].items():
+                    emit("log", message=f"Question {qid!r} is not in the conformance file: {why}")
+                recording = (
+                    native.threads if native is not None else _native_threads(threads, False)
                 )
+                emit(
+                    "phase",
+                    phase="conformance",
+                    message=f"Recording the fine-tune's own answers to {len(requests)} requests "
+                    f"({RUNTIME.get(kind, kind)} runtime, CPU)",
+                    threads=recording,
+                    device="cpu",
+                    beside_export=native is not None,
+                )
+                if native is not None:
+                    emit.release()
+                    with steps(
+                        "conformance",
+                        threads=recording,
+                        device="cpu",
+                        env=thread_env(recording),
+                        beside_export=True,
+                    ) as record:
+                        code = native.wait()
+                        record["native_seconds"] = native.seconds
+                        if code:
+                            raise RuntimeError(
+                                f"noulxp conformance generate failed: {_last(native.tail)}"
+                            )
+                        summary = merge_conformance(native.stub, building, len(requests))
+                        record["threads_reported"] = _reported(summary.get("generated_by"))
+                else:
+                    if view is None:
+                        view = checkpoint_view(model_dir, scratch / "checkpoint", kind)
+                    with steps(
+                        "conformance", threads=recording, device="cpu", env=thread_env(recording)
+                    ) as record:
+                        record_conformance(
+                            building,
+                            view,
+                            scratch / "requests.jsonl",
+                            emit,
+                            runtime=kind,
+                            threads=recording,
+                        )
+                        record["threads_reported"] = _reported(
+                            ((read_json(building / MANIFEST) or {}).get("conformance") or {}).get(
+                                "generated_by"
+                            )
+                        )
+            finally:
+                # The recording never outlives the scratch folder it reads.
+                if native is not None:
+                    native.stop()
+                emit.release(send=False)
         emit(
             "phase",
             phase="validate",
