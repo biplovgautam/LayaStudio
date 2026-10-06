@@ -507,9 +507,16 @@ events carry `fraction`, the share of the training done, which reaches 1 at the 
 
 The exit code says how it ended: 0 trained and exported, 3 trained but an export failed (the
 result's `failed_exports` names it), 1 failed, 2 refused before anything ran, 143 cancelled.
-The last event, `finished`, carries the same state, exit code and error. A base model
-downloaded at a pinned revision is `hub:<repo>@<revision>`, so its licence is checked and its
-NoulXP package names it.
+The last event, `finished`, carries the same state, exit code and error.
+
+A GPU starts with an empty cache, so a run from a file downloads its base model: a Hugging Face
+base must be pinned to a commit, `hub:<repo>@<40-hex commit>` (a branch or tag is refused, since
+it can move between the platform's check and the GPU), its licence is checked first, and the
+files its kind needs are downloaded at that commit into the run's cache (`cache_dir` in the
+config, else `$HF_HUB_CACHE` / `$HF_HOME/hub`), where the training jobs read it offline. Its
+card and NoulXP package name that revision. A local folder (`path:`) or an earlier run (`run:`)
+is used as it is. The Train button downloads nothing: there, a base model is one this machine
+already has.
 
 ## Privacy and security
 

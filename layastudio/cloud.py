@@ -30,8 +30,9 @@ The config, with paths relative to its own folder:
 
     {
       "name": "emotion",                              optional
-      "base_model": "hub:Mapika/decider-2b@<commit>", hub:<repo>[@<revision>] (downloaded),
+      "base_model": "hub:Mapika/decider-2b@<commit>", hub:<repo>@<commit> (downloaded here),
                                                       path:<dir>, run:<id>
+      "cache_dir": "cache/huggingface/hub",           optional: where the base model goes
       "dataset": {                                    or the id of a dataset in the workspace
         "questions": "questions.json",                a file, or the questions themselves
         "train": "train.jsonl", "test": "test.jsonl", test optional; JSONL, JSON, CSV or TSV
@@ -51,6 +52,18 @@ The config, with paths relative to its own folder:
   its licence is checked and its packages name it (source.model, source.revision). A path:
   folder has a published name only when it was imported from the registry (imports.json);
   any other is trained with a warning, unchecked, and its packages name no base model.
+- A run from a file downloads its hub: base model (prepare_run's download): a GPU starts
+  with an empty cache. The reference must pin a commit, hub:<repo>@<40 hex digits>, since a
+  branch or a tag can move between the platform's check and the GPU, and the card and the
+  packages name the revision trained; anything else is refused. The licence is checked
+  before anything is fetched, then the files the model's kind needs are downloaded at that
+  commit (a complete copy already in the cache is used as it is) into the run's cache:
+  cache_dir, relative to the config, else the environment's Hugging Face cache
+  ($HF_HUB_CACHE, $HF_HOME/hub), which the pod agent points into the job's own folder. The
+  run's jobs read the model there, offline. A "phase" event (download) comes before it; a
+  model that cannot be downloaded is refused (exit 2). path: and run: bases are used as
+  they are. The studio's Train button downloads nothing: a base model there is one this
+  machine has already.
 - A dataset file is a path, or {"path", "name", "sha256"}: name, the file's own name, whose
   extension chooses the reader (when it was saved under another); sha256, its bytes', which
   must match. expected: what the dataset was when it was checked: its rows per split, and its
@@ -100,6 +113,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -146,6 +160,8 @@ CARD = "card"
 OUTPUTS = ("model", "noulxp", "exports", CARD)
 # The model's name in the card's examples, until publishing names it.
 CARD_REPO = "<namespace>/<name>"
+# A commit on the Hugging Face hub: what a downloaded base model pins (hub:<repo>@<commit>).
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # What card/finetune.json keeps of the training summary (training.json): never a path.
 TRAINING_KEYS = (
     "train_decisions",
@@ -203,12 +219,45 @@ def check_licence(ref, workspace):
         raise Refused(families.trainer_status(known)["reason"])
 
 
-def base_model(ref, workspace):
-    """(checkpoint folder, kind) of a base model the studio may fine-tune, or Refused."""
+def pinned(ref):
+    """(repo, commit) of a hub reference that pins a commit, hub:<repo>@<40 hex digits>; a
+    branch, a tag, a short hash or no revision at all is Refused."""
+    try:
+        repo, revision = engine.hub_parts(ref.removeprefix("hub:"))
+    except ValueError as error:
+        raise Refused(str(error)) from None
+    if not revision or not COMMIT.match(revision):
+        found = f"{revision!r} is not a full commit hash" if revision else "it names no revision"
+        raise Refused(
+            f"A downloaded base model is pinned to a commit, hub:{repo}@<commit> (40 hex "
+            f"digits): {found}"
+        )
+    return repo, revision
+
+
+def base_model(ref, workspace, download=False, cache_dir=None, emit=None):
+    """(checkpoint folder, kind) of a base model the studio may fine-tune, or Refused.
+
+    download (a run from a file, this module's docstring): a hub: model must pin a commit,
+    its licence is checked, and only then is it downloaded at that commit into cache_dir
+    (None: the environment's Hugging Face cache), emit announcing it. Otherwise only what is
+    on this machine is used."""
     if not isinstance(ref, str) or not ref:
         raise Refused("Choose a base model: hub:<repo>[@<revision>], path:<folder> or run:<id>")
+    fetch = download and ref.startswith("hub:")
+    if fetch:
+        repo, commit = pinned(ref)
+        check_licence(ref, workspace)  # before gigabytes are fetched for a run that is refused
+        if emit is not None:
+            emit(
+                "phase",
+                phase="download",
+                message=f"Downloading the base model, {repo} at {commit[:12]}",
+            )
     try:
-        model_dir = engine.resolve_model_ref(ref, workspace)
+        model_dir = engine.resolve_model_ref(
+            ref, workspace, allow_download=fetch, cache_dir=cache_dir if fetch else None
+        )
         kind = kinds.check(model_dir)
     except (FileNotFoundError, ValueError) as error:
         raise Refused(str(error)) from None
@@ -487,13 +536,25 @@ def run_id_for(spec, name, workspace, stamp=None):
     return run_id
 
 
-def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
+def prepare_run(
+    spec,
+    workspace=engine.WORKSPACE,
+    stamp=None,
+    base=None,
+    download=False,
+    cache_dir=None,
+    emit=None,
+):
     """Check one fine-tune and write its record, runs/<id>/run.json. Nothing is written for a
     run that is refused.
 
     spec is what the Train button sends ({"dataset", "base_model", "name", "hyperparameters",
     "baseline"}) or a run's config (this module's docstring). base: the folder a config's
     paths are relative to; only a run from a file may bring its own dataset files.
+    download: a cloud run's (run() passes it): a hub: base model must pin a commit, and is
+    downloaded at it into cache_dir (None: the environment's Hugging Face cache), emit (a
+    Printer) saying so first. The Train button's runs leave it off: a base model is one this
+    machine has.
 
     Returns {"run_id", "name", "kind", "job" (the train job's spec), "exports" (the export
     jobs' specs), "dataset" (its meta), "hyperparameters", "ignored", "warnings", "run"}.
@@ -505,7 +566,7 @@ def prepare_run(spec, workspace=engine.WORKSPACE, stamp=None, base=None):
         spec.get("dataset"), workspace, base, spec.get("limits")
     )
     ref = spec.get("base_model")
-    _, kind = base_model(ref, workspace)
+    _, kind = base_model(ref, workspace, download, cache_dir, emit)
     hp, overrides, ignored = hyperparameters(kind, spec.get("hyperparameters"), spec.get("bounds"))
     warnings = check_decisions(kind, questions, rows)
     if ignored:
@@ -644,16 +705,21 @@ class Headless:
 
     KILL_AFTER = 30
 
-    def __init__(self, workspace, emit):
+    def __init__(self, workspace, emit, cache_dir=None):
         self.workspace = workspace
         self.emit = emit
+        self.cache_dir = cache_dir
         self.process = None
         self.cancelled = False
 
     @property
     def env(self):
-        # The jobs' workspace is the run's, for the files they keep beside it too.
-        return {"LAYASTUDIO_HOME": str(self.workspace)}
+        # The jobs' workspace is the run's, for the files they keep beside it too; their
+        # Hugging Face cache, the run's, where its base model was downloaded.
+        env = {"LAYASTUDIO_HOME": str(self.workspace)}
+        if self.cache_dir is not None:
+            env["HF_HUB_CACHE"] = str(self.cache_dir)
+        return env
 
     def cancel(self, *_):
         self.cancelled = True
@@ -888,8 +954,19 @@ def _run(config, workspace, runner, emit, outcome, finish):
     ref = spec.get("base_model")
     if isinstance(ref, str) and ref.startswith("path:"):  # a folder beside the config, too
         spec["base_model"] = f"path:{(config.parent / Path(ref[5:]).expanduser()).resolve()}"
+    cache = spec.get("cache_dir")
+    if cache is not None and (not isinstance(cache, str) or not cache):
+        return refuse("cache_dir is a folder's path: the cache the base model is downloaded into")
+    runner.cache_dir = (config.parent / Path(cache).expanduser()).resolve() if cache else None
     try:
-        prepared = prepare_run(spec, workspace, base=config.parent)
+        prepared = prepare_run(
+            spec,
+            workspace,
+            base=config.parent,
+            download=True,
+            cache_dir=runner.cache_dir,
+            emit=emit,
+        )
     except Refused as error:
         return refuse(str(error))
     except KeyboardInterrupt:

@@ -264,13 +264,18 @@ def hub_parts(value):
     return repo, revision or None
 
 
-def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
+def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False, cache_dir=None):
     """'hub:<repo>[@<revision>]', 'run:<id>' or 'path:<dir>' -> local checkpoint directory.
 
     The folder must be a complete checkpoint of a kind the studio trains (kinds.py): Laya,
     Julia 1 or Decider. Hub repositories are fetched with the files their kind needs, at the
     revision the reference pins (a download by commit leaves no main branch in the cache,
-    so a pinned model is found only by its revision)."""
+    so a pinned model is found only by its revision).
+
+    Only the Hugging Face cache is read, unless allow_download (a cloud run's base model,
+    cloud.py): then a complete copy in the cache is used as it is, and otherwise the files the
+    kind needs are downloaded. cache_dir: the cache read and filled (default: the
+    environment's, $HF_HUB_CACHE or $HF_HOME/hub)."""
     from . import kinds
 
     kind, _, value = str(ref).partition(":")
@@ -282,21 +287,56 @@ def resolve_model_ref(ref, workspace=WORKSPACE, allow_download=False):
         from huggingface_hub import snapshot_download
 
         repo, revision = hub_parts(value)
-        try:
-            path = Path(
+
+        def snapshot(local):
+            return Path(
                 snapshot_download(
                     repo,
                     revision=revision,
                     allow_patterns=list(kinds.DOWNLOAD[kinds.of_repo(repo)]),
-                    local_files_only=not allow_download,
+                    cache_dir=cache_dir,
+                    local_files_only=local,
                 )
             )
+
+        try:
+            path = snapshot(local=True)
         except Exception as error:
-            raise FileNotFoundError(f"{value} is not downloaded yet. Download it first.") from error
+            if not allow_download:
+                raise FileNotFoundError(
+                    f"{value} is not downloaded yet. Download it first."
+                ) from error
+            path = None
+        if allow_download and not _complete(path):
+            try:
+                path = snapshot(local=False)
+            except Exception as error:
+                raise FileNotFoundError(
+                    f"{value} could not be downloaded: {_first_line(error)}"
+                ) from error
     else:
         raise ValueError(f"Unknown model reference {ref!r}")
     kinds.check(path)
     return path
+
+
+def _complete(path):
+    """Whether a folder is a complete checkpoint of a kind the studio trains (kinds.check)."""
+    from . import kinds
+
+    if path is None:
+        return False
+    try:
+        kinds.check(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _first_line(error, limit=300):
+    """An error's type and the first line of its message, for a message of our own."""
+    lines = str(error).strip().splitlines()
+    return f"{type(error).__name__}: {lines[0]}"[:limit] if lines else type(error).__name__
 
 
 def model_kind(ref, workspace=WORKSPACE):

@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 from common import QUESTIONS, make_rows
@@ -520,7 +521,7 @@ def test_a_run_file_that_cannot_train_ends_with_a_refusal(tmp_path):
     assert cloud.run(config, stream=out) == 2
     events = [json.loads(line) for line in out.getvalue().splitlines()]
     assert [e["type"] for e in events] == ["refused", "finished"]
-    assert "not downloaded yet" in events[0]["message"]
+    assert "pinned to a commit" in events[0]["message"]  # a run from a file downloads its base
     # The last event says why, as the result file does.
     assert events[1]["exit_code"] == 2 and events[1]["error"]["stage"] == "prepare"
     assert events[1]["error"]["message"] == events[0]["message"]
@@ -886,3 +887,218 @@ def test_a_cancelled_run_stops_its_job_and_says_so(tmp_path):
     result = json.loads((tmp_path / "run/result.json").read_text())
     assert result["state"] == "cancelled" and result["stages"][0]["state"] == "cancelled"
     assert "outputs" not in result
+
+
+# ----------------------------------------------------------------------------- base downloads
+
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+class FakeHub:
+    """huggingface_hub.snapshot_download with no network. A lookup in the cache
+    (local_files_only) is the real one; a download writes a checkpoint of the kind into the
+    cache as a download by commit leaves it (snapshots/<commit>), or raises `fail`. Every
+    call is kept."""
+
+    def __init__(self, real):
+        self.real, self.fail, self.files, self.calls = real, None, None, []
+
+    def __call__(self, repo, revision=None, allow_patterns=None, cache_dir=None, **options):
+        import huggingface_hub.constants
+
+        local = options.get("local_files_only", False)
+        self.calls.append(
+            {
+                "repo": repo,
+                "revision": revision,
+                "allow_patterns": allow_patterns,
+                "cache_dir": cache_dir,
+                "local": local,
+            }
+        )
+        if local:
+            return self.real(repo, revision=revision, cache_dir=cache_dir, **options)
+        if self.fail is not None:
+            raise self.fail
+        cache = Path(cache_dir or huggingface_hub.constants.HF_HUB_CACHE)
+        folder = cache / f"models--{repo.replace('/', '--')}" / "snapshots" / revision
+        folder.mkdir(parents=True, exist_ok=True)
+        fake_checkpoint(folder, kinds.LAYA)
+        for name in set(FILES[kinds.LAYA]) - set(self.files or FILES[kinds.LAYA]):
+            (folder / name).unlink()
+        return str(folder)
+
+    @property
+    def downloads(self):
+        return [call for call in self.calls if not call["local"]]
+
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    """The fake hub, with the environment's cache in tmp_path/hf: nothing reaches the network
+    or this machine's own cache."""
+    import huggingface_hub
+    import huggingface_hub.constants
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(tmp_path / "hf"))
+    fake = FakeHub(huggingface_hub.snapshot_download)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake)
+    return fake
+
+
+def recorded_envs(monkeypatch):
+    """The env each job of a run is started with (scripted jobs, as TRAINED plans)."""
+    scripted(monkeypatch, train=TRAINED)
+    start, envs = engine.start_job, []
+
+    def start_job(job_dir, kind, log, env=None):
+        envs.append(env)
+        return start(job_dir, kind, log, env)
+
+    monkeypatch.setattr(engine, "start_job", start_job)
+    return envs
+
+
+def test_a_run_file_downloads_its_base_at_the_pinned_commit_into_its_cache(
+    tmp_path, monkeypatch, hub
+):
+    """A GPU starts with an empty cache: the base model is downloaded at the commit the run
+    pins, the files its kind needs only, into the run's cache_dir, after a "phase" event; the
+    run's jobs read it there; a second run finds it there and asks the hub nothing."""
+    envs = recorded_envs(monkeypatch)
+    ref = f"hub:aac6fef/laya-mlx@{COMMIT}"
+    config, _ = write_run(tmp_path / "run", ref, cache_dir="cache")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 0
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert events[0] == {**events[0], "type": "phase", "phase": "download"}
+    assert "aac6fef/laya-mlx at 0123456789ab" in events[0]["message"]
+    assert events[1]["type"] == "prepared" and events[1]["base_model"] == ref
+    cache = (tmp_path / "run/cache").resolve()
+    assert hub.downloads == [
+        {
+            "repo": "aac6fef/laya-mlx",
+            "revision": COMMIT,
+            "allow_patterns": list(kinds.DOWNLOAD[kinds.LAYA]),
+            "cache_dir": cache,
+            "local": False,
+        }
+    ]
+    snapshot = cache / "models--aac6fef--laya-mlx" / "snapshots" / COMMIT
+    assert (snapshot / "model.safetensors").is_file()
+    assert envs and all(env["HF_HUB_CACHE"] == str(cache) for env in envs)
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "succeeded" and result["base_model"] == ref
+    run_dir = tmp_path / "run/ws/runs" / result["run_id"]
+    assert engine.read_json(run_dir / "run.json")["base_model"] == ref
+    assert json.loads((run_dir / "card/finetune.json").read_text())["base_model"] == {
+        "repo": "aac6fef/laya-mlx",
+        "revision": COMMIT,
+        "license": "apache-2.0",
+    }
+
+    hub.calls.clear()
+    again, _ = write_run(tmp_path / "again", ref, cache_dir="../run/cache")
+    assert cloud.run(again, stream=io.StringIO()) == 0
+    assert hub.calls and not hub.downloads
+
+
+def test_without_cache_dir_the_base_goes_to_the_environments_cache(tmp_path, monkeypatch, hub):
+    """The pod agent points $HF_HOME into the job's folder: with no cache_dir, that cache is
+    the run's, and the jobs, started with the run's own env, read it there."""
+    envs = recorded_envs(monkeypatch)
+    config, _ = write_run(tmp_path / "run", f"hub:aac6fef/laya-mlx@{COMMIT}")
+    assert cloud.run(config, stream=io.StringIO()) == 0
+    [download] = hub.downloads
+    assert download["cache_dir"] is None
+    assert (tmp_path / "hf/models--aac6fef--laya-mlx/snapshots" / COMMIT).is_dir()
+    assert envs and not any("HF_HUB_CACHE" in env for env in envs)
+
+
+@pytest.mark.parametrize(
+    "revision", ["", "@main", "@v1.0", "@0123456", f"@{COMMIT.upper()}", f"@{COMMIT}0"]
+)
+def test_a_run_file_refuses_a_base_not_pinned_to_a_commit(tmp_path, hub, revision):
+    """A branch or a tag can move between the platform's check and the GPU: a run from a file
+    trains a commit or nothing, and downloads nothing for a run it refuses."""
+    config, _ = write_run(tmp_path / "run", f"hub:aac6fef/laya-mlx{revision}")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 2
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["type"] for e in events] == ["refused", "finished"]
+    assert "pinned to a commit, hub:aac6fef/laya-mlx@<commit>" in events[0]["message"]
+    assert hub.calls == [] and not (tmp_path / "run/ws/runs").exists()
+
+
+def test_a_run_file_checks_the_licence_before_it_downloads(tmp_path, hub):
+    from layastudio import families
+
+    config, _ = write_run(tmp_path / "run", f"hub:together-ai/tev1@{COMMIT}")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 2
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["type"] for e in events] == ["refused", "finished"]
+    reason = families.trainer_status(families.find("together-ai/tev1"))["reason"]
+    assert events[0]["message"] == reason and hub.calls == []
+
+
+def test_a_base_that_cannot_be_downloaded_is_refused(tmp_path, hub):
+    """Exit 2, as for any run that never trained (the agent credits it), saying why in one
+    line; nothing is written for the run."""
+    hub.fail = OSError("Connection reset by peer\nwhile reading the response")
+    ref = f"aac6fef/laya-mlx@{COMMIT}"
+    config, _ = write_run(tmp_path / "run", f"hub:{ref}")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 2
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert [e["type"] for e in events] == ["phase", "refused", "finished"]
+    assert events[1]["message"] == (
+        f"{ref} could not be downloaded: OSError: Connection reset by peer"
+    )
+    assert len(hub.downloads) == 1 and not (tmp_path / "run/ws/runs").exists()
+    # A download that leaves no complete checkpoint is refused too.
+    hub.fail, hub.files = None, ("rl_agent_config.json",)
+    config, _ = write_run(tmp_path / "partial", f"hub:{ref}")
+    out = io.StringIO()
+    assert cloud.run(config, stream=out) == 2
+    events = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert events[1]["message"].startswith("Not a complete Laya checkpoint")
+
+
+def test_the_train_button_downloads_nothing(context, hub):
+    """The studio's own runs are unchanged: a hub base is one this machine has downloaded, at
+    any revision; prepare_run and the server only look in the cache."""
+    url, c = context
+    for ref in (f"hub:aac6fef/laya-mlx@{COMMIT}", "hub:aac6fef/laya-mlx"):
+        spec = {**c.spec(), "base_model": ref}
+        with pytest.raises(cloud.Refused, match="not downloaded yet"):
+            cloud.prepare_run(spec, c.workspace)
+        status, body = call(url, "/api/jobs", {"kind": "train", **spec})
+        assert status == 400 and "not downloaded yet" in body["error"]
+    assert hub.calls and not hub.downloads
+
+
+def test_a_run_file_trains_a_hub_base_from_its_own_cache(tmp_path):
+    """End to end, offline: the base model, pinned, is in the run's cache_dir; the run finds
+    it there without the hub, and its train job (a child process, HF_HUB_OFFLINE=1, whose
+    own $HF_HUB_CACHE points elsewhere) reads it from the same cache."""
+    import shutil
+
+    path, env = tiny_base("julia", tmp_path / "models")
+    snapshot = tmp_path / "run/cache/models--SupersonicLabs--Julia-1/snapshots" / COMMIT
+    shutil.copytree(path.removeprefix("path:"), snapshot)
+    ref = f"hub:SupersonicLabs/Julia-1@{COMMIT}"
+    config, _ = write_run(tmp_path / "run", ref, cache_dir="cache", keep_checkpoint=True)
+    elsewhere = {"HF_HUB_OFFLINE": "1", "HF_HUB_CACHE": str(tmp_path / "elsewhere")}
+    process = headless(config, {**env, **elsewhere})
+    stdout, stderr = process.communicate(timeout=900)
+    assert process.returncode == 0, stderr[-3000:]
+    events = [json.loads(line) for line in stdout.splitlines()]
+    assert [e["type"] for e in events[:2]] == ["phase", "prepared"]
+    assert events[1]["kind"] == "julia" and events[1]["base_model"] == ref
+    result = json.loads((tmp_path / "run/result.json").read_text())
+    assert result["state"] == "succeeded" and result["outputs"]["model"]
+    run_dir = tmp_path / "run/ws/runs" / result["run_id"]
+    record = json.loads((run_dir / "card/finetune.json").read_text())
+    assert record["base_model"]["repo"] == "SupersonicLabs/Julia-1"
+    assert record["base_model"]["revision"] == COMMIT
