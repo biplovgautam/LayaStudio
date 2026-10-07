@@ -172,9 +172,13 @@ count as `--threads` where the command takes one, and as `OMP_NUM_THREADS`, `MKL
 (Laya's own runtime takes no thread count; the exporter's informative graph-versus-torch comparison
 reads the last three). On a CUDA machine with 24 GiB free, the GGUF's float32 reference reads its
 rows on the GPU while the converter runs (`SYSTEMONE_STUDIO_SERIAL_VERIFY=1`, or
-`LAYASTUDIO_SERIAL_VERIFY=1`, keeps it after). Free memory is the container's limit less what the
-kernel cannot reclaim: the page cache, which the checkpoints just read and written fill, counts as
-free. Each gate's decision, the gate that made it and what it read are in the report
+`LAYASTUDIO_SERIAL_VERIFY=1`, keeps it after). Free memory is the smaller of the host's
+`MemAvailable` and what the container's memory limit leaves (cgroup v2 `memory.max` less
+`memory.current`, or cgroup v1 `memory.limit_in_bytes` less `memory.usage_in_bytes`), the usage's
+inactive page cache (`memory.stat`'s `inactive_file`, v1's `total_inactive_file`), which the
+checkpoints just read and written fill, counted as free. A container's `/proc/meminfo` is the
+host's: on RunPod's A40 hosts (cgroup v1) it said 447 to 497 GB while the pod's limit was 46.6 to
+57.7 GB. Each gate's decision, the gate that made it and what it read are in the report
 (`steps.conformance.overlap_gate`, and the GGUF's `timings.overlap_gate`). Every step's process,
 llama.cpp's converter and the GGUF's float32 reference included, ends with the job, even a job
 killed outright (it exits when the job's end closes its stdin, and on Linux on PR_SET_PDEATHSIG),

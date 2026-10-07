@@ -236,7 +236,7 @@ def machine(monkeypatch):
 
     def available_memory():
         seen["reads"] += 1
-        return {"free": seen["free"], "source": "cgroup" if seen["free"] is not None else None}
+        return {"free": seen["free"], "source": "cgroup2" if seen["free"] is not None else None}
 
     monkeypatch.setattr(runtime, "torch_device", torch_device)
     monkeypatch.setattr(telemetry, "available_memory", available_memory)
@@ -252,7 +252,7 @@ def test_the_gate_overlaps_on_cuda_with_the_memory_it_needs(machine):
         "device": "cuda",
         "free_bytes": 25 * GIB,
         "needed_bytes": 24 * GIB,
-        "memory": {"free": 25 * GIB, "source": "cgroup"},
+        "memory": {"free": 25 * GIB, "source": "cgroup2"},
     }
     assert gguf.overlap_verify() is True
     machine["free"] = 24 * GIB

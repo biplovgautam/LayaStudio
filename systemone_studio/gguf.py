@@ -542,9 +542,10 @@ def verify_gate():
     """Whether the float32 reference runs in a process of its own beside the converter, and
     what that was decided on: {"overlap", "reason", "device", "free_bytes", "needed_bytes",
     "memory"} (the last four when they were read). On a CUDA device (ROCm included) with
-    OVERLAP_MEMORY free (telemetry.available_memory: the page cache counts as free) it does
-    ("reason": "gates"); anywhere else the measurement runs in this process after the
-    conversion (today's order): "device" or "memory" says which gate kept it there.
+    OVERLAP_MEMORY free (telemetry.available_memory: the less of the host's and the
+    container's, the inactive page cache counted as free) it does ("reason": "gates");
+    anywhere else the measurement runs in this process after the conversion (today's
+    order): "device" or "memory" says which gate kept it there.
     SYSTEMONE_STUDIO_SERIAL_VERIFY=1 asks for that too; SYSTEMONE_STUDIO_PARALLEL_VERIFY=1 skips
     both gates (tests); either under its old name, LAYASTUDIO_..., as well, and "reason" names
     the variable that decided. The report records it (timings.overlap_gate); it certifies

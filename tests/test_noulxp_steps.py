@@ -468,7 +468,8 @@ def test_only_encoders_without_test_rows_record_beside_the_export(monkeypatch):
 
 def test_the_conformance_gate_says_what_decided_it(monkeypatch):
     """What the build records (steps.conformance.overlap_gate): the decision, the gate that
-    made it and what that gate read, memory included (available_memory: page cache free)."""
+    made it and what that gate read, memory included (available_memory: the less of the host's
+    and the container's)."""
     from systemone_studio import telemetry
 
     gate = noulxp_package.conformance_gate
@@ -477,7 +478,16 @@ def test_the_conformance_gate_says_what_decided_it(monkeypatch):
     assert gate("decider", 0, 8) == {"overlap": False, "reason": "kind"}
     assert gate("laya", 5, 8) == {"overlap": False, "reason": "test_rows"}
     assert gate("julia", 0, 2) == {"overlap": False, "reason": "threads", "threads": 2}
-    reading = {"free": 13 * 2**30, "source": "cgroup", "max": 51 * 2**30, "page_cache": 9}
+    reading = {
+        "free": 13 * 2**30,
+        "source": "cgroup2",
+        "host_free": 480 * 2**30,
+        "cgroup": "cgroup2",
+        "max": 51 * 2**30,
+        "current": 40 * 2**30,
+        "inactive_file": 2 * 2**30,
+        "container_free": 13 * 2**30,
+    }
     monkeypatch.setattr(telemetry, "available_memory", lambda: dict(reading))
     assert gate("laya", 0, 8) == {
         "overlap": True,
@@ -500,6 +510,44 @@ def test_the_conformance_gate_says_what_decided_it(monkeypatch):
             "overlap": flag == "1",
             "reason": f"LAYASTUDIO_PARALLEL_CONFORMANCE={flag}",
         }
+
+
+def test_both_gates_read_the_pods_memory_not_the_hosts(tmp_path, monkeypatch):
+    """A RunPod A40 pod (cgroup v1) whose host has 480 GB available, under the pod's 46.6 GB
+    limit with 30 GB charged (6 GB of it inactive page cache): 22.6 GB is free. The GGUF's
+    float32 reference (24 GiB) waits for the converter, and the recording (12 GiB) still runs
+    beside the export. Read from the host alone, both overlapped."""
+    import functools
+    from types import SimpleNamespace
+
+    from systemone_studio import runtime, telemetry
+
+    GB = 10**9
+    limit = int(46.6 * GB)
+    memory = tmp_path / "cgroup" / "memory"
+    memory.mkdir(parents=True)
+    (memory / "memory.limit_in_bytes").write_text(f"{limit}\n")
+    (memory / "memory.usage_in_bytes").write_text(f"{30 * GB}\n")
+    (memory / "memory.stat").write_text(f"inactive_file {GB}\ntotal_inactive_file {6 * GB}\n")
+    proc = tmp_path / "proc-self-cgroup"
+    proc.write_text("12:memory:/docker/7f3a9c\n4:cpu,cpuacct:/docker/7f3a9c\n")
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(f"MemTotal: {503 * GB // 1024} kB\nMemAvailable: {480 * GB // 1024} kB\n")
+    pod = functools.partial(telemetry.available_memory, tmp_path / "cgroup", proc, meminfo)
+    monkeypatch.setattr(telemetry, "available_memory", pod)
+    monkeypatch.setattr(runtime, "torch_device", lambda: SimpleNamespace(type="cuda"))
+    for name in ("SERIAL_VERIFY", "PARALLEL_VERIFY", "PARALLEL_CONFORMANCE"):
+        monkeypatch.delenv(f"LAYASTUDIO_{name}", raising=False)
+
+    verify = gguf.verify_gate()
+    assert verify["overlap"] is False and verify["reason"] == "memory"
+    assert verify["free_bytes"] == limit - 24 * GB < gguf.OVERLAP_MEMORY
+    assert verify["memory"]["source"] == "cgroup1"
+    assert verify["memory"]["host_free"] == 480 * GB > gguf.OVERLAP_MEMORY
+    conformance = noulxp_package.conformance_gate("laya", 0, 8)
+    assert conformance["overlap"] is True and conformance["reason"] == "gates"
+    assert conformance["free_bytes"] == limit - 24 * GB
+    assert conformance["memory"]["max"] == limit
 
 
 def test_progress_waits_for_the_conformance_phase():

@@ -9,6 +9,11 @@ import pytest
 
 from systemone_studio import engine, telemetry
 
+GB = 10**9
+# What cgroup v1 shows for "no limit": the largest page-aligned 63-bit number, with 4 KiB pages
+# and with 64 KiB pages.
+V1_NO_LIMIT = (9223372036854771712, 9223372036854710272)
+
 
 def cgroup2(root, quota_by_level, proc_path="/"):
     """A cgroup v2 tree: {relative folder: cpu.max text}; /proc/self/cgroup names proc_path."""
@@ -19,6 +24,48 @@ def cgroup2(root, quota_by_level, proc_path="/"):
     proc = root.parent / "proc-self-cgroup"
     proc.write_text(f"0::{proc_path}\n")
     return root, proc
+
+
+def cgroup1(root, levels, proc_path="/docker/7f3a9c"):
+    """A cgroup v1 memory hierarchy, {folder under root/memory: {file: text}}, and the
+    /proc/self/cgroup of a Docker container on a v1 host: no v2 line, and a memory cgroup named
+    by a path the container's own mount does not show (its root is the container's cgroup)."""
+    for folder, files in levels.items():
+        (root / "memory" / folder).mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (root / "memory" / folder / name).write_text(text)
+    proc = root.parent / "proc-self-cgroup"
+    proc.write_text(
+        f"12:memory:{proc_path}\n4:cpu,cpuacct:{proc_path}\n1:name=systemd:{proc_path}\n"
+    )
+    return root, proc
+
+
+def v1_files(limit, usage, total_inactive, inactive=0):
+    """One v1 cgroup's limit, usage and memory.stat, which has the cgroup's own lines (its
+    inactive_file leaves its children out) and the total_ ones, as the kernel writes both."""
+    return {
+        "memory.limit_in_bytes": f"{limit}\n",
+        "memory.usage_in_bytes": f"{usage}\n",
+        "memory.stat": (
+            f"cache {total_inactive}\nrss {usage - total_inactive}\nshmem 0\n"
+            f"inactive_anon 0\nactive_anon {usage - total_inactive}\n"
+            f"inactive_file {inactive}\nactive_file 0\nhierarchical_memory_limit {limit}\n"
+            f"total_cache {total_inactive}\ntotal_rss {usage - total_inactive}\n"
+            f"total_inactive_file {total_inactive}\ntotal_active_file 0\n"
+        ),
+    }
+
+
+def host_meminfo(tmp_path, available):
+    """A /proc/meminfo whose MemAvailable is `available` bytes: the host's, in a container too."""
+    path = tmp_path / "meminfo"
+    path.write_text(
+        f"MemTotal:       {503 * GB // 1024} kB\n"
+        f"MemFree:        {9 * GB // 1024} kB\n"
+        f"MemAvailable:   {available // 1024} kB\n"
+    )
+    return path
 
 
 def test_cgroup_readings_present_absent_and_malformed(tmp_path):
@@ -52,7 +99,7 @@ def test_cgroup_readings_present_absent_and_malformed(tmp_path):
     (root / "cpu.stat").write_text("usage_usec lots\nnr_throttled\n\x00")
     assert telemetry.cpu_stat(root, proc) is None
     (root / "memory.max").write_text("8192\n")
-    assert telemetry.free_memory(root, proc) == 8192 - 2048
+    assert telemetry.free_memory(root, proc, tmp_path / "no-meminfo") == 8192 - 2048
     meminfo = tmp_path / "meminfo"
     meminfo.write_text("MemTotal: 100 kB\nMemAvailable: 64 kB\n")
     (root / "memory.max").write_text("max\n")
@@ -60,39 +107,198 @@ def test_cgroup_readings_present_absent_and_malformed(tmp_path):
     assert telemetry.free_memory(tmp_path / "x", tmp_path / "y", tmp_path / "z") is None
 
 
-def test_free_memory_counts_the_page_cache_as_reclaimable(tmp_path):
-    """The A40 pod's limit (51.2 GB) with 30 GB charged, 12 GB of it page cache (1 GB of that
-    shmem): 32.2 GB free, not the 21.2 GB that memory.max minus memory.current says."""
-    GB = 10**9
+def test_under_cgroup_v1_free_memory_is_the_pods_not_the_hosts(tmp_path):
+    """A RunPod A40 pod (cgroup v1): the host's MemAvailable says 480 GB, the pod's limit is
+    46.6 GB. With 30 GB charged, 6 GB of it inactive page cache, 22.6 GB is free. The line read
+    is total_inactive_file (the pod's child cgroups too, as memory.usage_in_bytes counts them),
+    not the pod's own inactive_file."""
+    limit = int(46.6 * GB)
+    root, proc = cgroup1(tmp_path / "cg", {".": v1_files(limit, 30 * GB, 6 * GB, inactive=GB)})
+    host = host_meminfo(tmp_path, 480 * GB)
+    found = telemetry.available_memory(root, proc, host)
+    assert found == {
+        "free": limit - 24 * GB,
+        "source": "cgroup1",
+        "host_free": 480 * GB,
+        "cgroup": "cgroup1",
+        "max": limit,
+        "current": 30 * GB,
+        "inactive_file": 6 * GB,
+        "container_free": limit - 24 * GB,
+    }
+    assert telemetry.free_memory(root, proc, host) == limit - 24 * GB
+    # A hybrid host's /proc/self/cgroup has a v2 line too: no memory.max under it, so v1.
+    proc.write_text("12:memory:/docker/7f3a9c\n0::/docker/7f3a9c\n")
+    assert telemetry.available_memory(root, proc, host) == found
+
+
+def test_under_cgroup_v2_free_memory_is_the_containers_not_the_hosts(tmp_path):
+    """A 51.2 GB limit with 30 GB charged: 12 GB of it page cache, 5 GB of that inactive (1 GB
+    shmem). 26.2 GB is free: the active page cache and shmem count as used, as under v1."""
+    limit = int(51.2 * GB)
     root, proc = cgroup2(tmp_path / "cg", {".": "max 100000"})
-    (root / "memory.max").write_text(f"{int(51.2 * GB)}\n")
+    (root / "memory.max").write_text(f"{limit}\n")
     (root / "memory.current").write_text(f"{30 * GB}\n")
     (root / "memory.stat").write_text(
         f"anon {17 * GB}\nfile {12 * GB}\nkernel {GB}\nshmem {GB}\n"
         f"active_file {7 * GB}\ninactive_file {5 * GB}\n"
     )
-    found = telemetry.available_memory(root, proc)
-    assert found == {
-        "free": int(51.2 * GB) - 19 * GB,
-        "source": "cgroup",
-        "max": int(51.2 * GB),
+    host = host_meminfo(tmp_path, 480 * GB)
+    assert telemetry.available_memory(root, proc, host) == {
+        "free": limit - 25 * GB,
+        "source": "cgroup2",
+        "host_free": 480 * GB,
+        "cgroup": "cgroup2",
+        "max": limit,
         "current": 30 * GB,
-        "page_cache": 11 * GB,
+        "inactive_file": 5 * GB,
+        "container_free": limit - 25 * GB,
     }
-    assert telemetry.free_memory(root, proc) == found["free"]
-    (root / "memory.stat").write_text(f"anon {GB}\nfile {40 * GB}\nshmem 0\n")  # stale, racy
-    assert telemetry.available_memory(root, proc)["free"] == int(51.2 * GB)  # at most the limit
-    (root / "memory.stat").write_text("anon 1\n")  # no file line: memory.current, whole
-    assert telemetry.free_memory(root, proc) == int(51.2 * GB) - 30 * GB
-    (root / "memory.stat").unlink()
-    assert telemetry.available_memory(root, proc)["page_cache"] is None
-    assert telemetry.free_memory(root, proc) == int(51.2 * GB) - 30 * GB
-    (root / "memory.current").write_text(f"{60 * GB}\n")  # over the limit
-    assert telemetry.free_memory(root, proc) == 0
-    assert telemetry.available_memory(tmp_path / "x", tmp_path / "y", tmp_path / "z") == {
-        "free": None,
-        "source": None,
+
+
+# Where each version keeps one cgroup's limit, usage and inactive page cache, and the
+# /proc/self/cgroup line naming it: v2 at the root, v1 under memory/ with a path it cannot see.
+VERSIONS = {
+    "cgroup2": ("", "memory.max", "memory.current", "inactive_file", "0::/\n"),
+    "cgroup1": (
+        "memory",
+        "memory.limit_in_bytes",
+        "memory.usage_in_bytes",
+        "total_inactive_file",
+        "12:memory:/docker/7f3a9c\n",
+    ),
+}
+
+
+def one_cgroup(tmp_path, version, limit, usage):
+    """tmp_path/cg with one cgroup of `version` limited to `limit`, `usage` charged: its folder,
+    the /proc/self/cgroup naming it, and its usage file and memory.stat line's names."""
+    mount, limit_file, usage_file, key, line = VERSIONS[version]
+    folder = tmp_path / "cg" / mount
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / limit_file).write_text(f"{limit}\n")
+    (folder / usage_file).write_text(f"{usage}\n")
+    proc = tmp_path / "proc-self-cgroup"
+    proc.write_text(line)
+    return folder, proc, usage_file, key
+
+
+@pytest.mark.parametrize("version", ["cgroup2", "cgroup1"])
+def test_both_versions_count_the_inactive_page_cache_alike(tmp_path, version):
+    """The limit less the usage, the usage less its inactive page cache: at most the usage
+    (memory.stat is read apart from it), the usage whole without that line, never below 0."""
+    folder, proc, usage_file, key = one_cgroup(tmp_path, version, 50 * GB, 30 * GB)
+    host = host_meminfo(tmp_path, 480 * GB)
+
+    def read():
+        return telemetry.available_memory(tmp_path / "cg", proc, host)
+
+    (folder / "memory.stat").write_text(f"{key} {6 * GB}\n")
+    assert read()["free"] == 26 * GB and read()["source"] == version
+    assert read()["inactive_file"] == 6 * GB and read()["container_free"] == 26 * GB
+    (folder / "memory.stat").write_text(f"{key} {40 * GB}\n")  # stale: at most the usage
+    assert read()["free"] == 50 * GB and read()["inactive_file"] == 30 * GB
+    (folder / "memory.stat").write_text(f"anon {GB}\nactive_file {20 * GB}\n")  # no such line
+    assert read()["free"] == 20 * GB and read()["inactive_file"] is None
+    if version == "cgroup1":  # the cgroup's own line, its children left out: not read
+        (folder / "memory.stat").write_text(f"inactive_file {6 * GB}\n")
+        assert read()["free"] == 20 * GB
+    (folder / "memory.stat").unlink()
+    assert read()["free"] == 20 * GB and read()["inactive_file"] is None
+    (folder / usage_file).write_text(f"{60 * GB}\n")  # over the limit
+    assert read()["free"] == 0 and read()["source"] == version
+
+
+@pytest.mark.parametrize(
+    "version, limit",
+    [
+        ("cgroup2", "max"),
+        ("cgroup2", str(2**60)),
+        ("cgroup1", str(V1_NO_LIMIT[0])),
+        ("cgroup1", str(V1_NO_LIMIT[1])),
+        ("cgroup1", "-1"),
+        ("cgroup1", "lots"),
+    ],
+)
+def test_no_limit_or_an_absurd_one_leaves_the_hosts_memory(tmp_path, version, limit):
+    """No limit ("max"), cgroup v1's "no limit", anything of an exbibyte or more, or a value
+    that is not one: the host's MemAvailable alone."""
+    folder, proc, _, key = one_cgroup(tmp_path, version, limit, 300 * GB)
+    (folder / "memory.stat").write_text(f"{key} {100 * GB}\n")
+    host = host_meminfo(tmp_path, 480 * GB)
+    found = telemetry.available_memory(tmp_path / "cg", proc, host)
+    assert found == {"free": 480 * GB, "source": "meminfo", "host_free": 480 * GB}
+
+
+def test_a_limit_above_what_the_host_has_left_leaves_the_hosts_memory(tmp_path):
+    """A 500 GB limit on a host with 20 GB available: 20 GB is free (source "meminfo"), the
+    container's reading kept beside it; without /proc/meminfo, the container's alone."""
+    root, proc = cgroup1(tmp_path / "cg", {".": v1_files(500 * GB, 30 * GB, 6 * GB)})
+    found = telemetry.available_memory(root, proc, host_meminfo(tmp_path, 20 * GB))
+    assert found == {
+        "free": 20 * GB,
+        "source": "meminfo",
+        "host_free": 20 * GB,
+        "cgroup": "cgroup1",
+        "max": 500 * GB,
+        "current": 30 * GB,
+        "inactive_file": 6 * GB,
+        "container_free": 476 * GB,
     }
+    alone = telemetry.available_memory(root, proc, tmp_path / "no-meminfo")
+    assert alone["free"] == 476 * GB and alone["source"] == "cgroup1"
+    assert "host_free" not in alone
+
+
+def test_the_level_that_leaves_least_is_what_is_free(tmp_path):
+    """Seen whole (the host's tree, or a process in a sub-cgroup): every folder from the
+    process's own cgroup up to the root counts, the root's "no limit" does not, and the one
+    that leaves the least is what is free, under either version."""
+    host = host_meminfo(tmp_path, 480 * GB)
+    levels = {
+        ".": v1_files(V1_NO_LIMIT[0], 300 * GB, 100 * GB),
+        "docker": v1_files(V1_NO_LIMIT[0], 200 * GB, 50 * GB),
+        "docker/7f3a9c": v1_files(64 * GB, 40 * GB, 10 * GB),
+    }
+    root, proc = cgroup1(tmp_path / "v1", levels)
+    found = telemetry.available_memory(root, proc, host)
+    assert found["source"] == "cgroup1" and found["max"] == 64 * GB
+    assert found["free"] == 34 * GB
+    # v2: the container's own folder allows 64 GB; the pod above it, 40 GB with 35 GB charged.
+    root, proc = cgroup2(tmp_path / "v2", {"pod/ctr": "max 100000"}, "/pod/ctr")
+    for folder, limit, usage in (("pod", 40 * GB, 35 * GB), ("pod/ctr", 64 * GB, 30 * GB)):
+        (root / folder / "memory.max").write_text(f"{limit}\n")
+        (root / folder / "memory.current").write_text(f"{usage}\n")
+        (root / folder / "memory.stat").write_text(f"inactive_file {GB}\n")
+    found = telemetry.available_memory(root, proc, host)
+    assert found["source"] == "cgroup2" and found["max"] == 40 * GB
+    assert found["free"] == 6 * GB and found["current"] == 35 * GB
+    # A process in a sub-cgroup of its container (systemd's init.scope): no limit there, the
+    # container's root has it.
+    (root / "pod" / "memory.max").write_text("max\n")
+    (root / "pod/ctr" / "memory.max").write_text("max\n")
+    (root / "memory.max").write_text(f"{48 * GB}\n")
+    (root / "memory.current").write_text(f"{36 * GB}\n")
+    found = telemetry.available_memory(root, proc, host)
+    assert found["max"] == 48 * GB and found["free"] == 12 * GB
+
+
+def test_without_a_limit_the_hosts_memory_and_without_either_none(tmp_path):
+    host = host_meminfo(tmp_path, 480 * GB)
+    nothing, no_proc = tmp_path / "no-cgroup", tmp_path / "no-proc"
+    assert telemetry.available_memory(nothing, no_proc, host) == {
+        "free": 480 * GB,
+        "source": "meminfo",
+        "host_free": 480 * GB,
+    }
+    assert telemetry.free_memory(nothing, no_proc, host) == 480 * GB
+    unknown = {"free": None, "source": None}  # macOS
+    assert telemetry.available_memory(nothing, no_proc, tmp_path / "no-meminfo") == unknown
+    host.write_text("MemTotal: 1 kB\nMemAvailable: lots kB\n")
+    assert telemetry.available_memory(nothing, no_proc, host) == unknown
+    host.write_text("MemAvailable:\n")
+    assert telemetry.available_memory(nothing, no_proc, host) == unknown
+    assert telemetry.free_memory(nothing, no_proc, host) is None
 
 
 def test_the_machine_block_reads_cpuinfo(tmp_path):

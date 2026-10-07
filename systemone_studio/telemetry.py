@@ -1,10 +1,10 @@
 """What a NoulXP build's steps cost here: seconds, CPU, throttling, memory, threads.
 
 Read-only and best-effort. Every reading is a file the kernel already keeps (cgroup cpu.stat,
-memory.peak, memory.stat, /proc/<pid>/status, /proc/cpuinfo) or getrusage; a reading that is
-not there or cannot be read is null, and none can raise into the step it measures. Nothing
-here writes a cgroup file, starts or reaps a step's process, or changes a step's arguments or
-environment.
+memory.peak, memory.stat, /proc/<pid>/status, /proc/cpuinfo, /proc/meminfo) or getrusage; a
+reading that is not there or cannot be read is null, and none can raise into the step it
+measures. Nothing here writes a cgroup file, starts or reaps a step's process, or changes a
+step's arguments or environment.
 
 The numbers go to runs/<id>/noulxp-report.json ("steps", "machine") and a GGUF export's
 exports/gguf-<precision>.json ("timings"), never into the package or a result event: they
@@ -97,37 +97,115 @@ def memory(root=CGROUP, proc=PROC_CGROUP):
         return {"current": None, "peak": None, "max": None, "oom_kill": None}
 
 
-def available_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):
-    """Bytes this job can still use, and what they were read from: {"free", "source"} and,
-    under a cgroup limit, the readings ("max", "current", "page_cache").
+# A memory limit this large is none: cgroup v1 writes "no limit" as the largest page-aligned
+# 63-bit number (9223372036854771712 with 4 KiB pages), and no machine has an exbibyte.
+UNLIMITED_MEMORY = 2**60
+# Each cgroup version's memory files: the limit, the usage (which counts the page cache) and
+# memory.stat's line for the inactive page cache, which reclaim drops before the cgroup kills
+# anything. v1's usage counts the cgroup's children, so its total_ line does too; v2's
+# memory.current and memory.stat always do.
+CGROUP_MEMORY = {
+    "cgroup2": ("memory.max", "memory.current", "inactive_file"),
+    "cgroup1": ("memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file"),
+}
 
-    Under a limit ("cgroup"): memory.max minus what the kernel cannot reclaim, memory.current
-    less the page cache (memory.stat's file less its shmem, which tmpfs and shared memory hold
-    and no reclaim drops). memory.current counts the page cache too, which reclaim drops
-    before the cgroup would kill anything, so after a few GB of checkpoints have been read or
-    written it says far less is free than is. This is the cgroup's counterpart of
-    MemAvailable; without memory.stat, memory.current is used whole (the smaller figure).
-    Without a limit ("meminfo"): the kernel's MemAvailable. {"free": None, "source": None}
-    where neither is known (macOS). Never raises."""
+
+def _levels(base, path):
+    """base/<path> (as _inside reads it), then each folder above it, base last."""
+    base = Path(base)
+    folder = _inside(base, path)
+    levels = [folder]
+    while folder != base and base in folder.parents:
+        folder = folder.parent
+        levels.append(folder)
+    return levels
+
+
+def _left(folder, limit_file, usage_file, inactive_key):
+    """What one cgroup's memory limit leaves: {"max", "current", "inactive_file", "free"};
+    None where it sets none (no file, "max", UNLIMITED_MEMORY or more) or a file is unreadable.
+    free is the limit less the usage, the usage less its inactive page cache (at most the
+    usage: memory.stat and the usage are not read at one instant); the usage counts whole
+    where memory.stat has no such line (the smaller figure)."""
+    limit = _number(_read(folder / limit_file))
+    if not isinstance(limit, int) or not 0 <= limit < UNLIMITED_MEMORY:
+        return None
+    current = _number(_read(folder / usage_file))
+    if not isinstance(current, int) or current < 0:
+        return None
+    stat = _keyed(_read(folder / "memory.stat"))
+    inactive = min(current, max(0, stat[inactive_key])) if inactive_key in stat else None
+    free = max(0, limit - (current - (inactive or 0)))
+    return {"max": limit, "current": current, "inactive_file": inactive, "free": free}
+
+
+def container_memory(root=CGROUP, proc=PROC_CGROUP):
+    """What the container's memory limit leaves this job: {"cgroup", "max", "current",
+    "inactive_file", "free"} (see _left), or None where no cgroup limits its memory.
+
+    cgroup v2 (root/<path>/memory.max) where it has a limit, else cgroup v1
+    (root/memory/<path>/memory.limit_in_bytes), path being this process's own cgroup in
+    /proc/self/cgroup: of the folders from there up to the root, the one that leaves the least.
+    A container's root is its own cgroup, and a v1 container's /proc/self/cgroup names a
+    folder it cannot see (/docker/<id>): the mount's root holds its limit. The inactive page
+    cache counts as free under both versions, as docker stats and the kubelet count it."""
+    paths = _cgroups(proc)
+    for version, base, path in (
+        ("cgroup2", Path(root), paths.get("", "/")),
+        ("cgroup1", Path(root) / "memory", paths.get("memory", "/")),
+    ):
+        files = CGROUP_MEMORY[version]
+        found = [left for left in (_left(f, *files) for f in _levels(base, path)) if left]
+        if found:
+            return {"cgroup": version, **min(found, key=lambda left: left["free"])}
+    return None
+
+
+def host_memory(meminfo="/proc/meminfo"):
+    """The kernel's MemAvailable, in bytes: the host's, whatever limit a container has (447 to
+    497 GB on RunPod's A40 hosts, under a pod's 46.6 to 57.7 GB). None where it is not read."""
+    for line in (_read(meminfo) or "").splitlines():
+        if line.startswith("MemAvailable:"):
+            try:
+                return int(line.split()[1]) * 1024
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def available_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):
+    """Bytes this job can still use: the smaller of the host's available memory and what the
+    container's memory limit leaves, each where it is known.
+
+    {"free", "source"}: source names the reading free is, "cgroup2" or "cgroup1" (the
+    container's, container_memory()) or "meminfo" (the host's MemAvailable, host_memory()).
+    The readings are kept beside it: "host_free" where MemAvailable was read, and under a
+    limit "cgroup" (its version), "max", "current", "inactive_file" and "container_free".
+    Neither alone is enough: a container's /proc/meminfo is the host's, and a limit can be
+    above what the host has left. {"free": None, "source": None} where neither is known
+    (macOS). Never raises."""
     found = {"free": None, "source": None}
     try:
-        mem = memory(root, proc)
-        limit, current = mem["max"], mem["current"]
-        if isinstance(limit, int) and isinstance(current, int):
-            stat = _keyed(_read(cgroup_dir(root, proc) / "memory.stat"))
-            cache = None
-            if "file" in stat:
-                cache = min(current, max(0, stat["file"] - stat.get("shmem", 0)))
-            found.update(source="cgroup", max=limit, current=current, page_cache=cache)
-            found["free"] = max(0, limit - (current - (cache or 0)))
-            return found
-        for line in (_read(meminfo) or "").splitlines():
-            if line.startswith("MemAvailable:"):
-                found.update(free=int(line.split()[1]) * 1024, source="meminfo")
-                return found
+        host = host_memory(meminfo)
     except READ_ERRORS:
-        pass
-    return {"free": None, "source": None}
+        host = None
+    try:
+        container = container_memory(root, proc)
+    except READ_ERRORS:
+        container = None
+    if host is not None:
+        found.update(free=host, source="meminfo", host_free=host)
+    if container is not None:
+        found.update(
+            cgroup=container["cgroup"],
+            max=container["max"],
+            current=container["current"],
+            inactive_file=container["inactive_file"],
+            container_free=container["free"],
+        )
+        if host is None or container["free"] <= host:
+            found.update(free=container["free"], source=container["cgroup"])
+    return found
 
 
 def free_memory(root=CGROUP, proc=PROC_CGROUP, meminfo="/proc/meminfo"):

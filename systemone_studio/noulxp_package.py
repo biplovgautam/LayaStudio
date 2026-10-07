@@ -736,12 +736,12 @@ def conformance_gate(kind, test_rows, threads, free=None):
     that was decided on: {"overlap", "reason"} and, once read, "threads", "free_bytes",
     "needed_bytes" and "memory". Laya and Julia without test rows (the requests are NoulXP's
     own and need nothing from the export), with 3 threads or more and CONFORMANCE_MEMORY free
-    (telemetry.available_memory: the page cache counts as free; `free` given, it is used
-    instead). Anything else records after the export, as always: "kind", "test_rows",
-    "threads" or "memory" names the gate that decided. SYSTEMONE_STUDIO_PARALLEL_CONFORMANCE=0
-    (or LAYASTUDIO_PARALLEL_CONFORMANCE=0) turns it off, =1 skips the thread and memory gates
-    (tests), and "reason" names the variable. The build records it
-    (steps.conformance.overlap_gate); it certifies nothing."""
+    (telemetry.available_memory: the less of the host's and the container's, the inactive page
+    cache counted as free; `free` given, it is used instead). Anything else records after the
+    export, as always: "kind", "test_rows", "threads" or "memory" names the gate that
+    decided. SYSTEMONE_STUDIO_PARALLEL_CONFORMANCE=0 (or LAYASTUDIO_PARALLEL_CONFORMANCE=0)
+    turns it off, =1 skips the thread and memory gates (tests), and "reason" names the
+    variable. The build records it (steps.conformance.overlap_gate); it certifies nothing."""
     if kind not in ("laya", "julia"):
         return {"overlap": False, "reason": "kind"}
     if test_rows != 0:
